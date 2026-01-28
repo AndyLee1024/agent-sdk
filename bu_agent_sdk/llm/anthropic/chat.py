@@ -1,7 +1,7 @@
 import logging
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -58,6 +58,9 @@ class ChatAnthropic(BaseChatModel):
     http_client: httpx.AsyncClient | None = None
     prompt_cache_beta: str | None = "prompt-caching-2024-07-31"
     max_cached_tool_definitions: int = 3
+
+    # Internal client cache
+    _client: AsyncAnthropic | None = field(default=None, repr=False, compare=False)
 
     # Static
     @property
@@ -118,13 +121,16 @@ class ChatAnthropic(BaseChatModel):
 
     def get_client(self) -> AsyncAnthropic:
         """
-        Returns an AsyncAnthropic client.
+        Returns an AsyncAnthropic client (cached).
 
         Returns:
                 AsyncAnthropic: An instance of the AsyncAnthropic client.
         """
+        if self._client is not None:
+            return self._client
         client_params = self._get_client_params()
-        return AsyncAnthropic(**client_params)
+        self._client = AsyncAnthropic(**client_params)
+        return self._client
 
     @property
     def name(self) -> str:

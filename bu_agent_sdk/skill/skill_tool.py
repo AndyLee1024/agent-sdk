@@ -1,4 +1,10 @@
-"""Skill Meta-Tool 实现"""
+"""Skill Meta-Tool 实现
+
+设计决策：
+- Tool description 只包含简洁的功能说明
+- Skills 列表和详细使用规则放在 system_prompt 中（通过 generate_skill_prompt）
+- 这样做的好处是避免每次 API 调用都发送大量重复的使用指南
+"""
 
 import logging
 
@@ -9,70 +15,23 @@ logger = logging.getLogger(__name__)
 
 
 def create_skill_tool(skills: list[SkillDefinition]) -> Tool:
-    """创建 Skill meta-tool
+    """创建 Skill meta-tool（简洁版）
 
-    这个工具的描述会动态包含所有可用 skills 的列表
+    Tool description 只包含简洁的功能说明。
+    Skills 列表和详细使用规则通过 generate_skill_prompt() 注入到 system_prompt。
+
+    Args:
+        skills: Skill 定义列表（用于日志记录，实际列表在 system_prompt 中）
+
+    Returns:
+        Skill 工具实例
     """
-    # Token budget 限制（参考 Claude Code 默认 15000 字符）
-    TOKEN_BUDGET = 15000
-
-    # 过滤掉 disable_model_invocation=True 的 skills
+    # 过滤掉 disable_model_invocation=True 的 skills（仅用于日志）
     active_skills = [s for s in skills if not s.disable_model_invocation]
+    logger.debug(f"Creating Skill tool with {len(active_skills)} active skill(s)")
 
-    # 格式化 skill 列表
-    skill_list = []
-    for skill in active_skills:
-        skill_list.append(f'  - "{skill.name}": {skill.description}')
-
-    skills_str = "\n".join(skill_list)
-
-    # 构建工具描述
-    description = f"""Execute a skill within the main conversation.
-
-Skills provide specialized capabilities and domain knowledge.
-
-How to use skills:
-- Invoke skills using this tool with the skill name only (no arguments)
-- When you invoke a skill, the skill's prompt will expand and provide detailed instructions
-- Example: skill_name="explain-code"
-- You can activate multiple different skills in the same conversation
-
-Important:
-- Only use skills listed below
-- DO NOT activate the same skill twice (prevents infinite recursion)
-- You CAN activate multiple different skills (e.g., first "skill-a", then "skill-b")
-- Skill modifications (tool permissions, model) will remain active after invocation
-
-Available skills:
-{skills_str}
-"""
-
-    # Token budget 检查
-    if len(description) > TOKEN_BUDGET:
-        logger.warning(f"Skill tool description exceeds token budget ({len(description)} > {TOKEN_BUDGET})")
-        # 截断：只保留前 N 个 skills
-        max_skills = max(1, len(active_skills) * TOKEN_BUDGET // len(description))
-        active_skills = active_skills[:max_skills]
-        # 重新生成 skill_list
-        skill_list = [f'  - "{skill.name}": {skill.description}' for skill in active_skills]
-        skills_str = "\n".join(skill_list)
-        description = f"""Execute a skill within the main conversation.
-
-Skills provide specialized capabilities and domain knowledge.
-
-How to use skills:
-- Invoke skills using this tool with the skill name only (no arguments)
-- When you invoke a skill, the skill's prompt will expand and provide detailed instructions
-- You can activate multiple different skills in the same conversation
-
-Important:
-- Only use skills listed below
-- DO NOT activate the same skill twice (prevents infinite recursion)
-- You CAN activate multiple different skills
-
-Available skills (truncated):
-{skills_str}
-"""
+    # 简洁的工具描述（详细使用规则在 system_prompt 中）
+    description = "Execute a skill by name. Invoke with skill_name to load its full instructions. See system prompt for available skills and usage rules."
 
     @tool(description, name="Skill")
     async def Skill(skill_name: str) -> str:

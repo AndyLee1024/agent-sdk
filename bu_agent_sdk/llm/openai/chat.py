@@ -44,7 +44,7 @@ class ChatOpenAI(BaseChatModel):
 
         if response.has_tool_calls:
             for tc in response.tool_calls:
-                print(f'Call {tc.function.name} with {tc.function.arguments}')
+                logger.info(f'Call {tc.function.name} with {tc.function.arguments}')
         ```
     """
 
@@ -104,6 +104,9 @@ class ChatOpenAI(BaseChatModel):
         ]
     )
 
+    # Internal client cache
+    _client: AsyncOpenAI | None = field(default=None, repr=False, compare=False)
+
     # Static
     @property
     def provider(self) -> str:
@@ -124,7 +127,6 @@ class ChatOpenAI(BaseChatModel):
             "default_query": self.default_query,
             "_strict_response_validation": self._strict_response_validation,
         }
-        print("base_params:", base_params)
 
         # Create client_params dict with non-None values
         client_params = {k: v for k, v in base_params.items() if v is not None}
@@ -137,13 +139,16 @@ class ChatOpenAI(BaseChatModel):
 
     def get_client(self) -> AsyncOpenAI:
         """
-        Returns an AsyncOpenAI client.
+        Returns an AsyncOpenAI client (cached).
 
         Returns:
                 AsyncOpenAI: An instance of the AsyncOpenAI client.
         """
+        if self._client is not None:
+            return self._client
         client_params = self._get_client_params()
-        return AsyncOpenAI(**client_params)
+        self._client = AsyncOpenAI(**client_params)
+        return self._client
 
     @property
     def name(self) -> str:

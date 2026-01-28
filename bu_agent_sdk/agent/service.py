@@ -764,6 +764,12 @@ Keep the summary brief but informative."""
                 try:
                     tool_result = await self._execute_tool_call(tool_call)
                     self._messages.append(tool_result)
+
+                    # 检查是否有待注入的 Skill 消息（必须在 ToolMessage 之后注入）
+                    if hasattr(self, '_pending_skill_messages') and self._pending_skill_messages:
+                        for msg in self._pending_skill_messages:
+                            self._messages.append(msg)
+                        self._pending_skill_messages = []
                 except TaskComplete as e:
                     self._messages.append(
                         ToolMessage(
@@ -907,6 +913,12 @@ Keep the summary brief but informative."""
                     tool_result = await self._execute_tool_call(tool_call)
                     self._messages.append(tool_result)
 
+                    # 检查是否有待注入的 Skill 消息（必须在 ToolMessage 之后注入）
+                    if hasattr(self, '_pending_skill_messages') and self._pending_skill_messages:
+                        for msg in self._pending_skill_messages:
+                            self._messages.append(msg)
+                        self._pending_skill_messages = []
+
                     # Extract screenshot if present (for browser tools)
                     screenshot_base64 = self._extract_screenshot(tool_result)
 
@@ -999,8 +1011,13 @@ Keep the summary brief but informative."""
         - 每个 Agent 可以激活多个不同的 Skills
         - 防止同一 Skill 被重复激活（避免无限递归）
         - 允许激活不同的 Skills（如先激活 Skill A，再激活 Skill B）
+
+        架构模式（参考 Subagent）：
+        - Skills 列表和使用规则 → system_prompt（通过 generate_skill_prompt）
+        - Tool description → 只包含简洁的功能说明
         """
         from bu_agent_sdk.skill import create_skill_tool, discover_skills
+        from bu_agent_sdk.skill.prompts import generate_skill_prompt
 
         # 自动发现 skills
         discovered = discover_skills(project_root=self.project_root)
@@ -1019,7 +1036,15 @@ Keep the summary brief but informative."""
         if not self.skills:
             return
 
-        # 创建 Skill 工具
+        # 生成 Skill 策略提示并注入 system_prompt
+        skill_prompt = generate_skill_prompt(self.skills)
+        if skill_prompt:  # 只有当有 active skills 时才注入
+            if self.system_prompt:
+                self.system_prompt = f"{self.system_prompt}\n\n{skill_prompt}"
+            else:
+                self.system_prompt = skill_prompt
+
+        # 创建 Skill 工具（现在只包含简洁描述）
         skill_tool = create_skill_tool(self.skills)
         self.tools.append(skill_tool)
         self._tool_map[skill_tool.name] = skill_tool
@@ -1030,10 +1055,11 @@ Keep the summary brief but informative."""
         """执行 Skill 调用（特殊处理）
 
         Skill 调用会：
-        1. 注入元数据消息（用户可见）
-        2. 注入 prompt 消息（用户不可见，is_meta=True）
-        3. 应用 Skill 的 execution context 修改（持久化）
-        4. 防止重复调用保护
+        1. 返回 ToolMessage（必须先添加到 _messages 以满足 OpenAI API 要求）
+        2. 在 ToolMessage 中标记待注入的消息（通过 _pending_skill_messages）
+        3. 调用方会在添加 ToolMessage 后检查并注入这些消息
+        4. 应用 Skill 的 execution context 修改（持久化）
+        5. 防止重复调用保护
         """
         args = json.loads(tool_call.function.arguments)
         skill_name = args.get("skill_name")
@@ -1057,21 +1083,23 @@ Keep the summary brief but informative."""
                 is_error=True,
             )
 
-        # 1. 注入元数据消息（用户可见）
-        metadata = f'<skill-message>The "{skill_name}" skill is loading</skill-message>\n<skill-name>{skill_name}</skill-name>'
-        self._messages.append(UserMessage(content=metadata, is_meta=False))
-
-        # 2. 注入 prompt 消息（用户不可见）
-        full_prompt = skill_def.get_prompt()
-        self._messages.append(UserMessage(content=full_prompt, is_meta=True))
-
-        # 3. 应用 Skill 的 execution context 修改（持久化）
+        # 应用 Skill 的 execution context 修改（持久化）
         from bu_agent_sdk.skill.context import apply_skill_context
 
         apply_skill_context(self, skill_def)
         self._active_skill_names.add(skill_name)
 
-        # 4. 返回 ToolMessage
+        # 准备待注入的消息（将在 ToolMessage 添加到 _messages 后注入）
+        metadata = f'<skill-message>The "{skill_name}" skill is loading</skill-message>\n<skill-name>{skill_name}</skill-name>'
+        full_prompt = skill_def.get_prompt()
+        
+        # 存储待注入的消息到实例变量（调用方会检查并注入）
+        self._pending_skill_messages = [
+            UserMessage(content=metadata, is_meta=False),
+            UserMessage(content=full_prompt, is_meta=True),
+        ]
+
+        # 返回 ToolMessage（调用方会先添加这个，再注入上面的消息）
         return ToolMessage(
             tool_call_id=tool_call.id,
             tool_name="Skill",
@@ -1083,21 +1111,45 @@ Keep the summary brief but informative."""
         """重建 Skill 工具（用于 Subagent Skills 筛选后更新工具描述）
 
         这个方法在 Subagent 创建后，如果筛选了 Skills，需要调用以重新生成 Skill 工具。
+
+        重要：同时更新 system_prompt 和已添加到 messages 的 SystemMessage，保持一致性。
         """
-        if not self.skills:
-            # 移除 Skill 工具（如果存在）
-            self.tools = [t for t in self.tools if t.name != "Skill"]
-            self._tool_map.pop("Skill", None)
-            return
+        from bu_agent_sdk.skill import create_skill_tool, generate_skill_prompt
 
-        from bu_agent_sdk.skill import create_skill_tool
-
-        # 移除旧的 Skill 工具
+        # 1. 移除旧的 Skill 工具
         self.tools = [t for t in self.tools if t.name != "Skill"]
+        self._tool_map.pop("Skill", None)
 
-        # 创建新的 Skill 工具
-        skill_tool = create_skill_tool(self.skills)
-        self.tools.append(skill_tool)
-        self._tool_map["Skill"] = skill_tool
+        # 2. 移除 system_prompt 中的旧 Skill 策略提示
+        # 使用标记来精确定位（避免误删其他部分）
+        skill_prompt_marker = "\n\n## Skill 工具使用指南"
+        if self.system_prompt and skill_prompt_marker in self.system_prompt:
+            # 找到 Skill 策略提示的开始位置，移除它及其后续内容
+            idx = self.system_prompt.find(skill_prompt_marker)
+            if idx > 0:
+                self.system_prompt = self.system_prompt[:idx]
 
-        logger.debug(f"Rebuilt Skill tool with {len(self.skills)} skill(s)")
+        # 3. 如果还有 skills，重新生成
+        if self.skills:
+            # 生成新的 Skill 策略提示
+            skill_prompt = generate_skill_prompt(self.skills)
+            if skill_prompt:
+                if self.system_prompt:
+                    self.system_prompt = f"{self.system_prompt}\n\n{skill_prompt}"
+                else:
+                    self.system_prompt = skill_prompt
+
+            # 创建新的 Skill 工具
+            skill_tool = create_skill_tool(self.skills)
+            self.tools.append(skill_tool)
+            self._tool_map["Skill"] = skill_tool
+
+            logger.debug(f"Rebuilt Skill tool with {len(self.skills)} skill(s)")
+        else:
+            logger.debug("Removed Skill tool (no skills remaining)")
+
+        # 4. 关键：同步更新已添加到 messages 的 SystemMessage
+        # 如果第一条消息是 SystemMessage，需要更新它的内容
+        if self._messages and isinstance(self._messages[0], SystemMessage):
+            self._messages[0].content = self.system_prompt
+            logger.debug("Updated SystemMessage in messages to reflect skill changes")

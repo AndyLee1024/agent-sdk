@@ -31,13 +31,10 @@ def create_task_tool(
     Returns:
         Task 工具实例
     """
-    # 构建 subagent 名称列表供 LLM 选择
+    # 构建 subagent 名称映射
     agent_map = {a.name: a for a in agents}
-    available_agents = ", ".join(agent_map.keys())
 
-    @tool(
-        f"Launch a subagent to handle a specific task. Available subagents: {available_agents}"
-    )
+    @tool("Launch a subagent to handle a specific task.")
     async def Task(
         subagent_type: str,
         prompt: str,
@@ -53,7 +50,8 @@ def create_task_tool(
         from bu_agent_sdk.agent.service import Agent
 
         if subagent_type not in agent_map:
-            return f"Error: Unknown subagent '{subagent_type}'. Available: {available_agents}"
+            available = ", ".join(agent_map.keys())
+            return f"Error: Unknown subagent '{subagent_type}'. Available: {available}"
 
         agent_def = agent_map[subagent_type]
 
@@ -140,9 +138,9 @@ def resolve_model(
 
     # 根据 model 名称创建对应的 LLM
     model_map = {
-        "sonnet": lambda: ChatAnthropic(model="claude-sonnet-4-20250514"),
-        "opus": lambda: ChatAnthropic(model="claude-opus-4-20250514"),
-        "haiku": lambda: ChatAnthropic(model="claude-haiku-3-5-20241022"),
+        "sonnet": lambda: ChatAnthropic(model="claude-sonnet-4-5"),
+        "opus": lambda: ChatAnthropic(model="claude-opus-4-5"),
+        "haiku": lambda: ChatAnthropic(model="claude-haiku-4-5"),
     }
 
     if model in model_map:

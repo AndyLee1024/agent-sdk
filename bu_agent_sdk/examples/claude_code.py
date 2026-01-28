@@ -10,8 +10,10 @@ Run with:
 """
 
 import asyncio
+import logging
 import re
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,7 +22,28 @@ from typing import Annotated
 from bu_agent_sdk import Agent
 from bu_agent_sdk.agent import FinalResponseEvent, ToolCallEvent, ToolResultEvent
 from bu_agent_sdk.llm import ChatOpenAI
+from bu_agent_sdk.llm import ChatAnthropic
 from bu_agent_sdk.tools import Depends, tool
+
+# =============================================================================
+# Logging Configuration - 详细日志用于诊断
+# =============================================================================
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s.%(msecs)03d [%(levelname)s] %(name)s - %(message)s',
+    datefmt='%H:%M:%S',
+    stream=sys.stdout
+)
+
+# 为关键模块设置详细日志
+logging.getLogger("bu_agent_sdk.agent").setLevel(logging.DEBUG)
+logging.getLogger("bu_agent_sdk.llm").setLevel(logging.DEBUG)
+logging.getLogger("bu_agent_sdk.skill").setLevel(logging.DEBUG)
+logging.getLogger("bu_agent_sdk.llm.anthropic").setLevel(logging.DEBUG)
+logging.getLogger("bu_agent_sdk.llm.openai").setLevel(logging.DEBUG)
+
+logger = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -306,34 +329,50 @@ ALL_TOOLS = [bash, read, write, edit, glob_search, grep, todo_read, todo_write, 
 async def main():
     # Create a sandbox context
     ctx = SandboxContext.create()
-    print(f"Sandbox created at: {ctx.root_dir}")
+    logger.info(f"🏗️  Sandbox created at: {ctx.root_dir}")
 
     # Create some test files in the sandbox
     (ctx.root_dir / "hello.py").write_text('print("Hello, World!")\n')
     (ctx.root_dir / "utils.py").write_text("def add(a, b):\n    return a + b\n")
+    logger.info(f"✅ Test files created")
 
     # Create agent with dependency override for the sandbox context
+    logger.info(f"🤖 Creating agent...")
     agent = Agent(
-        llm=ChatOpenAI(model="gpt-5.2"),
+        llm=ChatAnthropic(model="gemini-3-flash", base_url="http://127.0.0.1:8045", api_key="sk-b3e2affa66e5466c9952c8e768e7ba8f"),
         tools=ALL_TOOLS,
         system_prompt=f"You are a coding assistant. Working directory: {ctx.working_dir}",
         dependency_overrides={get_sandbox_context: lambda: ctx},
+        require_done_tool=True
     )
+    logger.info(f"✅ Agent created with {len(agent.tools)} tools")
 
+    if agent.skills:
+        logger.info(f"📚 Available skills: {[s.name for s in agent.skills]}")
+
+    logger.info(f"🚀 Starting query...")
+    iteration = 0
     async for event in agent.query_stream(
-        "List all Python files and show me their contents"
+        "使用frontend design 来设计一个登录页面, 保存为login.html"
     ):
         match event:
             case ToolCallEvent(tool=name, args=args):
+                iteration += 1
+                logger.info(f"🔧 [{iteration}] Calling tool: {name}")
                 print(f"[{name}] {args}")
             case ToolResultEvent(tool=name, result=result):
+                logger.info(f"✅ Tool result received from: {name} (length: {len(str(result))})")
                 print(
                     f"  -> {result[:200]}..."
                     if len(str(result)) > 200
                     else f"  -> {result}"
                 )
             case FinalResponseEvent(content=text):
+                logger.info(f"🏁 Final response received")
                 print(f"\n{text}")
+            case _:
+                # 输出所有其他事件类型，帮助诊断
+                logger.debug(f"📨 Event: {type(event).__name__}")
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ class ChatGoogle(BaseChatModel):
 
         if response.has_tool_calls:
             for tc in response.tool_calls:
-                print(f'Call {tc.function.name} with {tc.function.arguments}')
+                logger.info(f'Call {tc.function.name} with {tc.function.arguments}')
         ```
     """
 
