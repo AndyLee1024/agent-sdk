@@ -111,7 +111,7 @@ class Agent:
 
     Attributes:
         llm: The language model to use for the agent.
-        tools: List of Tool instances (created with @tool decorator).
+        tools: List of Tool instances. If None, uses all tools from default registry.
         system_prompt: Optional system prompt to guide the agent.
         max_iterations: Maximum number of LLM calls before stopping.
         tool_choice: How the LLM should choose tools ('auto', 'required', 'none').
@@ -121,7 +121,7 @@ class Agent:
     """
 
     llm: BaseChatModel
-    tools: list[Tool]
+    tools: list[Tool] | None = None
     system_prompt: str | None = None
     max_iterations: int = 200  # 200 steps max for now
     tool_choice: ToolChoice = "auto"
@@ -143,6 +143,22 @@ class Agent:
     )
     """HTTP status codes that trigger retries (matches browser-use)."""
 
+    # Subagent support
+    agents: list | None = None  # type: ignore  # list[AgentDefinition]
+    """List of AgentDefinition for creating subagents."""
+    tool_registry: object | None = None  # type: ignore  # ToolRegistry
+    """Global tool registry for subagents to access tools by name."""
+    project_root: Path | None = None
+    """Project root directory for discovering subagents. Defaults to cwd."""
+    _is_subagent: bool = field(default=False, repr=False)
+    """Internal flag to prevent nested subagents."""
+
+    # Skill support
+    skills: list | None = None  # type: ignore  # list[SkillDefinition]
+    """List of SkillDefinition for Skill support. Auto-discovered if None."""
+    _active_skill_names: set[str] = field(default_factory=set, repr=False)
+    """Currently active Skill names (can activate multiple Skills, but not the same one twice)."""
+
     # Internal state
     _messages: list[BaseMessage] = field(default_factory=list, repr=False)
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False)
@@ -150,6 +166,60 @@ class Agent:
     _token_cost: TokenCost = field(default=None, repr=False)  # type: ignore
 
     def __post_init__(self):
+        # ====== 自动推断 tools 和 tool_registry ======
+        # 策略1: 都没传，使用全局默认
+        if self.tools is None and self.tool_registry is None:
+            from bu_agent_sdk.tools import get_default_registry
+
+            _default = get_default_registry()
+            self.tools = _default.all()
+            self.tool_registry = _default
+            logger.info(f"Using default registry with {len(self.tools)} tools")
+
+        # 策略2: 只传了 tools，自动推断 registry
+        elif self.tools is not None and self.tool_registry is None:
+            if self.agents:
+                # 需要 subagent，使用全局默认 registry
+                from bu_agent_sdk.tools import get_default_registry
+
+                self.tool_registry = get_default_registry()
+                logger.debug("Using default registry for subagents")
+            # else: 不需要 subagent，不需要 registry
+
+        # 策略3: 只传了 registry，自动使用其所有工具
+        elif self.tools is None and self.tool_registry is not None:
+            self.tools = self.tool_registry.all()
+            logger.debug(f"Using all {len(self.tools)} tools from provided registry")
+
+        # 策略4: 都传了，使用用户指定的
+        # 直接使用，不需要额外处理
+
+        # 确保 tools 不是 None
+        if self.tools is None:
+            self.tools = []  # 空工具列表
+
+        # ====== Subagent 自动发现和 Merge ======
+        # 只在非 subagent 时执行自动发现（subagent 不支持嵌套）
+        if not self._is_subagent:
+            from bu_agent_sdk.subagent import discover_subagents
+
+            discovered = discover_subagents(project_root=self.project_root)
+            user_agents = self.agents or []
+
+            if discovered or user_agents:
+                # Merge：代码传入的覆盖自动发现的同名 subagent
+                user_agent_names = {a.name for a in user_agents}
+                merged = [a for a in discovered if a.name not in user_agent_names]
+                merged.extend(user_agents)
+                self.agents = merged if merged else None
+
+                if discovered:
+                    logger.info(f"Auto-discovered {len(discovered)} subagent(s)")
+
+        # 检查嵌套 - Subagent 不能再定义 agents
+        if self._is_subagent and self.agents:
+            raise ValueError("Subagent 不能再定义 agents（不支持嵌套）")
+
         # Validate that all tools are Tool instances
         for t in self.tools:
             assert isinstance(t, Tool), (
@@ -172,6 +242,13 @@ class Agent:
             llm=self.llm,
             token_cost=self._token_cost,
         )
+
+        # Initialize subagent support
+        if self.agents:
+            self._setup_subagents()
+
+        # Initialize skill support (所有 Agent 都支持，不区分主/子)
+        self._setup_skills()
 
     @property
     def tool_definitions(self) -> list[ToolDefinition]:
@@ -300,6 +377,11 @@ class Agent:
     async def _execute_tool_call(self, tool_call: ToolCall) -> ToolMessage:
         """Execute a single tool call and return the result as a ToolMessage."""
         tool_name = tool_call.function.name
+
+        # Check if this is a Skill tool call (special handling)
+        if tool_name == "Skill":
+            return await self._execute_skill_call(tool_call)
+
         tool = self._tool_map.get(tool_name)
 
         if tool is None:
@@ -870,3 +952,152 @@ Keep the summary brief but informative."""
         # Max iterations reached - generate summary of what was accomplished
         summary = await self._generate_max_iterations_summary()
         yield FinalResponseEvent(content=summary)
+
+    def _setup_subagents(self) -> None:
+        """设置 Subagent 支持
+
+        1. 生成 Subagent 策略提示并注入到 system_prompt
+        2. 创建 Task 工具并添加到 tools 列表
+        """
+        from bu_agent_sdk.subagent.prompts import generate_subagent_prompt
+        from bu_agent_sdk.subagent.task_tool import create_task_tool
+
+        if not self.agents or not self.tool_registry:
+            return
+
+        # 生成 Subagent 策略提示
+        subagent_prompt = generate_subagent_prompt(self.agents)
+
+        # 追加到用户的 system_prompt
+        if self.system_prompt:
+            self.system_prompt = f"{self.system_prompt}\n\n{subagent_prompt}"
+        else:
+            self.system_prompt = subagent_prompt
+
+        # 创建 Task 工具
+        task_tool = create_task_tool(
+            agents=self.agents,
+            tool_registry=self.tool_registry,  # type: ignore
+            parent_llm=self.llm,
+            parent_dependency_overrides=self.dependency_overrides,  # type: ignore
+        )
+
+        # 添加到工具列表
+        self.tools.append(task_tool)
+        self._tool_map[task_tool.name] = task_tool
+
+        logging.info(
+            f"Initialized {len(self.agents)} subagents: {[a.name for a in self.agents]}"
+        )
+
+    def _setup_skills(self) -> None:
+        """设置 Skill 支持
+
+        设计决策：
+        - 每个 Agent 独立发现和加载 Skills
+        - 主 Agent 和 Subagent 都能使用 Skill
+        - 每个 Agent 可以激活多个不同的 Skills
+        - 防止同一 Skill 被重复激活（避免无限递归）
+        - 允许激活不同的 Skills（如先激活 Skill A，再激活 Skill B）
+        """
+        from bu_agent_sdk.skill import create_skill_tool, discover_skills
+
+        # 自动发现 skills
+        discovered = discover_skills(project_root=self.project_root)
+        user_skills = self.skills or []
+
+        if discovered or user_skills:
+            # 合并（代码传入的覆盖自动发现的同名 skill）
+            user_skill_names = {s.name for s in user_skills}
+            merged = [s for s in discovered if s.name not in user_skill_names]
+            merged.extend(user_skills)
+            self.skills = merged if merged else None
+
+            if discovered:
+                logger.info(f"Auto-discovered {len(discovered)} skill(s)")
+
+        if not self.skills:
+            return
+
+        # 创建 Skill 工具
+        skill_tool = create_skill_tool(self.skills)
+        self.tools.append(skill_tool)
+        self._tool_map[skill_tool.name] = skill_tool
+
+        logger.info(f"Initialized {len(self.skills)} skill(s): {[s.name for s in self.skills]}")
+
+    async def _execute_skill_call(self, tool_call: ToolCall) -> ToolMessage:
+        """执行 Skill 调用（特殊处理）
+
+        Skill 调用会：
+        1. 注入元数据消息（用户可见）
+        2. 注入 prompt 消息（用户不可见，is_meta=True）
+        3. 应用 Skill 的 execution context 修改（持久化）
+        4. 防止重复调用保护
+        """
+        args = json.loads(tool_call.function.arguments)
+        skill_name = args.get("skill_name")
+
+        # 查找 Skill
+        skill_def = next((s for s in self.skills if s.name == skill_name), None) if self.skills else None
+        if not skill_def:
+            return ToolMessage(
+                tool_call_id=tool_call.id,
+                tool_name="Skill",
+                content=f"Error: Unknown skill '{skill_name}'",
+                is_error=True,
+            )
+
+        # 防重复调用：同一 Skill 不能重复激活（防止无限递归）
+        if skill_name in self._active_skill_names:
+            return ToolMessage(
+                tool_call_id=tool_call.id,
+                tool_name="Skill",
+                content=f"Error: Skill '{skill_name}' is already active. Cannot activate the same skill twice to prevent infinite recursion.",
+                is_error=True,
+            )
+
+        # 1. 注入元数据消息（用户可见）
+        metadata = f'<skill-message>The "{skill_name}" skill is loading</skill-message>\n<skill-name>{skill_name}</skill-name>'
+        self._messages.append(UserMessage(content=metadata, is_meta=False))
+
+        # 2. 注入 prompt 消息（用户不可见）
+        full_prompt = skill_def.get_prompt()
+        self._messages.append(UserMessage(content=full_prompt, is_meta=True))
+
+        # 3. 应用 Skill 的 execution context 修改（持久化）
+        from bu_agent_sdk.skill.context import apply_skill_context
+
+        apply_skill_context(self, skill_def)
+        self._active_skill_names.add(skill_name)
+
+        # 4. 返回 ToolMessage
+        return ToolMessage(
+            tool_call_id=tool_call.id,
+            tool_name="Skill",
+            content=f"Skill '{skill_name}' loaded successfully and will remain active",
+            is_error=False,
+        )
+
+    def _rebuild_skill_tool(self) -> None:
+        """重建 Skill 工具（用于 Subagent Skills 筛选后更新工具描述）
+
+        这个方法在 Subagent 创建后，如果筛选了 Skills，需要调用以重新生成 Skill 工具。
+        """
+        if not self.skills:
+            # 移除 Skill 工具（如果存在）
+            self.tools = [t for t in self.tools if t.name != "Skill"]
+            self._tool_map.pop("Skill", None)
+            return
+
+        from bu_agent_sdk.skill import create_skill_tool
+
+        # 移除旧的 Skill 工具
+        self.tools = [t for t in self.tools if t.name != "Skill"]
+
+        # 创建新的 Skill 工具
+        skill_tool = create_skill_tool(self.skills)
+        self.tools.append(skill_tool)
+        self._tool_map["Skill"] = skill_tool
+
+        logger.debug(f"Rebuilt Skill tool with {len(self.skills)} skill(s)")

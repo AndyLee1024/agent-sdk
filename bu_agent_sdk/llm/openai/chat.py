@@ -124,6 +124,7 @@ class ChatOpenAI(BaseChatModel):
             "default_query": self.default_query,
             "_strict_response_validation": self._strict_response_validation,
         }
+        print("base_params:", base_params)
 
         # Create client_params dict with non-None values
         client_params = {k: v for k, v in base_params.items() if v is not None}

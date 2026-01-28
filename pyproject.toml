@@ -33,6 +33,7 @@ dependencies = [
     "anthropic>=0.40.0",
     "openai>=1.50.0",
     "google-genai>=1.0.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]

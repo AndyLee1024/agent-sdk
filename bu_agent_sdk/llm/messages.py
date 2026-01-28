@@ -224,6 +224,13 @@ class UserMessage(_MessageBase):
     role.
     """
 
+	is_meta: bool = False
+	"""Whether this is a meta message (for Skill prompt injection).
+
+	Meta messages are sent to the LLM but hidden from the user interface.
+	Used to inject Skill prompts without cluttering the conversation UI.
+	"""
+
 	@property
 	def text(self) -> str:
 		"""
