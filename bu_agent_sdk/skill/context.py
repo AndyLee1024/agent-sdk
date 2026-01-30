@@ -13,7 +13,8 @@ logger = logging.getLogger(__name__)
 def apply_skill_context(agent: "Agent", skill_def: "SkillDefinition") -> None:
     """应用 Skill 的 execution context 修改（持久化）
 
-    Skill 的工具权限和模型修改会一直生效，不会自动退出。
+    Skill 的工具权限修改会一直生效，不会自动退出。
+    注意: 模型切换功能已弃用，配置会被忽略。
 
     Args:
         agent: Agent 实例
@@ -28,9 +29,11 @@ def apply_skill_context(agent: "Agent", skill_def: "SkillDefinition") -> None:
         agent._tool_map = {k: v for k, v in agent._tool_map.items() if k in allowed_set}
         logger.info(f"Skill '{skill_def.name}': restricted to {len(agent.tools)} tools (persistent)")
 
-    # 2. 应用 Skill 模型切换
+    # 2. [已弃用] Skill 模型切换功能
+    # 注意: SKILL 不再支持修改模型配置，该字段已被忽略
+    # 如需使用不同模型，请使用 Subagent 功能
     if skill_def.model and skill_def.model != "inherit":
-        from bu_agent_sdk.subagent.task_tool import resolve_model
-
-        agent.llm = resolve_model(skill_def.model, agent.llm)
-        logger.info(f"Skill '{skill_def.name}': switched to model {skill_def.model} (persistent)")
+        logger.warning(
+            f"Skill '{skill_def.name}': model 配置已弃用并被忽略 (配置值: {skill_def.model}). "
+            "如需使用不同模型，请使用 Subagent 功能。"
+        )

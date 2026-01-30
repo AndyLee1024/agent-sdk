@@ -1,0 +1,62 @@
+"""Context IR 模块
+
+结构化管理 Agent 上下文，替代扁平的 _messages: list[BaseMessage]。
+
+主要组件：
+- ContextIR: 上下文中间表示
+- ContextItem / Segment: 核心数据类型
+- LoweringPipeline: IR → API messages 转换
+- SelectiveCompactionPolicy: 选择性压缩
+- SystemReminder: 动态提醒注入
+- BudgetConfig / BudgetStatus: 预算控制
+- ContextEventBus: 可观测性
+"""
+
+from bu_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
+from bu_agent_sdk.context.compaction import (
+    CompactionStrategy,
+    SelectiveCompactionPolicy,
+    TypeCompactionRule,
+)
+from bu_agent_sdk.context.ir import ContextIR
+from bu_agent_sdk.context.items import (
+    DEFAULT_PRIORITIES,
+    ContextItem,
+    ItemType,
+    Segment,
+    SegmentName,
+)
+from bu_agent_sdk.context.lower import LoweringPipeline
+from bu_agent_sdk.context.observer import (
+    ContextEvent,
+    ContextEventBus,
+    EventType,
+)
+from bu_agent_sdk.context.reminder import ReminderPosition, SystemReminder
+
+__all__ = [
+    # 核心
+    "ContextIR",
+    "ContextItem",
+    "ItemType",
+    "Segment",
+    "SegmentName",
+    "DEFAULT_PRIORITIES",
+    # Lowering
+    "LoweringPipeline",
+    # Compaction
+    "CompactionStrategy",
+    "SelectiveCompactionPolicy",
+    "TypeCompactionRule",
+    # Budget
+    "BudgetConfig",
+    "BudgetStatus",
+    "TokenCounter",
+    # Reminder
+    "SystemReminder",
+    "ReminderPosition",
+    # Observer
+    "ContextEvent",
+    "ContextEventBus",
+    "EventType",
+]

@@ -18,7 +18,7 @@ class SkillDefinition:
 
     # 可选字段（Frontmatter）
     allowed_tools: list[str] | None = None
-    model: str | None = None
+    model: str | None = None  # [已弃用] 该字段已被忽略，请使用 Subagent 代替
     argument_hint: str | None = None  # 暂时保留但不使用
     disable_model_invocation: bool = False
     user_invocable: bool = True  # 暂时保留但不使用

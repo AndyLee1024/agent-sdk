@@ -64,6 +64,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from bu_agent_sdk.agent.compaction import CompactionConfig, CompactionService
+from bu_agent_sdk.context import ContextIR, SelectiveCompactionPolicy
 
 logger = logging.getLogger("bu_agent_sdk.agent")
 from bu_agent_sdk.agent.events import (
@@ -156,11 +157,9 @@ class Agent:
     # Skill support
     skills: list | None = None  # type: ignore  # list[SkillDefinition]
     """List of SkillDefinition for Skill support. Auto-discovered if None."""
-    _active_skill_names: set[str] = field(default_factory=set, repr=False)
-    """Currently active Skill names (can activate multiple Skills, but not the same one twice)."""
 
     # Internal state
-    _messages: list[BaseMessage] = field(default_factory=list, repr=False)
+    _context: ContextIR = field(default=None, repr=False)  # type: ignore  # 在 __post_init__ 中初始化
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False)
     _compaction_service: CompactionService | None = field(default=None, repr=False)
     _token_cost: TokenCost = field(default=None, repr=False)  # type: ignore
@@ -232,6 +231,12 @@ class Agent:
         # Initialize token cost service
         self._token_cost = TokenCost(include_cost=self.include_cost)
 
+        # Initialize ContextIR
+        self._context = ContextIR()
+
+        # 保存原始 system_prompt（在 _setup_subagents/_setup_skills 修改之前）
+        _original_system_prompt = self.system_prompt
+
         # Initialize compaction service (enabled by default)
         # Use provided config or create default (which has enabled=True)
         compaction_config = (
@@ -244,11 +249,20 @@ class Agent:
         )
 
         # Initialize subagent support
+        # 注意：_setup_subagents 会同时写入 IR header 的 subagent_strategy
+        # 和 拼接 self.system_prompt（向后兼容）
         if self.agents:
             self._setup_subagents()
 
         # Initialize skill support (所有 Agent 都支持，不区分主/子)
+        # 注意：_setup_skills 会同时写入 IR header 的 skill_strategy
+        # 和 拼接 self.system_prompt（向后兼容）
         self._setup_skills()
+
+        # 将原始 system_prompt 写入 IR header（不含 subagent/skill 策略拼接）
+        # subagent_strategy 和 skill_strategy 已由上面的 _setup 方法独立写入 IR
+        if _original_system_prompt:
+            self._context.set_system_prompt(_original_system_prompt, cache=True)
 
     @property
     def tool_definitions(self) -> list[ToolDefinition]:
@@ -257,8 +271,12 @@ class Agent:
 
     @property
     def messages(self) -> list[BaseMessage]:
-        """Get the current message history (read-only copy)."""
-        return list(self._messages)
+        """Get the current message history (read-only copy).
+
+        Returns the lowered representation of the ContextIR,
+        compatible with the old _messages format.
+        """
+        return self._context.lower()
 
     @property
     def token_cost(self) -> TokenCost:
@@ -275,8 +293,11 @@ class Agent:
 
     def clear_history(self):
         """Clear the message history and token usage."""
-        self._messages = []
+        self._context.clear()
         self._token_cost.clear_history()
+        # 如果有 system_prompt，重新写入 IR
+        if self.system_prompt:
+            self._context.set_system_prompt(self.system_prompt, cache=True)
 
     def load_history(self, messages: list[BaseMessage]) -> None:
         """Load message history to continue a previous conversation.
@@ -285,7 +306,7 @@ class Agent:
         e.g., when loading from a database on a new machine.
 
         Note: The system prompt will NOT be re-added on the next query()
-        call since _messages will be non-empty.
+        call since the context will be non-empty.
 
         Args:
                 messages: List of BaseMessage instances to load.
@@ -300,8 +321,13 @@ class Agent:
                 # Continue with follow-up
                 response = await agent.query("Continue the task...")
         """
-        self._messages = list(messages)
+        # 清空现有 conversation（保留 header）
+        self._context.conversation.items.clear()
         self._token_cost.clear_history()
+
+        # 逐条加载消息到 IR
+        for msg in messages:
+            self._context.add_message(msg)
 
     def _destroy_ephemeral_messages(self) -> None:
         """Destroy old ephemeral message content, keeping the last N per tool.
@@ -316,53 +342,42 @@ class Agent:
 
         This should be called after each LLM invocation.
         """
-        # Group ephemeral messages by tool name, preserving order
-        ephemeral_by_tool: dict[str, list[ToolMessage]] = {}
-
-        for msg in self._messages:
-            if not isinstance(msg, ToolMessage):
-                continue
-            if not msg.ephemeral:
-                continue
-            # Skip already-destroyed messages
-            if msg.destroyed:
-                continue
-
-            if msg.tool_name not in ephemeral_by_tool:
-                ephemeral_by_tool[msg.tool_name] = []
-            ephemeral_by_tool[msg.tool_name].append(msg)
-
-        # For each tool, keep only the last N messages
-        for tool_name, messages in ephemeral_by_tool.items():
-            # Get the keep limit from the tool's ephemeral attribute
-            tool = self._tool_map.get(tool_name)
-            if tool is None:
-                keep_count = 1
-            else:
+        # 构建每个工具的 keep_count 映射
+        tool_keep_counts: dict[str, int] = {}
+        for tool in (self.tools or []):
+            if tool.ephemeral:
                 keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
+                tool_keep_counts[tool.name] = keep_count
 
-            # Destroy messages beyond the keep limit (older ones first)
-            messages_to_destroy = messages[:-keep_count] if keep_count > 0 else messages
-
-            for msg in messages_to_destroy:
-                # Log which message is being destroyed
-                logger.debug(
-                    f"🗑️  Destroying ephemeral: {msg.tool_name} (keeping last {keep_count})"
-                )
-
-                # Save to disk if storage path is configured
-                if self.ephemeral_storage_path is not None:
+        # 在销毁前，先保存需要持久化的内容到磁盘
+        if self.ephemeral_storage_path is not None:
+            for item in self._context.conversation.items:
+                if item.item_type.value != "tool_result":
+                    continue
+                if not item.ephemeral or item.destroyed:
+                    continue
+                msg = item.message
+                if not isinstance(msg, ToolMessage):
+                    continue
+                # 检查是否会被销毁（通过计数判断）
+                tool_name = item.tool_name or ""
+                keep = tool_keep_counts.get(tool_name, 1)
+                # 获取该工具的所有 ephemeral items
+                same_tool_items = [
+                    it for it in self._context.conversation.items
+                    if it.item_type.value == "tool_result"
+                    and it.ephemeral and not it.destroyed
+                    and (it.tool_name or "") == tool_name
+                ]
+                # 只保存会被销毁的（不是最后 N 个的）
+                if keep > 0 and item in same_tool_items[:-keep]:
                     self.ephemeral_storage_path.mkdir(parents=True, exist_ok=True)
                     filename = f"{msg.tool_call_id}.json"
                     filepath = self.ephemeral_storage_path / filename
-
-                    # Serialize content
                     if isinstance(msg.content, str):
                         content_data = msg.content
                     else:
-                        # List of content parts - serialize to JSON
                         content_data = [part.model_dump() for part in msg.content]
-
                     saved_data = {
                         "tool_call_id": msg.tool_call_id,
                         "tool_name": msg.tool_name,
@@ -371,8 +386,8 @@ class Agent:
                     }
                     filepath.write_text(json.dumps(saved_data, indent=2))
 
-                # Mark as destroyed - serializers will use placeholder instead of content
-                msg.destroyed = True
+        # 委托给 ContextIR 执行销毁
+        self._context.destroy_ephemeral_items(tool_keep_counts)
 
     async def _execute_tool_call(self, tool_call: ToolCall) -> ToolMessage:
         """Execute a single tool call and return the result as a ToolMessage."""
@@ -525,7 +540,7 @@ class Agent:
         for attempt in range(self.llm_max_retries):
             try:
                 response = await self.llm.ainvoke(
-                    messages=self._messages,
+                    messages=self._context.lower(),
                     tools=self.tool_definitions if self.tools else None,
                     tool_choice=self.tool_choice if self.tools else None,
                 )
@@ -629,12 +644,12 @@ Please provide a concise summary of:
 Keep the summary brief but informative."""
 
         # Add the summary request as a user message temporarily
-        self._messages.append(UserMessage(content=summary_prompt))
+        temp_item = self._context.add_message(UserMessage(content=summary_prompt))
 
         try:
             # Invoke LLM without tools to get a summary response
             response = await self.llm.ainvoke(
-                messages=self._messages,
+                messages=self._context.lower(),
                 tools=None,
                 tool_choice=None,
             )
@@ -644,7 +659,7 @@ Keep the summary brief but informative."""
             summary = f"Task stopped after {self.max_iterations} iterations. Unable to generate summary due to error."
         finally:
             # Remove the temporary summary prompt
-            self._messages.pop()
+            self._context.conversation.remove_by_id(temp_item.id)
 
         return f"[Max iterations reached]\n\n{summary}"
 
@@ -664,6 +679,9 @@ Keep the summary brief but informative."""
     async def _check_and_compact(self, response: ChatInvokeCompletion) -> bool:
         """Check token usage and compact if threshold exceeded.
 
+        Uses selective compaction (by type priority) first, falling back to
+        full summary via CompactionService if needed.
+
         The threshold is calculated dynamically based on the model's context window.
 
         Args:
@@ -678,17 +696,28 @@ Keep the summary brief but informative."""
         # Update token usage tracking
         self._compaction_service.update_usage(response.usage)
 
-        # Perform compaction check (threshold is calculated based on model)
-        new_messages, result = await self._compaction_service.check_and_compact(
-            self._messages,
-            self.llm,
+        # 检查是否需要压缩
+        if not await self._compaction_service.should_compact(self.llm.model):
+            return False
+
+        # 获取压缩阈值
+        threshold = await self._compaction_service.get_threshold_for_model(self.llm.model)
+
+        # 使用 token usage 中的实际 total_tokens
+        from bu_agent_sdk.agent.compaction.models import TokenUsage
+        actual_tokens = TokenUsage.from_usage(response.usage).total_tokens
+
+        # 创建选择性压缩策略
+        policy = SelectiveCompactionPolicy(
+            threshold=threshold,
+            llm=self.llm,
+            fallback_to_full_summary=True,
         )
 
-        if result.compacted:
-            self._messages = list(new_messages)
-            return True
-
-        return False
+        return await self._context.auto_compact(
+            policy=policy,
+            current_total_tokens=actual_tokens,
+        )
 
     @observe(name="agent_query")
     async def query(self, message: str) -> str:
@@ -696,8 +725,7 @@ Keep the summary brief but informative."""
         Send a message to the agent and get a response.
 
         Can be called multiple times for follow-up questions - message history
-        is preserved between calls. System prompt is automatically added on
-        first call.
+        is preserved between calls. System prompt is managed by ContextIR.
 
         When compaction is enabled, the agent will automatically compress the
         conversation history when token usage exceeds the configured threshold.
@@ -709,13 +737,8 @@ Keep the summary brief but informative."""
         Returns:
             The agent's response text.
         """
-        # Add system prompt on first message
-        if not self._messages and self.system_prompt:
-            # Cache the static system prompt when provider supports it (Anthropic).
-            self._messages.append(SystemMessage(content=self.system_prompt, cache=True))
-
-        # Add the user message
-        self._messages.append(UserMessage(content=message))
+        # Add the user message to context
+        self._context.add_message(UserMessage(content=message))
 
         iterations = 0
         tool_calls_made = 0
@@ -737,7 +760,7 @@ Keep the summary brief but informative."""
                 content=response.content,
                 tool_calls=response.tool_calls if response.tool_calls else None,
             )
-            self._messages.append(assistant_msg)
+            self._context.add_message(assistant_msg)
 
             # If no tool calls, check if should finish
             if not response.has_tool_calls:
@@ -747,7 +770,7 @@ Keep the summary brief but informative."""
                         incomplete_prompt = await self._get_incomplete_todos_prompt()
                         if incomplete_prompt:
                             incomplete_todos_prompted = True
-                            self._messages.append(
+                            self._context.add_message(
                                 UserMessage(content=incomplete_prompt)
                             )
                             continue  # Give the LLM a chance to handle incomplete todos
@@ -763,15 +786,13 @@ Keep the summary brief but informative."""
                 tool_calls_made += 1
                 try:
                     tool_result = await self._execute_tool_call(tool_call)
-                    self._messages.append(tool_result)
+                    self._context.add_message(tool_result)
 
-                    # 检查是否有待注入的 Skill 消息（必须在 ToolMessage 之后注入）
-                    if hasattr(self, '_pending_skill_messages') and self._pending_skill_messages:
-                        for msg in self._pending_skill_messages:
-                            self._messages.append(msg)
-                        self._pending_skill_messages = []
+                    # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
+                    if self._context.has_pending_skill_items:
+                        self._context.flush_pending_skill_items()
                 except TaskComplete as e:
-                    self._messages.append(
+                    self._context.add_message(
                         ToolMessage(
                             tool_call_id=tool_call.id,
                             tool_name=tool_call.function.name,
@@ -819,13 +840,8 @@ Keep the summary brief but informative."""
                     case FinalResponseEvent(content=text):
                         print(f"Done: {text}")
         """
-        # Add system prompt on first message
-        if not self._messages and self.system_prompt:
-            # Cache the static system prompt when provider supports it (Anthropic).
-            self._messages.append(SystemMessage(content=self.system_prompt, cache=True))
-
-        # Add the user message (supports both string and multi-modal content)
-        self._messages.append(UserMessage(content=message))
+        # Add the user message to context (supports both string and multi-modal content)
+        self._context.add_message(UserMessage(content=message))
 
         iterations = 0
         incomplete_todos_prompted = (
@@ -850,7 +866,7 @@ Keep the summary brief but informative."""
                 content=response.content,
                 tool_calls=response.tool_calls if response.tool_calls else None,
             )
-            self._messages.append(assistant_msg)
+            self._context.add_message(assistant_msg)
 
             # If no tool calls, check if should finish
             if not response.has_tool_calls:
@@ -860,7 +876,7 @@ Keep the summary brief but informative."""
                         incomplete_prompt = await self._get_incomplete_todos_prompt()
                         if incomplete_prompt:
                             incomplete_todos_prompted = True
-                            self._messages.append(
+                            self._context.add_message(
                                 UserMessage(content=incomplete_prompt)
                             )
                             yield HiddenUserMessageEvent(content=incomplete_prompt)
@@ -911,13 +927,11 @@ Keep the summary brief but informative."""
                 step_start_time = time.time()
                 try:
                     tool_result = await self._execute_tool_call(tool_call)
-                    self._messages.append(tool_result)
+                    self._context.add_message(tool_result)
 
-                    # 检查是否有待注入的 Skill 消息（必须在 ToolMessage 之后注入）
-                    if hasattr(self, '_pending_skill_messages') and self._pending_skill_messages:
-                        for msg in self._pending_skill_messages:
-                            self._messages.append(msg)
-                        self._pending_skill_messages = []
+                    # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
+                    if self._context.has_pending_skill_items:
+                        self._context.flush_pending_skill_items()
 
                     # Extract screenshot if present (for browser tools)
                     screenshot_base64 = self._extract_screenshot(tool_result)
@@ -941,7 +955,7 @@ Keep the summary brief but informative."""
                 except TaskComplete as e:
                     # done_autonomous already validates todos before raising TaskComplete,
                     # so can complete immediately
-                    self._messages.append(
+                    self._context.add_message(
                         ToolMessage(
                             tool_call_id=tool_call.id,
                             tool_name=tool_call.function.name,
@@ -968,8 +982,11 @@ Keep the summary brief but informative."""
     def _setup_subagents(self) -> None:
         """设置 Subagent 支持
 
-        1. 生成 Subagent 策略提示并注入到 system_prompt
+        1. 生成 Subagent 策略提示并写入 ContextIR header
         2. 创建 Task 工具并添加到 tools 列表
+
+        注意：同时保持 self.system_prompt 的拼接（向后兼容），
+        但 IR 中的 subagent_strategy 是独立管理的。
         """
         from bu_agent_sdk.subagent.prompts import generate_subagent_prompt
         from bu_agent_sdk.subagent.task_tool import create_task_tool
@@ -980,7 +997,10 @@ Keep the summary brief but informative."""
         # 生成 Subagent 策略提示
         subagent_prompt = generate_subagent_prompt(self.agents)
 
-        # 追加到用户的 system_prompt
+        # 写入 ContextIR header（独立段）
+        self._context.set_subagent_strategy(subagent_prompt)
+
+        # 同时保持 system_prompt 拼接（向后兼容 _rebuild_skill_tool 等）
         if self.system_prompt:
             self.system_prompt = f"{self.system_prompt}\n\n{subagent_prompt}"
         else:
@@ -1013,7 +1033,7 @@ Keep the summary brief but informative."""
         - 允许激活不同的 Skills（如先激活 Skill A，再激活 Skill B）
 
         架构模式（参考 Subagent）：
-        - Skills 列表和使用规则 → system_prompt（通过 generate_skill_prompt）
+        - Skills 列表和使用规则 → ContextIR header（通过 set_skill_strategy）
         - Tool description → 只包含简洁的功能说明
         """
         from bu_agent_sdk.skill import create_skill_tool, discover_skills
@@ -1036,9 +1056,12 @@ Keep the summary brief but informative."""
         if not self.skills:
             return
 
-        # 生成 Skill 策略提示并注入 system_prompt
+        # 生成 Skill 策略提示并写入 ContextIR header
         skill_prompt = generate_skill_prompt(self.skills)
         if skill_prompt:  # 只有当有 active skills 时才注入
+            self._context.set_skill_strategy(skill_prompt)
+
+            # 同时保持 system_prompt 拼接（向后兼容 _rebuild_skill_tool 等）
             if self.system_prompt:
                 self.system_prompt = f"{self.system_prompt}\n\n{skill_prompt}"
             else:
@@ -1055,9 +1078,9 @@ Keep the summary brief but informative."""
         """执行 Skill 调用（特殊处理）
 
         Skill 调用会：
-        1. 返回 ToolMessage（必须先添加到 _messages 以满足 OpenAI API 要求）
-        2. 在 ToolMessage 中标记待注入的消息（通过 _pending_skill_messages）
-        3. 调用方会在添加 ToolMessage 后检查并注入这些消息
+        1. 返回 ToolMessage（必须先添加到 context 以满足 OpenAI API 要求）
+        2. 通过 ContextIR.add_skill_injection() 存储待注入的 items
+        3. 调用方会在添加 ToolMessage 后 flush pending skill items
         4. 应用 Skill 的 execution context 修改（持久化）
         5. 防止重复调用保护
         """
@@ -1075,7 +1098,7 @@ Keep the summary brief but informative."""
             )
 
         # 防重复调用：同一 Skill 不能重复激活（防止无限递归）
-        if skill_name in self._active_skill_names:
+        if skill_name in self._context.active_skill_names:
             return ToolMessage(
                 tool_call_id=tool_call.id,
                 tool_name="Skill",
@@ -1087,19 +1110,20 @@ Keep the summary brief but informative."""
         from bu_agent_sdk.skill.context import apply_skill_context
 
         apply_skill_context(self, skill_def)
-        self._active_skill_names.add(skill_name)
+        self._context.active_skill_names.add(skill_name)
 
-        # 准备待注入的消息（将在 ToolMessage 添加到 _messages 后注入）
+        # 准备待注入的消息（将在 ToolMessage 添加到 context 后注入）
         metadata = f'<skill-message>The "{skill_name}" skill is loading</skill-message>\n<skill-name>{skill_name}</skill-name>'
         full_prompt = skill_def.get_prompt()
-        
-        # 存储待注入的消息到实例变量（调用方会检查并注入）
-        self._pending_skill_messages = [
-            UserMessage(content=metadata, is_meta=False),
-            UserMessage(content=full_prompt, is_meta=True),
-        ]
 
-        # 返回 ToolMessage（调用方会先添加这个，再注入上面的消息）
+        # 通过 ContextIR 管理 pending skill items
+        self._context.add_skill_injection(
+            skill_name=skill_name,
+            metadata_msg=UserMessage(content=metadata, is_meta=False),
+            prompt_msg=UserMessage(content=full_prompt, is_meta=True),
+        )
+
+        # 返回 ToolMessage（调用方会先添加这个，再 flush pending items）
         return ToolMessage(
             tool_call_id=tool_call.id,
             tool_name="Skill",
@@ -1112,7 +1136,7 @@ Keep the summary brief but informative."""
 
         这个方法在 Subagent 创建后，如果筛选了 Skills，需要调用以重新生成 Skill 工具。
 
-        重要：同时更新 system_prompt 和已添加到 messages 的 SystemMessage，保持一致性。
+        通过 ContextIR 管理 skill_strategy，不再需要手动操作 SystemMessage。
         """
         from bu_agent_sdk.skill import create_skill_tool, generate_skill_prompt
 
@@ -1120,20 +1144,24 @@ Keep the summary brief but informative."""
         self.tools = [t for t in self.tools if t.name != "Skill"]
         self._tool_map.pop("Skill", None)
 
-        # 2. 移除 system_prompt 中的旧 Skill 策略提示
-        # 使用标记来精确定位（避免误删其他部分）
+        # 2. 移除 IR 中的旧 Skill 策略
+        self._context.remove_skill_strategy()
+
+        # 3. 同时更新 system_prompt（向后兼容）
         skill_prompt_marker = "\n\n## Skill 工具使用指南"
         if self.system_prompt and skill_prompt_marker in self.system_prompt:
-            # 找到 Skill 策略提示的开始位置，移除它及其后续内容
             idx = self.system_prompt.find(skill_prompt_marker)
             if idx > 0:
                 self.system_prompt = self.system_prompt[:idx]
 
-        # 3. 如果还有 skills，重新生成
+        # 4. 如果还有 skills，重新生成
         if self.skills:
-            # 生成新的 Skill 策略提示
             skill_prompt = generate_skill_prompt(self.skills)
             if skill_prompt:
+                # 写入 IR header
+                self._context.set_skill_strategy(skill_prompt)
+
+                # 同时更新 system_prompt（向后兼容）
                 if self.system_prompt:
                     self.system_prompt = f"{self.system_prompt}\n\n{skill_prompt}"
                 else:
@@ -1148,8 +1176,5 @@ Keep the summary brief but informative."""
         else:
             logger.debug("Removed Skill tool (no skills remaining)")
 
-        # 4. 关键：同步更新已添加到 messages 的 SystemMessage
-        # 如果第一条消息是 SystemMessage，需要更新它的内容
-        if self._messages and isinstance(self._messages[0], SystemMessage):
-            self._messages[0].content = self.system_prompt
-            logger.debug("Updated SystemMessage in messages to reflect skill changes")
+        # ContextIR 的 lower() 会自动从 header 段构建 SystemMessage，
+        # 不再需要手动同步 _messages[0]
