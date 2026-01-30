@@ -796,6 +796,7 @@ Keep the summary brief but informative."""
         incomplete_todos_prompted = (
             False  # Track if we've already prompted about incomplete todos
         )
+        done_tool_prompted = False  # Track if already prompted to call done tool
 
         while iterations < self.max_iterations:
             iterations += 1
@@ -829,8 +830,24 @@ Keep the summary brief but informative."""
                     # All done - return the response
                     await self._check_and_compact(response)
                     return response.content or ""
-                # Autonomous mode: require done tool, continue loop
-                continue
+                # Autonomous mode: require done tool
+                # If LLM returns no tool calls, prompt it to call done tool
+                if not done_tool_prompted:
+                    done_tool_prompted = True
+                    done_prompt = (
+                        "You have not called any tool. If you have completed the task, "
+                        "please call the 'done' tool with a summary of what was accomplished. "
+                        "If you still have work to do, please continue with the appropriate tools."
+                    )
+                    self._context.add_message(UserMessage(content=done_prompt))
+                    continue
+                else:
+                    # Already prompted but still no tool calls - finish with current response
+                    logger.warning(
+                        "LLM did not call done tool after prompt, finishing anyway"
+                    )
+                    await self._check_and_compact(response)
+                    return response.content or ""
 
             # Execute all tool calls
             for tool_call in response.tool_calls:
@@ -898,6 +915,7 @@ Keep the summary brief but informative."""
         incomplete_todos_prompted = (
             False  # Track if already prompted about incomplete todos
         )
+        done_tool_prompted = False  # Track if already prompted to call done tool
 
         while iterations < self.max_iterations:
             iterations += 1
@@ -939,10 +957,30 @@ Keep the summary brief but informative."""
                         yield TextEvent(content=response.content)
                     yield FinalResponseEvent(content=response.content or "")
                     return
-                # Autonomous mode: require done tool, yield text and continue loop
-                if response.content:
-                    yield TextEvent(content=response.content)
-                continue
+                # Autonomous mode: require done tool
+                # If LLM returns no tool calls, prompt it to call done tool
+                if not done_tool_prompted:
+                    done_tool_prompted = True
+                    done_prompt = (
+                        "You have not called any tool. If you have completed the task, "
+                        "please call the 'done' tool with a summary of what was accomplished. "
+                        "If you still have work to do, please continue with the appropriate tools."
+                    )
+                    self._context.add_message(UserMessage(content=done_prompt))
+                    yield HiddenUserMessageEvent(content=done_prompt)
+                    if response.content:
+                        yield TextEvent(content=response.content)
+                    continue
+                else:
+                    # Already prompted but still no tool calls - finish with current response
+                    logger.warning(
+                        "LLM did not call done tool after prompt, finishing anyway"
+                    )
+                    await self._check_and_compact(response)
+                    if response.content:
+                        yield TextEvent(content=response.content)
+                    yield FinalResponseEvent(content=response.content or "")
+                    return
 
             # Yield text content if present alongside tool calls
             if response.content:
