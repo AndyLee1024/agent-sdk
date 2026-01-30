@@ -65,6 +65,8 @@ from pathlib import Path
 
 from bu_agent_sdk.agent.compaction import CompactionConfig, CompactionService
 from bu_agent_sdk.context import ContextIR, SelectiveCompactionPolicy
+from bu_agent_sdk.context.fs import ContextFileSystem
+from bu_agent_sdk.context.offload import OffloadPolicy
 
 logger = logging.getLogger("bu_agent_sdk.agent")
 from bu_agent_sdk.agent.events import (
@@ -131,6 +133,17 @@ class Agent:
     dependency_overrides: dict | None = None
     ephemeral_storage_path: Path | None = None
     """Path to store destroyed ephemeral message content. If None, content is discarded."""
+    ephemeral_keep_recent: int | None = None
+    """Default keep_recent for ephemeral tools. Overrides tool's _ephemeral value."""
+
+    # Context FileSystem 配置
+    offload_enabled: bool = True
+    """是否启用上下文卸载到文件系统"""
+    offload_token_threshold: int = 2000
+    """超过此 token 数的条目才会被卸载"""
+    offload_root_path: str | None = None
+    """卸载文件存储根目录。None 使用默认 ~/.agent/context/{session_id}"""
+
     require_done_tool: bool = False
     """If True, the agent will only finish when the 'done' tool is called, not when LLM returns no tool calls."""
     llm_max_retries: int = 5
@@ -158,11 +171,17 @@ class Agent:
     skills: list | None = None  # type: ignore  # list[SkillDefinition]
     """List of SkillDefinition for Skill support. Auto-discovered if None."""
 
+    # Memory support
+    memory: object | None = None  # type: ignore  # MemoryConfig
+    """Memory configuration for loading static background knowledge."""
+
     # Internal state
     _context: ContextIR = field(default=None, repr=False)  # type: ignore  # 在 __post_init__ 中初始化
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False)
     _compaction_service: CompactionService | None = field(default=None, repr=False)
     _token_cost: TokenCost = field(default=None, repr=False)  # type: ignore
+    _context_fs: ContextFileSystem | None = field(default=None, repr=False)
+    _session_id: str = field(default="", repr=False)
 
     def __post_init__(self):
         # ====== 自动推断 tools 和 tool_registry ======
@@ -231,6 +250,24 @@ class Agent:
         # Initialize token cost service
         self._token_cost = TokenCost(include_cost=self.include_cost)
 
+        # Generate session_id (timestamp + random)
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        random_suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=6))
+        self._session_id = f"session_{timestamp}_{random_suffix}"
+
+        # Initialize ContextFileSystem if offload enabled
+        if self.offload_enabled:
+            if self.offload_root_path:
+                root_path = Path(self.offload_root_path).expanduser()
+            else:
+                root_path = Path.home() / ".agent" / "context" / self._session_id
+            self._context_fs = ContextFileSystem(
+                root_path=root_path,
+                session_id=self._session_id,
+            )
+            logger.info(f"Context FileSystem enabled at {root_path}")
+
         # Initialize ContextIR
         self._context = ContextIR()
 
@@ -263,6 +300,10 @@ class Agent:
         # subagent_strategy 和 skill_strategy 已由上面的 _setup 方法独立写入 IR
         if _original_system_prompt:
             self._context.set_system_prompt(_original_system_prompt, cache=True)
+
+        # Initialize memory support
+        if self.memory:
+            self._setup_memory()
 
     @property
     def tool_definitions(self) -> list[ToolDefinition]:
@@ -298,6 +339,9 @@ class Agent:
         # 如果有 system_prompt，重新写入 IR
         if self.system_prompt:
             self._context.set_system_prompt(self.system_prompt, cache=True)
+        # 如果有 memory，重新加载
+        if self.memory:
+            self._setup_memory()
 
     def load_history(self, messages: list[BaseMessage]) -> None:
         """Load message history to continue a previous conversation.
@@ -336,9 +380,8 @@ class Agent:
         - _ephemeral = 3 means keep the last 3 outputs of this tool
         - _ephemeral = True is treated as _ephemeral = 1 (keep last 1)
 
-        Older outputs beyond the limit have their content:
-        1. Optionally saved to disk if ephemeral_storage_path is set
-        2. Replaced with '<removed to save context>'
+        Older outputs beyond the limit have their content offloaded to filesystem
+        via ContextFileSystem and replaced with a placeholder.
 
         This should be called after each LLM invocation.
         """
@@ -346,48 +389,45 @@ class Agent:
         tool_keep_counts: dict[str, int] = {}
         for tool in (self.tools or []):
             if tool.ephemeral:
-                keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
+                # 如果设置了 ephemeral_keep_recent，覆盖工具的默认值
+                if self.ephemeral_keep_recent is not None:
+                    keep_count = self.ephemeral_keep_recent
+                else:
+                    keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
                 tool_keep_counts[tool.name] = keep_count
 
-        # 在销毁前，先保存需要持久化的内容到磁盘
-        if self.ephemeral_storage_path is not None:
-            for item in self._context.conversation.items:
-                if item.item_type.value != "tool_result":
-                    continue
-                if not item.ephemeral or item.destroyed:
-                    continue
-                msg = item.message
-                if not isinstance(msg, ToolMessage):
-                    continue
-                # 检查是否会被销毁（通过计数判断）
-                tool_name = item.tool_name or ""
-                keep = tool_keep_counts.get(tool_name, 1)
-                # 获取该工具的所有 ephemeral items
-                same_tool_items = [
-                    it for it in self._context.conversation.items
-                    if it.item_type.value == "tool_result"
-                    and it.ephemeral and not it.destroyed
-                    and (it.tool_name or "") == tool_name
-                ]
-                # 只保存会被销毁的（不是最后 N 个的）
-                if keep > 0 and item in same_tool_items[:-keep]:
-                    self.ephemeral_storage_path.mkdir(parents=True, exist_ok=True)
-                    filename = f"{msg.tool_call_id}.json"
-                    filepath = self.ephemeral_storage_path / filename
-                    if isinstance(msg.content, str):
-                        content_data = msg.content
-                    else:
-                        content_data = [part.model_dump() for part in msg.content]
-                    saved_data = {
-                        "tool_call_id": msg.tool_call_id,
-                        "tool_name": msg.tool_name,
-                        "content": content_data,
-                        "is_error": msg.is_error,
-                    }
-                    filepath.write_text(json.dumps(saved_data, indent=2))
+        # 遍历所有 ephemeral items，卸载需要被销毁的
+        for tool_name, keep in tool_keep_counts.items():
+            # 获取该工具的所有 ephemeral items
+            same_tool_items = [
+                item for item in self._context.conversation.items
+                if item.item_type.value == "tool_result"
+                and item.ephemeral and not item.destroyed
+                and (item.tool_name or "") == tool_name
+            ]
 
-        # 委托给 ContextIR 执行销毁
-        self._context.destroy_ephemeral_items(tool_keep_counts)
+            # 卸载需要销毁的（不是最后 N 个的）
+            if keep > 0 and len(same_tool_items) > keep:
+                items_to_destroy = same_tool_items[:-keep]
+                for item in items_to_destroy:
+                    # 使用 ContextFS 卸载（如果启用）
+                    if self._context_fs:
+                        try:
+                            path = self._context_fs.offload(item)
+                            item.offload_path = path
+                            item.offloaded = True
+                            # 同步更新 message 对象
+                            if isinstance(item.message, ToolMessage):
+                                item.message.offloaded = True
+                                item.message.offload_path = str(self._context_fs.root_path / path)
+                        except Exception as e:
+                            logger.warning(f"Failed to offload ephemeral item {item.id}: {e}")
+                    # 标记为 destroyed（serializer 会用占位符）
+                    item.destroyed = True
+                    if isinstance(item.message, ToolMessage):
+                        item.message.destroyed = True
+
+        # 不再需要调用 ContextIR.destroy_ephemeral_items，因为已直接操作 items
 
     async def _execute_tool_call(self, tool_call: ToolCall) -> ToolMessage:
         """Execute a single tool call and return the result as a ToolMessage."""
@@ -707,11 +747,22 @@ Keep the summary brief but informative."""
         from bu_agent_sdk.agent.compaction.models import TokenUsage
         actual_tokens = TokenUsage.from_usage(response.usage).total_tokens
 
+        # 创建 OffloadPolicy
+        offload_policy = None
+        if self.offload_enabled and self._context_fs:
+            from bu_agent_sdk.context.offload import OffloadPolicy
+            offload_policy = OffloadPolicy(
+                enabled=True,
+                token_threshold=self.offload_token_threshold,
+            )
+
         # 创建选择性压缩策略
         policy = SelectiveCompactionPolicy(
             threshold=threshold,
             llm=self.llm,
             fallback_to_full_summary=True,
+            fs=self._context_fs,
+            offload_policy=offload_policy,
         )
 
         return await self._context.auto_compact(
@@ -1021,6 +1072,36 @@ Keep the summary brief but informative."""
         logging.info(
             f"Initialized {len(self.agents)} subagents: {[a.name for a in self.agents]}"
         )
+
+    def _setup_memory(self) -> None:
+        """设置 Memory 静态背景知识
+
+        从配置的文件中加载内容并写入 ContextIR header。
+        Token 超限时只警告不截断。
+        """
+        from bu_agent_sdk.context.memory import MemoryConfig, load_memory_content
+
+        if not isinstance(self.memory, MemoryConfig):
+            logger.warning("memory 参数不是 MemoryConfig 实例，跳过初始化")
+            return
+
+        # 加载文件内容
+        content = load_memory_content(self.memory)
+        if not content:
+            logger.warning("未能加载任何 memory 内容")
+            return
+
+        # Token 检查
+        token_count = self._context.token_counter.count(content)
+        if token_count > self.memory.max_tokens:
+            logger.warning(
+                f"Memory 内容超出 token 上限: {token_count} > {self.memory.max_tokens} "
+                f"(不会截断，但可能影响上下文预算)"
+            )
+
+        # 写入 ContextIR
+        self._context.set_memory(content, cache=self.memory.cache)
+        logger.info(f"Memory 已加载: {token_count} tokens 来自 {len(self.memory.files)} 个文件")
 
     def _setup_skills(self) -> None:
         """设置 Skill 支持

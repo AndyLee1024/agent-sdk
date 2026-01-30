@@ -77,13 +77,14 @@ class LoweringPipeline:
     def _build_header_text(context: ContextIR) -> str:
         """拼接 header 段的各部分文本
 
-        顺序：system_prompt → subagent_strategy → skill_strategy
+        顺序：system_prompt → memory → subagent_strategy → skill_strategy
         """
         parts: list[str] = []
 
         # Header 段中的各类型按固定顺序拼接
         type_order = [
             ItemType.SYSTEM_PROMPT,
+            ItemType.MEMORY,
             ItemType.SUBAGENT_STRATEGY,
             ItemType.SKILL_STRATEGY,
         ]

@@ -10,6 +10,8 @@
 - SystemReminder: 动态提醒注入
 - BudgetConfig / BudgetStatus: 预算控制
 - ContextEventBus: 可观测性
+- ContextFileSystem: 上下文卸载到文件系统
+- OffloadPolicy: 卸载策略配置
 """
 
 from bu_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
@@ -18,6 +20,7 @@ from bu_agent_sdk.context.compaction import (
     SelectiveCompactionPolicy,
     TypeCompactionRule,
 )
+from bu_agent_sdk.context.fs import ContextFileSystem, OffloadedMeta
 from bu_agent_sdk.context.ir import ContextIR
 from bu_agent_sdk.context.items import (
     DEFAULT_PRIORITIES,
@@ -27,11 +30,13 @@ from bu_agent_sdk.context.items import (
     SegmentName,
 )
 from bu_agent_sdk.context.lower import LoweringPipeline
+from bu_agent_sdk.context.memory import MemoryConfig
 from bu_agent_sdk.context.observer import (
     ContextEvent,
     ContextEventBus,
     EventType,
 )
+from bu_agent_sdk.context.offload import OffloadPolicy
 from bu_agent_sdk.context.reminder import ReminderPosition, SystemReminder
 
 __all__ = [
@@ -52,6 +57,8 @@ __all__ = [
     "BudgetConfig",
     "BudgetStatus",
     "TokenCounter",
+    # Memory
+    "MemoryConfig",
     # Reminder
     "SystemReminder",
     "ReminderPosition",
@@ -59,4 +66,8 @@ __all__ = [
     "ContextEvent",
     "ContextEventBus",
     "EventType",
+    # FileSystem
+    "ContextFileSystem",
+    "OffloadedMeta",
+    "OffloadPolicy",
 ]

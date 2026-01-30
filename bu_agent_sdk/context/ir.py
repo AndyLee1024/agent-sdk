@@ -64,7 +64,7 @@ class ContextIR:
     将 Agent 的上下文从扁平 list[BaseMessage] 提升为结构化 IR。
 
     Segments:
-        header: system_prompt + subagent_strategy + skill_strategy
+        header: system_prompt + memory + subagent_strategy + skill_strategy
         conversation: 所有对话消息
 
     Attributes:
@@ -120,6 +120,44 @@ class ContextIR:
                 detail="system_prompt set",
             ))
 
+    def set_memory(self, content: str, cache: bool = True) -> None:
+        """设置 MEMORY 静态背景知识（幂等覆盖）
+
+        Args:
+            content: MEMORY 内容
+            cache: 是否建议缓存（如 Anthropic prompt cache）
+        """
+        existing = self.header.find_one_by_type(ItemType.MEMORY)
+        token_count = self.token_counter.count(content)
+
+        if existing:
+            existing.content_text = content
+            existing.token_count = token_count
+            existing.cache_hint = cache
+        else:
+            item = ContextItem(
+                item_type=ItemType.MEMORY,
+                content_text=content,
+                token_count=token_count,
+                priority=DEFAULT_PRIORITIES[ItemType.MEMORY],
+                cache_hint=cache,
+            )
+            # 在 system_prompt 之后、subagent_strategy 之前插入
+            insert_idx = len(self.header.items)  # 默认插入到末尾
+            for i, existing_item in enumerate(self.header.items):
+                if existing_item.item_type == ItemType.SYSTEM_PROMPT:
+                    insert_idx = i + 1
+                elif existing_item.item_type == ItemType.SUBAGENT_STRATEGY:
+                    insert_idx = i
+                    break
+            self.header.items.insert(insert_idx, item)
+            self.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_ADDED,
+                item_type=ItemType.MEMORY,
+                item_id=item.id,
+                detail="memory set",
+            ))
+
     def set_subagent_strategy(self, prompt: str) -> None:
         """设置 Subagent 策略提示（幂等覆盖）"""
         existing = self.header.find_one_by_type(ItemType.SUBAGENT_STRATEGY)
@@ -135,10 +173,10 @@ class ContextIR:
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.SUBAGENT_STRATEGY],
             )
-            # 在 system_prompt 之后、skill_strategy 之前插入
+            # 在 system_prompt/memory 之后、skill_strategy 之前插入
             insert_idx = 0
             for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type == ItemType.SYSTEM_PROMPT:
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.MEMORY):
                     insert_idx = i + 1
                 elif existing_item.item_type == ItemType.SKILL_STRATEGY:
                     break

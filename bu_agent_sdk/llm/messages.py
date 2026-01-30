@@ -393,6 +393,12 @@ class ToolMessage(_MessageBase):
 	The original content remains intact in the message for debugging/logging.
 	"""
 
+	offloaded: bool = False
+	"""Whether this message's content has been offloaded to filesystem."""
+
+	offload_path: str | None = None
+	"""Path to the offloaded content file (if offloaded)."""
+
 	@property
 	def text(self) -> str:
 		"""Extract text content from the message."""

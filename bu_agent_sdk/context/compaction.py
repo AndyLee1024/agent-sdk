@@ -16,6 +16,8 @@ from bu_agent_sdk.context.items import DEFAULT_PRIORITIES, ItemType
 if TYPE_CHECKING:
     from bu_agent_sdk.context.ir import ContextIR
     from bu_agent_sdk.llm.base import BaseChatModel
+    from bu_agent_sdk.context.fs import ContextFileSystem
+    from bu_agent_sdk.context.offload import OffloadPolicy
 
 logger = logging.getLogger("bu_agent_sdk.context.compaction")
 
@@ -63,6 +65,9 @@ DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
     ItemType.SYSTEM_PROMPT.value: TypeCompactionRule(
         strategy=CompactionStrategy.NONE
     ),
+    ItemType.MEMORY.value: TypeCompactionRule(
+        strategy=CompactionStrategy.NONE
+    ),
     ItemType.SUBAGENT_STRATEGY.value: TypeCompactionRule(
         strategy=CompactionStrategy.NONE
     ),
@@ -93,6 +98,8 @@ class SelectiveCompactionPolicy:
     )
     llm: BaseChatModel | None = None
     fallback_to_full_summary: bool = True
+    fs: ContextFileSystem | None = None
+    offload_policy: OffloadPolicy | None = None
 
     def should_compact(self, total_tokens: int) -> bool:
         """检查是否需要压缩"""
@@ -128,7 +135,7 @@ class SelectiveCompactionPolicy:
 
         compacted_any = False
 
-        for item_type, _priority in sorted_types:
+        for item_type, _ in sorted_types:
             rule = self.rules.get(item_type.value)
             if rule is None or rule.strategy == CompactionStrategy.NONE:
                 continue
@@ -157,6 +164,12 @@ class SelectiveCompactionPolicy:
 
                 items_to_remove = items[:-rule.keep_recent]
                 for item in items_to_remove:
+                    # 跳过已 destroyed 的（已被 ephemeral 处理）
+                    if item.destroyed:
+                        continue
+                    # 检查是否需要卸载
+                    if self._should_offload(item):
+                        self.fs.offload(item)
                     context.conversation.remove_by_id(item.id)
                 compacted_any = True
                 logger.info(
@@ -190,6 +203,31 @@ class SelectiveCompactionPolicy:
             )
 
         return compacted_any
+
+    def _should_offload(self, item) -> bool:
+        """判断是否需要卸载
+
+        Args:
+            item: ContextItem 实例
+
+        Returns:
+            是否应该卸载此条目
+        """
+        if not self.fs or not self.offload_policy:
+            return False
+        if not self.offload_policy.enabled:
+            return False
+        # 已压缩的 summary 不卸载
+        if item.item_type == ItemType.COMPACTION_SUMMARY:
+            return False
+        # 检查类型是否启用
+        type_enabled = self.offload_policy.type_enabled.get(
+            item.item_type.value, False
+        )
+        if not type_enabled:
+            return False
+        # 检查 token 阈值
+        return item.token_count >= self.offload_policy.token_threshold
 
     async def _fallback_full_summary(self, context: ContextIR) -> bool:
         """回退到全量摘要

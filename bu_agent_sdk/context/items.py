@@ -20,6 +20,7 @@ class ItemType(Enum):
 
     # Header 段（lowered 为 SystemMessage 的一部分）
     SYSTEM_PROMPT = "system_prompt"
+    MEMORY = "memory"
     SUBAGENT_STRATEGY = "subagent_strategy"
     SKILL_STRATEGY = "skill_strategy"
 
@@ -50,6 +51,7 @@ DEFAULT_PRIORITIES: dict[ItemType, int] = {
     ItemType.COMPACTION_SUMMARY: 80,     # 不压缩
     ItemType.SKILL_STRATEGY: 90,
     ItemType.SUBAGENT_STRATEGY: 95,
+    ItemType.MEMORY: 100,                # 永不压缩
     ItemType.SYSTEM_PROMPT: 100,         # 永不压缩
 }
 
@@ -93,6 +95,8 @@ class ContextItem:
     created_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
     cache_hint: bool = False
+    offload_path: str | None = None  # 卸载文件路径（相对路径）
+    offloaded: bool = False          # 是否已卸载
 
 
 class SegmentName(Enum):

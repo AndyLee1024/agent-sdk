@@ -19,6 +19,7 @@ Example:
 """
 
 from bu_agent_sdk.agent import Agent
+from bu_agent_sdk.context import MemoryConfig
 from bu_agent_sdk.observability import Laminar, observe, observe_debug
 from bu_agent_sdk.skill import (
     SkillDefinition,
@@ -39,6 +40,8 @@ __all__ = [
     "Laminar",
     "observe",
     "observe_debug",
+    # Memory support
+    "MemoryConfig",
     # Subagent support
     "AgentDefinition",
     "SubagentResult",

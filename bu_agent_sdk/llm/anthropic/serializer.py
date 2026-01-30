@@ -238,7 +238,15 @@ class AnthropicMessageSerializer:
         """Convert a ToolMessage to Anthropic's ToolResultBlockParam."""
         # Use placeholder if message was destroyed to save context
         if message.destroyed:
-            content = "<removed to save context>"
+            # 如果有 offload_path，显示完整路径；否则使用简单占位符
+            if message.offloaded and message.offload_path:
+                content = (
+                    f"[Content offloaded]\n"
+                    f"Path: {message.offload_path}\n"
+                    f"Use Read tool to view details."
+                )
+            else:
+                content = "<removed to save context>"
         else:
             content = AnthropicMessageSerializer._serialize_tool_result_content(
                 message.content

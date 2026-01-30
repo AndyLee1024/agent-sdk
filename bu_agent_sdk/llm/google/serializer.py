@@ -21,7 +21,17 @@ class GoogleMessageSerializer:
         """Convert a ToolMessage to Google's FunctionResponse Part."""
         # Use placeholder if message was destroyed to save context
         if message.destroyed:
-            response_data = {"result": "<removed to save context>"}
+            # 如果有 offload_path，显示完整路径；否则使用简单占位符
+            if message.offloaded and message.offload_path:
+                response_data = {
+                    "result": (
+                        f"[Content offloaded]\n"
+                        f"Path: {message.offload_path}\n"
+                        f"Use Read tool to view details."
+                    )
+                }
+            else:
+                response_data = {"result": "<removed to save context>"}
         elif message.is_error:
             response_data = {"error": message.text}
         else:
