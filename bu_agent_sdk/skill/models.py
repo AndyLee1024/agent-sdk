@@ -17,7 +17,6 @@ class SkillDefinition:
     prompt: str  # Markdown 正文
 
     # 可选字段（Frontmatter）
-    allowed_tools: list[str] | None = None
     model: str | None = None  # [已弃用] 该字段已被忽略，请使用 Subagent 代替
     argument_hint: str | None = None  # 暂时保留但不使用
     disable_model_invocation: bool = False
@@ -69,18 +68,10 @@ class SkillDefinition:
         if not description:
             description = f"Skill: {name}"
 
-        # 解析 allowed-tools（支持逗号分隔字符串或列表）
-        allowed_tools_raw = frontmatter.get("allowed-tools") or frontmatter.get("allowed_tools")
-        if isinstance(allowed_tools_raw, str):
-            allowed_tools = [t.strip() for t in allowed_tools_raw.split(",") if t.strip()]
-        else:
-            allowed_tools = allowed_tools_raw
-
         return cls(
             name=name,
             description=description,
             prompt=prompt,
-            allowed_tools=allowed_tools,
             model=frontmatter.get("model"),
             argument_hint=frontmatter.get("argument-hint") or frontmatter.get("argument_hint"),
             disable_model_invocation=frontmatter.get("disable-model-invocation", False)

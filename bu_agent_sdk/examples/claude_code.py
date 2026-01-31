@@ -335,7 +335,7 @@ async def main():
 
     # Create agent with dependency override for the sandbox context
     agent = Agent(
-        llm=ChatOpenAI(model="grok-code-fast-1", base_url="http://192.168.100.1:4141/v1", api_key="sk-b3e2affa66e5466c9952c8e768e7ba8f"),
+        llm=ChatAnthropic(model="gemini-3-pro-low", base_url="http://127.0.0.1:8045/", api_key="sk-b3e2affa66e5466c9952c8e768e7ba8f"),
         tools=ALL_TOOLS,
         system_prompt=f"You are a coding assistant. Working directory: {ctx.working_dir}。 你总是需要使用中文回复用户",
         dependency_overrides={get_sandbox_context: lambda: ctx},
@@ -343,7 +343,7 @@ async def main():
 
     print(f"🚀 Starting query...\n")
     async for event in agent.query_stream(
-        "使用frontend design 来设计一个登录页面, 保存为login.html"
+        "使用frontend design 来设计一个登录页面, write为login.html"
     ):
         match event:
             case ThinkingEvent(content=text):

@@ -13,9 +13,12 @@ from bu_agent_sdk.tools.decorator import Tool, tool
 from bu_agent_sdk.tools.depends import DependencyOverrides
 from bu_agent_sdk.tools.registry import ToolRegistry
 
+logger = logging.getLogger("bu_agent_sdk.subagent.task_tool")
+
 
 def create_task_tool(
     agents: list[AgentDefinition],
+    parent_tools: list[Tool],
     tool_registry: ToolRegistry,
     parent_llm: BaseChatModel,
     parent_dependency_overrides: DependencyOverrides | None = None,
@@ -24,6 +27,7 @@ def create_task_tool(
 
     Args:
         agents: AgentDefinition 列表
+        parent_tools: 父 Agent 当前可见的工具列表（用于继承与动态工具解析）
         tool_registry: 全局工具注册表
         parent_llm: 父 Agent 的 LLM 实例
         parent_dependency_overrides: 父 Agent 的依赖覆盖（会继承给 Subagent）
@@ -33,6 +37,34 @@ def create_task_tool(
     """
     # 构建 subagent 名称映射
     agent_map = {a.name: a for a in agents}
+
+    def _resolve_subagent_tools(agent_def: AgentDefinition) -> tuple[list[Tool], list[str]]:
+        """解析 subagent 可用工具列表。
+
+        规则：
+        - agent_def.tools is None：继承父 Agent 工具（禁止 Task，避免嵌套 subagent）
+        - agent_def.tools 是列表：按名称解析（优先从 parent_tools 解析动态工具；再从 registry 解析）
+        """
+        parent_map = {t.name: t for t in parent_tools}
+
+        if agent_def.tools is None:
+            tools = [t for t in parent_tools if t.name != "Task"]
+            return tools, []
+
+        resolved: list[Tool] = []
+        missing: list[str] = []
+        for name in agent_def.tools or []:
+            if name == "Task":
+                continue
+            if name in parent_map:
+                resolved.append(parent_map[name])
+                continue
+            if name in tool_registry:
+                resolved.append(tool_registry.get(name))
+                continue
+            missing.append(name)
+
+        return resolved, missing
 
     @tool("Launch a subagent to handle a specific task.")
     async def Task(
@@ -59,10 +91,16 @@ def create_task_tool(
         llm = resolve_model(agent_def.model, parent_llm)
 
         # 解析工具
-        tools = tool_registry.filter(agent_def.tools or [])
+        tools, missing_tools = _resolve_subagent_tools(agent_def)
 
-        logging.info(
-            f"Launching subagent '{subagent_type}' with {len(tools)} tools: {agent_def.tools}"
+        if missing_tools:
+            logger.warning(
+                f"Subagent '{subagent_type}' requested missing tool(s): {missing_tools}"
+            )
+
+        logger.info(
+            f"Launching subagent '{subagent_type}' with {len(tools)} tool(s): "
+            f"{[t.name for t in tools]}"
         )
 
         # 创建 Subagent（继承父级依赖覆盖）
@@ -82,7 +120,7 @@ def create_task_tool(
             subagent.skills = [s for s in subagent.skills if s.name in allowed_skill_names]
             # 重新创建 Skill 工具（更新工具描述）
             subagent._rebuild_skill_tool()
-            logging.info(
+            logger.info(
                 f"Filtered subagent '{subagent_type}' skills to: {[s.name for s in subagent.skills]}"
             )
 
@@ -95,18 +133,18 @@ def create_task_tool(
             else:
                 result = await subagent.query(prompt)
 
-            logging.info(f"Subagent '{subagent_type}' completed successfully")
+            logger.info(f"Subagent '{subagent_type}' completed successfully")
             return result
 
         except asyncio.TimeoutError:
             error_msg = (
                 f"Error: Subagent '{subagent_type}' timeout after {agent_def.timeout}s"
             )
-            logging.error(error_msg)
+            logger.error(error_msg)
             return error_msg
         except Exception as e:
             error_msg = f"Error in subagent '{subagent_type}': {e}"
-            logging.error(error_msg, exc_info=True)
+            logger.error(error_msg, exc_info=True)
             return error_msg
 
     return Task

@@ -159,10 +159,13 @@ class SelectiveCompactionPolicy:
 
             elif rule.strategy == CompactionStrategy.TRUNCATE:
                 # 保留最近 N 个，删除更早的
-                if len(items) <= rule.keep_recent:
+                if rule.keep_recent > 0 and len(items) <= rule.keep_recent:
                     continue
 
-                items_to_remove = items[:-rule.keep_recent]
+                if rule.keep_recent <= 0:
+                    items_to_remove = items
+                else:
+                    items_to_remove = items[:-rule.keep_recent]
                 for item in items_to_remove:
                     # 跳过已 destroyed 的（已被 ephemeral 处理）
                     if item.destroyed:
@@ -241,8 +244,16 @@ class SelectiveCompactionPolicy:
             logger.warning("无法执行全量摘要回退：未提供 LLM")
             return False
 
-        # 获取当前所有 conversation messages
-        conversation_messages = context.conversation_messages
+        # 获取当前所有 conversation messages（排除 Skill 注入项）
+        #
+        # Skill 的详细指令来自运行时注入，允许随时重复加载。
+        # 为避免在全量摘要中固化 Skill prompt，摘要时应跳过这些注入项。
+        conversation_messages = [
+            item.message
+            for item in context.conversation.items
+            if item.message is not None
+            and item.item_type not in (ItemType.SKILL_PROMPT, ItemType.SKILL_METADATA)
+        ]
 
         if not conversation_messages:
             return False

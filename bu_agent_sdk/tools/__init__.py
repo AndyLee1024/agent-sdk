@@ -4,12 +4,12 @@ Tools framework for building agentic applications.
 This module provides:
 - @tool decorator for creating type-safe tools from functions
 - Depends for dependency injection
-- Global default registry for automatic tool registration
+- Built-in default registry (only SDK-provided tools)
 
 Example:
     from bu_agent_sdk.tools import tool, Depends
 
-    # Define a simple tool (auto-registers to global registry)
+    # Define a simple tool (not globally registered)
     @tool("Add two numbers together")
     async def add(a: int, b: int) -> int:
         return a + b
@@ -31,15 +31,15 @@ from bu_agent_sdk.tools.decorator import Tool, ToolContent, tool
 from bu_agent_sdk.tools.depends import DependencyOverrides, Depends
 from bu_agent_sdk.tools.registry import ToolRegistry
 
-# ====== 全局默认 Registry ======
+# ====== SDK 内置默认 Registry ======
 _default_registry = ToolRegistry()
 
 
 def get_default_registry() -> ToolRegistry:
-    """获取全局默认工具注册表
+    """获取 SDK 内置默认工具注册表
 
-    所有使用 @tool 装饰器且未指定 registry 参数的工具
-    都会自动注册到这个全局 registry。
+    该 registry 仅用于 SDK 内置工具。@tool 默认不会做任何全局注册，
+    调用方需要显式将 Tool 传给 Agent（tools=[...]）或注册到自定义 registry。
 
     Returns:
         全局默认的 ToolRegistry 实例
@@ -51,7 +51,7 @@ def get_default_registry() -> ToolRegistry:
         async def search(query: str) -> str:
             return "..."
 
-        # 获取包含所有已注册工具的 registry
+        # 仅包含 SDK 内置工具（可为空）
         registry = get_default_registry()
 
         agent = Agent(

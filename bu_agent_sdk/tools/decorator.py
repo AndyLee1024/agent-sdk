@@ -375,7 +375,9 @@ def tool(
         description: Description of what the tool does. This is sent to the LLM.
         name: Optional custom name for the tool. Defaults to function name.
         registry: Optional ToolRegistry to register the tool to.
-                  If None, registers to the global default registry.
+                  If None, the tool is NOT registered globally. The caller must
+                  explicitly pass the returned Tool to an Agent (tools=[...]) or
+                  register it into a registry.
         ephemeral: How many outputs to keep in context before older ones are removed.
                    False = not ephemeral (keep all), True = keep last 1, int = keep last N.
 
@@ -383,12 +385,12 @@ def tool(
         A Tool instance wrapping the decorated function.
 
     Example:
-        # Basic usage - auto-registers to global registry
+        # Basic usage - returns a Tool (not globally registered)
         @tool("Search the web for information")
         async def search(query: str) -> str:
             return f"Results for: {query}"
 
-        # Custom registry
+        # Custom registry (explicit registration)
         from bu_agent_sdk.tools import ToolRegistry
         custom_registry = ToolRegistry()
         @tool("Special tool", registry=custom_registry)
@@ -415,16 +417,10 @@ def tool(
             ephemeral=ephemeral,
         )
 
-        # ====== 自动注册逻辑 ======
+        # ====== 显式注册逻辑 ======
+        # 默认不做任何全局注册：工具的生命周期应当由 Agent/调用方管理。
         if registry is not None:
-            # 用户指定了自定义 registry，注册到指定 registry
             registry.register(t)
-        else:
-            # 未指定 registry，注册到全局默认 registry
-            # 延迟导入避免循环依赖
-            from bu_agent_sdk.tools import get_default_registry
-
-            get_default_registry().register(t)
 
         return t
 

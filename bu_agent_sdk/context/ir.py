@@ -72,7 +72,6 @@ class ContextIR:
         token_counter: token 计数器
         event_bus: 事件总线
         reminders: 系统提醒列表
-        active_skill_names: 当前激活的 Skill 名称集合
     """
 
     header: Segment = field(
@@ -85,7 +84,6 @@ class ContextIR:
     token_counter: TokenCounter = field(default_factory=TokenCounter)
     event_bus: ContextEventBus = field(default_factory=ContextEventBus)
     reminders: list[SystemReminder] = field(default_factory=list)
-    active_skill_names: set[str] = field(default_factory=set)
     _pending_skill_items: list[ContextItem] = field(default_factory=list)
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
@@ -521,7 +519,6 @@ class ContextIR:
         self.header.items.clear()
         self.conversation.items.clear()
         self._pending_skill_items.clear()
-        self.active_skill_names.clear()
         self.reminders.clear()
 
         self.event_bus.emit(ContextEvent(

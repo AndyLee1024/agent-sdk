@@ -9,11 +9,11 @@ SUBAGENT_STRATEGY_PROMPT = """
 
 你可以使用 Task 工具启动专门化的 Subagent 来完成特定任务。
 
-### 可用的 Subagent 类型
-
+<avaliable_subagents>
 {subagent_list}
+</avaliable_subagents>
 
-### 调用方式
+<subagent_usage_rules>
 
 使用 Task 工具时需要提供：
 - `subagent_type`: Subagent 名称（如 "code-reviewer", "researcher"）
@@ -42,6 +42,8 @@ SUBAGENT_STRATEGY_PROMPT = """
    1. Task(subagent_type="researcher", prompt="研究 X 主题")
    2. 等待结果
    3. Task(subagent_type="writer", prompt="根据研究结果写文章: {{研究结果}}")
+
+</subagent_usage_rules>
 """
 
 

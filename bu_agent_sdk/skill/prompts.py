@@ -11,12 +11,11 @@ SKILL_STRATEGY_PROMPT = """
 
 你可以使用 Skill 工具来执行预定义的技能。每个 skill 是存储在 `SKILL.md` 文件中的一组本地指令。
 
-### 可用 Skills
-
+<avaliable_skills>
 {skill_list}
+</avaliable_skills>
 
-### 使用方式
-
+<skill_usage_rules>
 - Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
@@ -33,6 +32,7 @@ SKILL_STRATEGY_PROMPT = """
   - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.
   - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue.
+</skill_usage_rules>
 """
 
 
@@ -55,7 +55,7 @@ def generate_skill_prompt(skills: list[SkillDefinition]) -> str:
     skill_list = []
     for skill in active_skills:
         path_str = str(skill.base_dir / "SKILL.md") if skill.base_dir else "N/A"
-        skill_list.append(f"- **{skill.name}**: {skill.description} (file: {path_str})")
+        skill_list.append(f"- **{skill.name}**: {skill.description}")
 
     skills_str = "\n".join(skill_list)
     return SKILL_STRATEGY_PROMPT.format(skill_list=skills_str)
