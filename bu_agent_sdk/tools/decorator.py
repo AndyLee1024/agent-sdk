@@ -321,9 +321,17 @@ class Tool:
                     if isinstance(call_kwargs[param_name], dict):
                         call_kwargs[param_name] = param_type(**call_kwargs[param_name])
                 else:
-                    # Kwargs are the model fields directly
+                    # Kwargs are the model fields directly (support alias keys too)
+                    allowed_names = set(param_type.model_fields.keys())
+                    allowed_aliases = {
+                        field.alias
+                        for field in param_type.model_fields.values()
+                        if getattr(field, "alias", None)
+                    }
                     model_kwargs = {
-                        k: v for k, v in kwargs.items() if k in param_type.model_fields
+                        k: v
+                        for k, v in kwargs.items()
+                        if k in allowed_names or k in allowed_aliases
                     }
                     call_kwargs = {
                         param_name: param_type(**model_kwargs),
@@ -357,7 +365,7 @@ class Tool:
         if isinstance(result, BaseModel):
             return result.model_dump_json()
         if isinstance(result, (dict, list)):
-            return json.dumps(result)
+            return json.dumps(result, ensure_ascii=False)
         return str(result)
 
 

@@ -34,6 +34,16 @@ from bu_agent_sdk.tools.registry import ToolRegistry
 # ====== SDK 内置默认 Registry ======
 _default_registry = ToolRegistry()
 
+# 注册 SDK 内置系统工具（Claude Code 风格）
+try:
+    from bu_agent_sdk.system_tools import register_system_tools
+
+    register_system_tools(_default_registry)
+except Exception:
+    # 避免 import 时阻塞 SDK 基本可用性
+    # 详细错误通过 logger 记录在 system_tools 内部
+    pass
+
 
 def get_default_registry() -> ToolRegistry:
     """获取 SDK 内置默认工具注册表
@@ -81,6 +91,12 @@ def reset_default_registry() -> None:
     """
     global _default_registry
     _default_registry = ToolRegistry()
+    try:
+        from bu_agent_sdk.system_tools import register_system_tools
+
+        register_system_tools(_default_registry)
+    except Exception:
+        pass
 
 
 __all__ = [

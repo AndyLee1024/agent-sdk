@@ -25,6 +25,21 @@ from typing import Any, Literal
 
 
 @dataclass
+class SessionInitEvent:
+	"""Emitted once when a chat/session is initialized.
+
+	This event is intended to return a stable session_id (UUID string) to the caller
+	for resume/fork workflows.
+	"""
+
+	session_id: str
+	"""Session id (UUID string)."""
+
+	def __str__(self) -> str:
+		return f"Session initialized: {self.session_id}"
+
+
+@dataclass
 class TextEvent:
 	"""Emitted when the assistant produces text content."""
 
@@ -193,7 +208,8 @@ class HiddenUserMessageEvent:
 
 # Union type for all events
 AgentEvent = (
-	TextEvent
+	SessionInitEvent
+	| TextEvent
 	| ThinkingEvent
 	| ToolCallEvent
 	| ToolResultEvent

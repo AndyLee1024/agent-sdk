@@ -18,7 +18,7 @@ Example:
     result = await agent.query("What is 2 + 3?")
 """
 
-from bu_agent_sdk.agent import Agent
+from bu_agent_sdk.agent import Agent, ChatSession, SessionInitEvent
 from bu_agent_sdk.context import MemoryConfig
 from bu_agent_sdk.observability import Laminar, observe, observe_debug
 from bu_agent_sdk.skill import (
@@ -37,6 +37,8 @@ from bu_agent_sdk.subagent import (
 
 __all__ = [
     "Agent",
+    "ChatSession",
+    "SessionInitEvent",
     "Laminar",
     "observe",
     "observe_debug",

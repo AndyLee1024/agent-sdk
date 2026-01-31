@@ -201,7 +201,8 @@ import json
 import logging
 import random
 import time
-from collections.abc import AsyncIterator
+import uuid
+from collections.abc import AsyncIterator, Iterable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -318,6 +319,9 @@ class Agent:
     memory: object | None = None  # type: ignore  # MemoryConfig
     """Memory configuration for loading static background knowledge."""
 
+    session_id: str | None = None
+    """Optional session id override (UUID string). Used to locate session storage."""
+
     # Internal state
     _context: ContextIR = field(default=None, repr=False)  # type: ignore  # 在 __post_init__ 中初始化
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False)
@@ -391,18 +395,15 @@ class Agent:
         # Initialize token cost service
         self._token_cost = TokenCost(include_cost=self.include_cost)
 
-        # Generate session_id (timestamp + random)
-        import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        random_suffix = ''.join(random.choices('abcdefghijklmnopqrstuvwxyz0123456789', k=6))
-        self._session_id = f"session_{timestamp}_{random_suffix}"
+        # Generate session_id (uuid by default)
+        self._session_id = self.session_id or str(uuid.uuid4())
 
         # Initialize ContextFileSystem if offload enabled
         if self.offload_enabled:
             if self.offload_root_path:
                 root_path = Path(self.offload_root_path).expanduser()
             else:
-                root_path = Path.home() / ".agent" / "context" / self._session_id
+                root_path = Path.home() / ".agent" / "sessions" / self._session_id / "offload"
             self._context_fs = ContextFileSystem(
                 root_path=root_path,
                 session_id=self._session_id,
@@ -465,6 +466,36 @@ class Agent:
             UsageSummary with token counts and costs.
         """
         return await self._token_cost.get_usage_summary()
+
+    def chat(
+        self,
+        *,
+        session_id: str | None = None,
+        fork_session: str | None = None,
+        storage_root: Path | None = None,
+        message_source: (
+            AsyncIterator[str | list[ContentPartTextParam | ContentPartImageParam]]
+            | Iterable[str | list[ContentPartTextParam | ContentPartImageParam]]
+            | None
+        ) = None,
+    ):
+        from bu_agent_sdk.agent.chat_session import ChatSession
+
+        if fork_session is not None and session_id is not None:
+            raise ValueError("session_id and fork_session cannot be used together")
+
+        if fork_session is not None:
+            base = ChatSession.resume(self, session_id=fork_session)
+            return base.fork_session(storage_root=storage_root, message_source=message_source)
+
+        if session_id is not None:
+            return ChatSession.resume(
+                self,
+                session_id=session_id,
+                storage_root=storage_root,
+                message_source=message_source,
+            )
+        return ChatSession(self, storage_root=storage_root, message_source=message_source)
 
     def _resolve_system_prompt(self) -> str:
         """解析 system_prompt 配置，返回最终的系统提示文本
@@ -641,7 +672,11 @@ class Agent:
         # Handle TaskComplete outside the span context to avoid it being logged as an error
         task_complete_exception = None
 
-        with span_context:
+        from bu_agent_sdk.tools.system_context import bind_system_tool_context
+
+        project_root = (self.project_root or Path.cwd()).resolve()
+
+        with span_context, bind_system_tool_context(project_root=project_root):
             try:
                 # Parse arguments
                 args = json.loads(tool_call.function.arguments)
