@@ -240,6 +240,7 @@ from bu_agent_sdk.llm.views import ChatInvokeCompletion
 from bu_agent_sdk.observability import Laminar, observe
 from bu_agent_sdk.tokens import TokenCost, UsageSummary
 from bu_agent_sdk.tools.decorator import Tool
+from bu_agent_sdk.agent.llm_levels import LLMLevel
 
 
 @dataclass
@@ -267,7 +268,8 @@ class Agent:
         dependency_overrides: Optional dict to override tool dependencies.
     """
 
-    llm: BaseChatModel
+    llm: BaseChatModel | None = None
+    level: LLMLevel | None = None
     tools: list[Tool] | None = None
     system_prompt: SystemPromptType = None
     max_iterations: int = 200  # 200 steps max for now
@@ -302,6 +304,7 @@ class Agent:
     """HTTP status codes that trigger retries (matches browser-use)."""
 
     # Subagent support
+    name: str | None = None
     agents: list | None = None  # type: ignore  # list[AgentDefinition]
     """List of AgentDefinition for creating subagents."""
     tool_registry: object | None = None  # type: ignore  # ToolRegistry
@@ -319,6 +322,9 @@ class Agent:
     memory: object | None = None  # type: ignore  # MemoryConfig
     """Memory configuration for loading static background knowledge."""
 
+    llm_levels: dict[LLMLevel, BaseChatModel] | None = None
+    """三档 LLM（LOW/MID/HIGH）。用于工具内二次模型调用（如 WebFetch），默认可由 env 覆盖。"""
+
     session_id: str | None = None
     """Optional session id override (UUID string). Used to locate session storage."""
 
@@ -327,6 +333,7 @@ class Agent:
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False)
     _compaction_service: CompactionService | None = field(default=None, repr=False)
     _token_cost: TokenCost = field(default=None, repr=False)  # type: ignore
+    _parent_token_cost: TokenCost | None = field(default=None, repr=False)
     _context_fs: ContextFileSystem | None = field(default=None, repr=False)
     _session_id: str = field(default="", repr=False)
 
@@ -392,11 +399,31 @@ class Agent:
         # Build tool lookup map
         self._tool_map = {t.name: t for t in self.tools}
 
-        # Initialize token cost service
-        self._token_cost = TokenCost(include_cost=self.include_cost)
-
         # Generate session_id (uuid by default)
         self._session_id = self.session_id or str(uuid.uuid4())
+
+        # Resolve LLM levels (LOW/MID/HIGH)
+        from bu_agent_sdk.agent.llm_levels import resolve_llm_levels
+
+        self.llm_levels = resolve_llm_levels(explicit=self.llm_levels)  # type: ignore[assignment]
+
+        # Resolve main LLM:
+        # llm= instance > level=档位 > 默认 MID
+        if self.llm is None:
+            effective_level: LLMLevel = self.level or "MID"
+            if self.llm_levels is None or effective_level not in self.llm_levels:
+                raise ValueError(f"level='{effective_level}' 不在 llm_levels 中")
+            self.llm = self.llm_levels[effective_level]
+        elif self.level is not None:
+            logger.warning(
+                f"同时指定了 llm= 和 level='{self.level}'，llm= 优先"
+            )
+
+        # Initialize token cost service (Subagent 复用父级实例)
+        if self._parent_token_cost is not None:
+            self._token_cost = self._parent_token_cost
+        else:
+            self._token_cost = TokenCost(include_cost=self.include_cost)
 
         # Initialize ContextFileSystem if offload enabled
         if self.offload_enabled:
@@ -459,6 +486,21 @@ class Agent:
         """Get the token cost service for direct access to usage tracking."""
         return self._token_cost
 
+    @property
+    def _effective_level(self) -> LLMLevel | None:
+        """返回当前 Agent 实际使用的档位（用于 usage 打标）。"""
+        if self.level is not None:
+            return self.level
+
+        if self.llm is None or self.llm_levels is None:
+            return None
+
+        for lv, llm_inst in self.llm_levels.items():
+            if llm_inst is self.llm:
+                return lv
+
+        return None
+
     async def get_usage(self) -> UsageSummary:
         """Get usage summary for the agent.
 
@@ -466,6 +508,51 @@ class Agent:
             UsageSummary with token counts and costs.
         """
         return await self._token_cost.get_usage_summary()
+
+    async def get_context_info(self):
+        """获取当前上下文使用情况的详细信息
+
+        Returns:
+            ContextInfo: 包含上下文使用统计、分类明细、模型信息等
+        """
+        from bu_agent_sdk.context.info import ContextInfo, _build_categories
+
+        # 获取 budget 状态
+        budget = self._context.get_budget_status()
+
+        # 获取模型信息
+        model_name = self.llm.model
+        context_limit = await self._compaction_service.get_model_context_limit(model_name)
+        compact_threshold = await self._compaction_service.get_threshold_for_model(model_name)
+
+        # 估算 Tool Definitions token 数
+        tool_defs_tokens = 0
+        if self.tools:
+            import json
+            tool_defs_json = json.dumps(
+                [t.definition.model_dump() for t in self.tools],
+                ensure_ascii=False
+            )
+            tool_defs_tokens = self._context.token_counter.count(tool_defs_json)
+
+        # 构建类别信息
+        categories = _build_categories(budget.tokens_by_type, self._context)
+
+        # 检查是否启用压缩
+        compaction_enabled = self._compaction_service.config.enabled if self._compaction_service else True
+
+        return ContextInfo(
+            model_name=model_name,
+            context_limit=context_limit,
+            compact_threshold=compact_threshold,
+            compact_threshold_ratio=budget.compact_threshold_ratio,
+            total_tokens=budget.total_tokens,
+            header_tokens=budget.header_tokens,
+            conversation_tokens=budget.conversation_tokens,
+            tool_definitions_tokens=tool_defs_tokens,
+            categories=categories,
+            compaction_enabled=compaction_enabled,
+        )
 
     def chat(
         self,
@@ -675,8 +762,18 @@ class Agent:
         from bu_agent_sdk.tools.system_context import bind_system_tool_context
 
         project_root = (self.project_root or Path.cwd()).resolve()
+        if self.offload_root_path:
+            session_root = Path(self.offload_root_path).expanduser().resolve().parent
+        else:
+            session_root = (Path.home() / ".agent" / "sessions" / self._session_id).resolve()
 
-        with span_context, bind_system_tool_context(project_root=project_root):
+        with span_context, bind_system_tool_context(
+            project_root=project_root,
+            session_id=self._session_id,
+            session_root=session_root,
+            token_cost=self._token_cost,
+            llm_levels=self.llm_levels,  # type: ignore[arg-type]
+        ):
             try:
                 # Parse arguments
                 args = json.loads(tool_call.function.arguments)
@@ -800,7 +897,15 @@ class Agent:
 
                 # Track token usage
                 if response.usage:
-                    self._token_cost.add_usage(self.llm.model, response.usage)
+                    source = "agent"
+                    if self._is_subagent:
+                        source = f"subagent:{self.name}" if self.name else "subagent"
+                    self._token_cost.add_usage(
+                        self.llm.model,
+                        response.usage,
+                        level=self._effective_level,
+                        source=source,
+                    )
 
                 return response
 
@@ -976,6 +1081,8 @@ Keep the summary brief but informative."""
             fallback_to_full_summary=True,
             fs=self._context_fs,
             offload_policy=offload_policy,
+            token_cost=self._token_cost,
+            level=self._effective_level,
         )
 
         return await self._context.auto_compact(
@@ -1308,6 +1415,8 @@ Keep the summary brief but informative."""
             tool_registry=self.tool_registry,  # type: ignore[arg-type]
             parent_llm=self.llm,
             parent_dependency_overrides=self.dependency_overrides,  # type: ignore
+            parent_llm_levels=self.llm_levels,
+            parent_token_cost=self._token_cost,
         )
 
         # 添加到工具列表

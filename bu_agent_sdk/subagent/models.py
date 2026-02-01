@@ -9,6 +9,7 @@ from pathlib import Path
 import yaml
 
 from bu_agent_sdk.agent.compaction import CompactionConfig
+from bu_agent_sdk.agent.llm_levels import LLMLevel
 from bu_agent_sdk.tokens.views import UsageSummary
 
 
@@ -21,7 +22,8 @@ class AgentDefinition:
     prompt: str  # 系统提示（Markdown 正文部分）
     tools: list[str] | None = None  # 可用工具名称
     skills: list[str] | None = None  # 可用的 Skills 名称列表（限制 Subagent 可用的 Skills）
-    model: str | None = "inherit"
+    model: str | None = None
+    level: LLMLevel | None = None
     max_iterations: int = 50  # 最大迭代次数
     timeout: float | None = None  # 超时时间（秒）
     compaction: CompactionConfig | None = None  # 上下文压缩配置
@@ -69,7 +71,23 @@ class AgentDefinition:
             model = frontmatter.get("model")
             if model is not None and not isinstance(model, str):
                 model = str(model)
+            if model is not None:
+                model = model.strip()
+                if not model or model.lower() == "inherit":
+                    model = None
             init_kwargs["model"] = model
+
+        if "level" in frontmatter:
+            level = frontmatter.get("level")
+            if level is not None and not isinstance(level, str):
+                level = str(level)
+            if level is not None:
+                level = level.strip().upper()
+                if not level:
+                    level = None
+            if level is not None and level not in ("LOW", "MID", "HIGH"):
+                raise ValueError(f"Invalid level '{level}', expected one of: LOW/MID/HIGH")
+            init_kwargs["level"] = level
 
         return cls(
             name=frontmatter["name"],

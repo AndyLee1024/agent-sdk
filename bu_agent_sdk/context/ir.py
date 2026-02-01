@@ -280,6 +280,26 @@ class ContextIR:
 
         # 提取文本内容用于 token 估算
         content_text = message.text if hasattr(message, "text") else ""
+
+        # AssistantMessage 特殊处理：需要包括 tool_calls 的 tokens
+        # 因为 tool_calls 也会被发送给 LLM，占用 prompt tokens
+        if isinstance(message, AssistantMessage) and message.tool_calls:
+            import json
+
+            tool_calls_json = json.dumps(
+                [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in message.tool_calls
+                ],
+                ensure_ascii=False,
+            )
+            # 如果有文本内容，拼接；否则只用 tool_calls
+            content_text = content_text + "\n" + tool_calls_json if content_text else tool_calls_json
+
         token_count = self.token_counter.count(content_text)
 
         # ToolMessage 特殊属性

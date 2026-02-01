@@ -12,6 +12,7 @@ from pathlib import Path
 from bu_agent_sdk.agent.events import AgentEvent, FinalResponseEvent, SessionInitEvent
 from bu_agent_sdk.agent.service import Agent
 from bu_agent_sdk.context.items import ContextItem, ItemType
+from bu_agent_sdk.tokens.views import UsageSummary
 from bu_agent_sdk.llm.messages import (
     AssistantMessage,
     BaseMessage,
@@ -525,6 +526,65 @@ class ChatSession:
             storage_root=dst,
             message_source=message_source,
         )
+
+    async def get_usage(self) -> UsageSummary:
+        """获取会话的 token 使用统计。
+
+        Returns:
+            UsageSummary: Token 使用统计，包含总 tokens、成本、按模型/档位的统计
+
+        Note:
+            - 即使 session 已关闭，仍可调用此方法获取最终统计
+            - 统计包括主 Agent 和所有 Subagent 的 token 使用
+        """
+        return await self._agent.get_usage()
+
+    async def get_context_info(self):
+        """获取当前会话的上下文使用情况
+
+        Returns:
+            ContextInfo: 包含上下文使用统计、分类明细、模型信息等
+
+        Note:
+            - 即使 session 已关闭，仍可调用此方法
+        """
+        return await self._agent.get_context_info()
+
+    def clear_history(self) -> None:
+        """清空会话历史和 token 使用记录。
+
+        此方法会：
+        1. 清空内存中的对话历史
+        2. 重置 token 使用统计
+        3. 重建 context header（system prompt、subagent、skill、memory）
+        4. 在持久化 JSONL 文件中写入 conversation_reset 事件
+
+        Raises:
+            ChatSessionClosedError: 如果 session 已关闭
+
+        Warning:
+            - 此操作不可逆，清空后无法恢复历史
+            - 如需保留历史，请先使用 fork_session() 创建副本
+            - 不要在 query_stream() 执行过程中调用此方法
+        """
+        if self._closed:
+            raise ChatSessionClosedError("Cannot clear history on a closed session")
+
+        # 清空内存中的历史和 token 记录
+        self._agent.clear_history()
+
+        # 向 JSONL 写入 conversation_reset 事件
+        self._turn_number += 1
+        reset_event = {
+            "schema_version": PERSISTENCE_SCHEMA_VERSION,
+            "session_id": self.session_id,
+            "turn_number": self._turn_number,
+            "op": "conversation_reset",
+            "conversation": {
+                "items": []
+            },
+        }
+        _events_jsonl_append(self._context_jsonl, reset_event)
 
     async def send(self, message: ChatMessage) -> None:
         if self._closed:

@@ -13,7 +13,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
+
+from bu_agent_sdk.tokens import TokenCost
+
+if TYPE_CHECKING:
+    from bu_agent_sdk.llm.base import BaseChatModel
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +26,10 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class SystemToolContext:
     project_root: Path
+    session_id: str = "default"
+    session_root: Path | None = None
+    token_cost: TokenCost | None = None
+    llm_levels: dict[str, "BaseChatModel"] | None = None
 
 
 _SYSTEM_TOOL_CONTEXT: ContextVar[SystemToolContext | None] = ContextVar(
@@ -45,12 +54,26 @@ def get_system_tool_context() -> SystemToolContext:
 
 
 @contextmanager
-def bind_system_tool_context(project_root: Path) -> Iterator[None]:
+def bind_system_tool_context(
+    *,
+    project_root: Path,
+    session_id: str = "default",
+    session_root: Path | None = None,
+    token_cost: TokenCost | None = None,
+    llm_levels: dict[str, "BaseChatModel"] | None = None,
+) -> Iterator[None]:
     """临时注入 SystemToolContext（并发安全）。"""
     root = project_root.resolve()
-    token = _SYSTEM_TOOL_CONTEXT.set(SystemToolContext(project_root=root))
+    token = _SYSTEM_TOOL_CONTEXT.set(
+        SystemToolContext(
+            project_root=root,
+            session_id=session_id,
+            session_root=session_root,
+            token_cost=token_cost,
+            llm_levels=llm_levels,
+        )
+    )
     try:
         yield
     finally:
         _SYSTEM_TOOL_CONTEXT.reset(token)
-

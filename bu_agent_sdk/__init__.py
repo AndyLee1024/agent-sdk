@@ -21,6 +21,8 @@ Example:
 from bu_agent_sdk.agent import Agent, ChatSession, SessionInitEvent
 from bu_agent_sdk.context import MemoryConfig
 from bu_agent_sdk.observability import Laminar, observe, observe_debug
+from bu_agent_sdk.tools import Depends, tool
+from bu_agent_sdk.agent import TaskComplete
 from bu_agent_sdk.skill import (
     SkillDefinition,
     apply_skill_context,
@@ -39,9 +41,12 @@ __all__ = [
     "Agent",
     "ChatSession",
     "SessionInitEvent",
+    "TaskComplete",
     "Laminar",
     "observe",
     "observe_debug",
+    "tool",
+    "Depends",
     # Memory support
     "MemoryConfig",
     # Subagent support

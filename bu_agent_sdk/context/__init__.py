@@ -21,6 +21,7 @@ from bu_agent_sdk.context.compaction import (
     TypeCompactionRule,
 )
 from bu_agent_sdk.context.fs import ContextFileSystem, OffloadedMeta
+from bu_agent_sdk.context.info import ContextCategoryInfo, ContextInfo
 from bu_agent_sdk.context.ir import ContextIR
 from bu_agent_sdk.context.items import (
     DEFAULT_PRIORITIES,
@@ -57,6 +58,9 @@ __all__ = [
     "BudgetConfig",
     "BudgetStatus",
     "TokenCounter",
+    # Info
+    "ContextInfo",
+    "ContextCategoryInfo",
     # Memory
     "MemoryConfig",
     # Reminder

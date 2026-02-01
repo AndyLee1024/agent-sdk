@@ -136,6 +136,8 @@ class CompactionService:
         self,
         messages: list[BaseMessage],
         llm: BaseChatModel | None = None,
+        *,
+        level: str | None = None,
     ) -> CompactionResult:
         """Perform compaction on the message history.
 
@@ -177,6 +179,14 @@ class CompactionService:
 
         # Generate the summary
         response = await model.ainvoke(messages=prepared_messages)
+
+        if response.usage and self.token_cost is not None:
+            self.token_cost.add_usage(
+                model.model,
+                response.usage,
+                level=level,
+                source="compaction",
+            )
 
         summary_text = response.content or ""
 

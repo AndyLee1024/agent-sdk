@@ -14,6 +14,11 @@ class TokenUsageEntry(BaseModel):
     model: str
     timestamp: datetime
     usage: ChatInvokeUsage
+    level: str | None = None
+    """LLM 档位标签（如 "LOW"/"MID"/"HIGH"），用于按档位聚合。"""
+
+    source: str | None = None
+    """来源标识（如 "agent"/"subagent:researcher"/"webfetch"/"compaction"）。"""
 
 
 class TokenCostCalculated(BaseModel):
@@ -110,3 +115,4 @@ class UsageSummary(BaseModel):
     entry_count: int
 
     by_model: dict[str, ModelUsageStats] = Field(default_factory=dict)
+    by_level: dict[str, ModelUsageStats] = Field(default_factory=dict)

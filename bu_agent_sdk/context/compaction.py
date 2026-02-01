@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from bu_agent_sdk.llm.base import BaseChatModel
     from bu_agent_sdk.context.fs import ContextFileSystem
     from bu_agent_sdk.context.offload import OffloadPolicy
+    from bu_agent_sdk.tokens import TokenCost
+    from bu_agent_sdk.agent.llm_levels import LLMLevel
 
 logger = logging.getLogger("bu_agent_sdk.context.compaction")
 
@@ -100,6 +102,8 @@ class SelectiveCompactionPolicy:
     fallback_to_full_summary: bool = True
     fs: ContextFileSystem | None = None
     offload_policy: OffloadPolicy | None = None
+    token_cost: TokenCost | None = None
+    level: LLMLevel | None = None
 
     def should_compact(self, total_tokens: int) -> bool:
         """检查是否需要压缩"""
@@ -258,8 +262,12 @@ class SelectiveCompactionPolicy:
         if not conversation_messages:
             return False
 
-        service = CompactionService(llm=self.llm)
-        result = await service.compact(conversation_messages, self.llm)
+        service = CompactionService(llm=self.llm, token_cost=self.token_cost)
+        result = await service.compact(
+            conversation_messages,
+            self.llm,
+            level=self.level,
+        )
 
         if result.compacted and result.summary:
             # 用摘要替换整个 conversation

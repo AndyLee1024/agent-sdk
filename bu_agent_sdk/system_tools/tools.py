@@ -6,12 +6,15 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from collections import defaultdict
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field
 
+from bu_agent_sdk.llm.messages import UserMessage
 from bu_agent_sdk.tools.decorator import Tool, tool
 from bu_agent_sdk.tools.depends import Depends
 from bu_agent_sdk.tools.system_context import SystemToolContext, get_system_tool_context
@@ -23,6 +26,9 @@ _LINE_TRUNCATE_CHARS = 2000
 _BASH_DEFAULT_TIMEOUT_MS = 120_000
 _BASH_MAX_TIMEOUT_MS = 600_000
 _BASH_OUTPUT_TRUNCATE_CHARS = 30_000
+_WEBFETCH_TIMEOUT_SECONDS = 20
+_WEBFETCH_CACHE_TTL_SECONDS = 15 * 60
+_WEBFETCH_MARKDOWN_TRUNCATE_CHARS = 50_000
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -73,6 +79,25 @@ def _warn_bash_command(command: str) -> str | None:
         f"Warning: 检测到命令 `{cmd}`。通常应优先使用专用工具（搜索用 Grep/Glob，读文件用 Read），"
         f"以获得更稳定的权限与输出格式。"
     )
+
+
+def _session_root_from_ctx(ctx: SystemToolContext) -> Path | None:
+    if ctx.session_root is None:
+        return None
+    try:
+        return ctx.session_root.resolve()
+    except Exception:
+        return ctx.session_root
+
+
+def _cleanup_ttl_cache(cache: dict[str, dict[str, Any]], *, now: float, ttl: int) -> None:
+    expired: list[str] = []
+    for k, v in cache.items():
+        ts = float(v.get("ts", 0.0))
+        if now - ts > ttl:
+            expired.append(k)
+    for k in expired:
+        cache.pop(k, None)
 
 
 @tool(
@@ -235,6 +260,96 @@ async def Edit(
         return {"message": "Success: Edit applied", "replacements": replacements, "file_path": file_path}
     except Exception as e:
         msg = f"Error: Edit 失败：{e}"
+        logger.error(msg, exc_info=True)
+        return {"message": msg, "replacements": 0, "file_path": file_path}
+
+
+class _MultiEditOp(BaseModel):
+    old_string: str = Field(description="The text to replace")
+    new_string: str = Field(description="The text to replace it with")
+    replace_all: bool = Field(
+        default=False,
+        description="Replace all occurences of old_string (default false).",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
+class _MultiEditInput(BaseModel):
+    file_path: str = Field(description="The absolute path to the file to modify")
+    edits: list[_MultiEditOp] = Field(
+        min_length=1,
+        description="Array of edit operations to perform sequentially on the file",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
+@tool(
+    "Make multiple edits to a single file atomically (all succeed or none).",
+    name="MultiEdit",
+)
+async def MultiEdit(
+    params: _MultiEditInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    file_path = params.file_path
+    edits = params.edits
+
+    try:
+        path = _ensure_abs_path(file_path)
+        exists = path.exists()
+
+        content = ""
+        if exists:
+            if path.is_dir():
+                return {"message": f"Error: Path is a directory: {file_path}", "replacements": 0, "file_path": file_path}
+            content = path.read_text(encoding="utf-8", errors="replace")
+        else:
+            # 创建新文件：仅当第一条 edit 的 old_string 为空
+            if not edits:
+                return {"message": "Error: edits 不能为空", "replacements": 0, "file_path": file_path}
+            if edits[0].old_string != "":
+                return {
+                    "message": "Error: File not found and first edit.old_string must be empty to create a new file",
+                    "replacements": 0,
+                    "file_path": file_path,
+                }
+            # content 由第一条 new_string 初始化（后续 edits 继续对该内容做替换）
+            content = edits[0].new_string
+            edits = edits[1:]
+
+        total_replacements = 0
+        for op in edits:
+            if op.old_string == "":
+                return {"message": "Error: old_string 不能为空（创建新文件仅允许第一条）", "replacements": 0, "file_path": file_path}
+            if op.old_string == op.new_string:
+                return {"message": "Error: new_string 必须与 old_string 不同", "replacements": 0, "file_path": file_path}
+
+            count = content.count(op.old_string)
+            if count == 0:
+                return {"message": f"Error: String not found in {file_path}", "replacements": 0, "file_path": file_path}
+
+            if not op.replace_all and count > 1:
+                return {
+                    "message": f"Error: old_string 在文件中出现 {count} 次；请提供更精确的 old_string 或设置 replace_all=true",
+                    "replacements": 0,
+                    "file_path": file_path,
+                }
+
+            if op.replace_all:
+                content = content.replace(op.old_string, op.new_string)
+                total_replacements += count
+            else:
+                content = content.replace(op.old_string, op.new_string, 1)
+                total_replacements += 1
+
+        # 原子落盘：全部成功后才写入
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return {"message": "Success: MultiEdit applied", "replacements": total_replacements, "file_path": file_path}
+    except Exception as e:
+        msg = f"Error: MultiEdit 失败：{e}"
         logger.error(msg, exc_info=True)
         return {"message": msg, "replacements": 0, "file_path": file_path}
 
@@ -460,4 +575,183 @@ async def Grep(
     return {"matches": matches, "total_matches": len(matches)}
 
 
-SYSTEM_TOOLS: list[Tool] = [Bash, Read, Write, Edit, Glob, Grep]
+class _LSInput(BaseModel):
+    path: str = Field(description="The absolute path to the directory to list (must be absolute, not relative)")
+    ignore: list[str] | None = Field(default=None, description="List of glob patterns to ignore")
+
+    model_config = {"extra": "forbid"}
+
+
+@tool("Lists files and directories in a given path.", name="LS")
+async def LS(
+    params: _LSInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    try:
+        p = _ensure_abs_path(params.path)
+        if not p.exists():
+            return {"entries": [], "count": 0}
+        if not p.is_dir():
+            return {"entries": [], "count": 0}
+
+        ignore = params.ignore or []
+        entries: list[dict[str, Any]] = []
+        for child in sorted(p.iterdir(), key=lambda x: x.name):
+            name = child.name
+            if any(fnmatch(name, pat) for pat in ignore):
+                continue
+            item_type = "dir" if child.is_dir() else "file" if child.is_file() else "other"
+            size = int(child.stat().st_size) if child.is_file() else 0
+            entries.append({"name": name, "type": item_type, "size": size})
+
+        return {"entries": entries, "count": len(entries)}
+    except Exception as e:
+        msg = f"Error: LS 失败：{e}"
+        logger.error(msg, exc_info=True)
+        return {"entries": [], "count": 0, "error": msg}
+
+
+class _TodoItem(BaseModel):
+    content: str = Field(min_length=1)
+    status: Literal["pending", "in_progress", "completed"]
+    id: str
+
+    model_config = {"extra": "forbid"}
+
+
+class _TodoWriteInput(BaseModel):
+    todos: list[_TodoItem] = Field(description="The updated todo list")
+
+    model_config = {"extra": "forbid"}
+
+
+@tool("Create and manage a structured task list for the current session.", name="TodoWrite")
+async def TodoWrite(
+    params: _TodoWriteInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    root = _session_root_from_ctx(ctx)
+    if root is None:
+        return {"error": "Error: session_root 未注入，无法持久化 todos", "todos": []}
+
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        todo_path = root / "todos.json"
+        data = {"todos": [t.model_dump(mode="json") for t in params.todos]}
+        todo_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return data
+    except Exception as e:
+        msg = f"Error: TodoWrite 失败：{e}"
+        logger.error(msg, exc_info=True)
+        return {"error": msg, "todos": []}
+
+
+_WEBFETCH_CACHE: dict[str, dict[str, Any]] = {}
+
+
+class _WebFetchInput(BaseModel):
+    url: str = Field(
+        description="The URL to fetch content from",
+        json_schema_extra={"format": "uri"},
+    )
+    prompt: str = Field(description="The prompt to run on the fetched content")
+
+    model_config = {"extra": "forbid"}
+
+
+@tool("Fetch a URL, convert to markdown, and process with a small model.", name="WebFetch")
+async def WebFetch(
+    params: _WebFetchInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> str:
+    url = params.url.strip()
+    prompt = params.prompt
+
+
+    now = time.time()
+    _cleanup_ttl_cache(_WEBFETCH_CACHE, now=now, ttl=_WEBFETCH_CACHE_TTL_SECONDS)
+
+    cached = _WEBFETCH_CACHE.get(url)
+    if cached and (now - float(cached.get("ts", 0.0)) <= _WEBFETCH_CACHE_TTL_SECONDS):
+        markdown = str(cached.get("markdown", ""))
+        final_url = str(cached.get("final_url", url))
+    else:
+        try:
+            from curl_cffi import requests as crequests
+        except Exception as e:
+            return f"Error: WebFetch 缺少依赖 curl_cffi：{e}"
+
+        try:
+            r = crequests.get(
+                url,
+                timeout=_WEBFETCH_TIMEOUT_SECONDS,
+                impersonate="chrome",
+            )
+        except Exception as e:
+            return f"Error: WebFetch 请求失败：{e}"
+
+        status = int(getattr(r, "status_code", 0) or 0)
+        final_url = str(getattr(r, "url", "") or url)
+        text = str(getattr(r, "text", "") or "")
+
+        if status != 200:
+            preview = _truncate_text(text, 2000)
+            return f"Error: HTTP {status} fetching {final_url}\n\n{preview}"
+
+        try:
+            from markdownify import markdownify as to_markdown
+        except Exception as e:
+            return f"Error: WebFetch 缺少依赖 markdownify：{e}"
+
+        markdown = to_markdown(text)
+        _WEBFETCH_CACHE[url] = {"ts": now, "markdown": markdown, "final_url": final_url}
+
+    if ctx.llm_levels is None or "LOW" not in ctx.llm_levels:
+        return "Error: WebFetch 需要 LOW 级别 LLM（llm_levels['LOW'] 未配置）"
+    if ctx.token_cost is None:
+        return "Error: WebFetch 需要 token_cost 注入以记录 usage"
+
+    markdown_for_llm = markdown
+    truncated_note = ""
+    if len(markdown_for_llm) > _WEBFETCH_MARKDOWN_TRUNCATE_CHARS:
+        markdown_for_llm = markdown_for_llm[:_WEBFETCH_MARKDOWN_TRUNCATE_CHARS]
+        truncated_note = "\n\n(Note: Page content was truncated for context budget.)"
+
+    llm = ctx.llm_levels["LOW"]
+    try:
+        completion = await llm.ainvoke(
+            messages=[
+                UserMessage(
+                    content=(
+                        f"{prompt}\n\n<url>{final_url}</url>\n\n<content>\n{markdown_for_llm}\n</content>{truncated_note}"
+                    )
+                )
+            ],
+            tools=None,
+            tool_choice=None,
+        )
+        if completion.usage:
+            ctx.token_cost.add_usage(
+                str(llm.model),
+                completion.usage,
+                level="LOW",
+                source="webfetch",
+            )
+        return completion.text
+    except Exception as e:
+        logger.error(f"WebFetch LLM 调用失败：{e}", exc_info=True)
+        return f"Error: WebFetch LLM 调用失败：{e}"
+
+
+SYSTEM_TOOLS: list[Tool] = [
+    Bash,
+    Read,
+    Write,
+    Edit,
+    MultiEdit,
+    Glob,
+    Grep,
+    LS,
+    TodoWrite,
+    WebFetch,
+]

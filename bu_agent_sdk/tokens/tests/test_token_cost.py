@@ -1,0 +1,129 @@
+import asyncio
+import os
+import unittest
+
+from bu_agent_sdk.llm.views import ChatInvokeUsage
+from bu_agent_sdk.tokens import TokenCost
+
+
+class TestTokenCost(unittest.TestCase):
+    def test_include_cost_param_used_when_env_unset(self) -> None:
+        old = os.environ.pop("bu_agent_sdk_CALCULATE_COST", None)
+        try:
+            self.assertFalse(TokenCost(include_cost=False).include_cost)
+            self.assertTrue(TokenCost(include_cost=True).include_cost)
+        finally:
+            if old is None:
+                os.environ.pop("bu_agent_sdk_CALCULATE_COST", None)
+            else:
+                os.environ["bu_agent_sdk_CALCULATE_COST"] = old
+
+    def test_include_cost_env_overrides_param(self) -> None:
+        old = os.environ.get("bu_agent_sdk_CALCULATE_COST")
+        try:
+            os.environ["bu_agent_sdk_CALCULATE_COST"] = "false"
+            self.assertFalse(TokenCost(include_cost=True).include_cost)
+
+            os.environ["bu_agent_sdk_CALCULATE_COST"] = "true"
+            self.assertTrue(TokenCost(include_cost=False).include_cost)
+        finally:
+            if old is None:
+                os.environ.pop("bu_agent_sdk_CALCULATE_COST", None)
+            else:
+                os.environ["bu_agent_sdk_CALCULATE_COST"] = old
+
+    def test_usage_summary_by_level(self) -> None:
+        token_cost = TokenCost(include_cost=False)
+        token_cost.add_usage(
+            "m1",
+            ChatInvokeUsage(
+                prompt_tokens=10,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=5,
+                total_tokens=15,
+            ),
+            level="LOW",
+            source="agent",
+        )
+        token_cost.add_usage(
+            "m2",
+            ChatInvokeUsage(
+                prompt_tokens=7,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=3,
+                total_tokens=10,
+            ),
+            level="MID",
+            source="webfetch",
+        )
+        token_cost.add_usage(
+            "m3",
+            ChatInvokeUsage(
+                prompt_tokens=2,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=1,
+                total_tokens=3,
+            ),
+            level="MID",
+            source="subagent:researcher",
+        )
+
+        summary = asyncio.run(token_cost.get_usage_summary())
+        self.assertIn("LOW", summary.by_level)
+        self.assertIn("MID", summary.by_level)
+        self.assertEqual(summary.by_level["LOW"].invocations, 1)
+        self.assertEqual(summary.by_level["MID"].invocations, 2)
+        self.assertEqual(summary.by_level["MID"].total_tokens, 13)
+
+    def test_total_cost_does_not_double_count_cached_prompt(self) -> None:
+        old = os.environ.pop("bu_agent_sdk_CALCULATE_COST", None)
+        try:
+            token_cost = TokenCost(include_cost=True)
+        finally:
+            if old is None:
+                os.environ.pop("bu_agent_sdk_CALCULATE_COST", None)
+            else:
+                os.environ["bu_agent_sdk_CALCULATE_COST"] = old
+
+        token_cost._initialized = True
+        token_cost._pricing_data = {
+            "dummy": {
+                "input_cost_per_token": 1.0,
+                "output_cost_per_token": 2.0,
+                "cache_read_input_token_cost": 0.5,
+                "cache_creation_input_token_cost": 0.25,
+            }
+        }
+
+        token_cost.add_usage(
+            "dummy",
+            ChatInvokeUsage(
+                prompt_tokens=100,
+                prompt_cached_tokens=40,
+                prompt_cache_creation_tokens=10,
+                prompt_image_tokens=None,
+                completion_tokens=50,
+                total_tokens=150,
+            ),
+            level="MID",
+            source="agent",
+        )
+
+        summary = asyncio.run(token_cost.get_usage_summary())
+        self.assertAlmostEqual(summary.total_prompt_cost, 82.5, places=6)
+        self.assertAlmostEqual(summary.total_prompt_cached_cost, 20.0, places=6)
+        self.assertAlmostEqual(summary.total_completion_cost, 100.0, places=6)
+        self.assertAlmostEqual(summary.total_cost, 182.5, places=6)
+        self.assertAlmostEqual(summary.by_model["dummy"].cost, 182.5, places=6)
+        self.assertAlmostEqual(summary.by_level["MID"].cost, 182.5, places=6)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
