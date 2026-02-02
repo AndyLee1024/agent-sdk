@@ -21,6 +21,7 @@ class ItemType(Enum):
     # Header 段（lowered 为 SystemMessage 的一部分）
     SYSTEM_PROMPT = "system_prompt"
     MEMORY = "memory"
+    TOOL_STRATEGY = "tool_strategy"
     SUBAGENT_STRATEGY = "subagent_strategy"
     SKILL_STRATEGY = "skill_strategy"
 
@@ -50,6 +51,7 @@ DEFAULT_PRIORITIES: dict[ItemType, int] = {
     ItemType.SYSTEM_REMINDER: 70,
     ItemType.COMPACTION_SUMMARY: 80,     # 不压缩
     ItemType.SKILL_STRATEGY: 90,
+    ItemType.TOOL_STRATEGY: 93,          # 在 SUBAGENT 和 SKILL 之间
     ItemType.SUBAGENT_STRATEGY: 95,
     ItemType.MEMORY: 100,                # 永不压缩
     ItemType.SYSTEM_PROMPT: 100,         # 永不压缩

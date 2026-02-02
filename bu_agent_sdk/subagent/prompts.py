@@ -5,10 +5,6 @@ Subagent 系统提示模板
 from bu_agent_sdk.subagent.models import AgentDefinition
 
 SUBAGENT_STRATEGY_PROMPT = """
-## Task 工具使用指南
-
-你可以使用 Task 工具启动专门化的 Subagent 来完成特定任务。
-
 <avaliable_subagents>
 {subagent_list}
 </avaliable_subagents>

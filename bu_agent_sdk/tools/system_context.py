@@ -19,6 +19,7 @@ from bu_agent_sdk.tokens import TokenCost
 
 if TYPE_CHECKING:
     from bu_agent_sdk.llm.base import BaseChatModel
+    from bu_agent_sdk.context.ir import ContextIR
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class SystemToolContext:
     session_root: Path | None = None
     token_cost: TokenCost | None = None
     llm_levels: dict[str, "BaseChatModel"] | None = None
+    agent_context: "ContextIR | None" = None
 
 
 _SYSTEM_TOOL_CONTEXT: ContextVar[SystemToolContext | None] = ContextVar(
@@ -61,6 +63,7 @@ def bind_system_tool_context(
     session_root: Path | None = None,
     token_cost: TokenCost | None = None,
     llm_levels: dict[str, "BaseChatModel"] | None = None,
+    agent_context: "ContextIR | None" = None,
 ) -> Iterator[None]:
     """临时注入 SystemToolContext（并发安全）。"""
     root = project_root.resolve()
@@ -71,6 +74,7 @@ def bind_system_tool_context(
             session_root=session_root,
             token_cost=token_cost,
             llm_levels=llm_levels,
+            agent_context=agent_context,
         )
     )
     try:

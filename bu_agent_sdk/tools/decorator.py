@@ -168,6 +168,8 @@ class Tool:
     name: str = field(default="")
     ephemeral: int | bool = False
     """How many outputs to keep in context. False=not ephemeral, True=keep 1, int=keep N."""
+    usage_rules: str | None = field(default=None, repr=False)
+    """Detailed usage rules for system prompt layer (cached via prompt cache). If None, won't appear in <system_tools_definition>."""
     _definition: ToolDefinition | None = field(default=None, repr=False)
     _dependencies: dict[str, Depends] = field(default_factory=dict, repr=False)
     _param_types: dict[str, type] = field(default_factory=dict, repr=False)
@@ -375,6 +377,7 @@ def tool(
     name: str | None = None,
     registry: "ToolRegistry | None" = None,  # type: ignore
     ephemeral: int | bool = False,
+    usage_rules: str | None = None,
 ) -> Callable[[Callable[P, Awaitable[T]]], Tool]:
     """
     Decorator to create a tool from an async function.
@@ -388,6 +391,8 @@ def tool(
                   register it into a registry.
         ephemeral: How many outputs to keep in context before older ones are removed.
                    False = not ephemeral (keep all), True = keep last 1, int = keep last N.
+        usage_rules: Detailed usage rules for system prompt layer (injected into <system_tools_definition>).
+                     If None, the tool won't appear in the system tools definition block.
 
     Returns:
         A Tool instance wrapping the decorated function.
@@ -423,6 +428,7 @@ def tool(
             description=description,
             name=name or func.__name__,
             ephemeral=ephemeral,
+            usage_rules=usage_rules,
         )
 
         # ====== 显式注册逻辑 ======

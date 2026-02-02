@@ -18,6 +18,18 @@ from bu_agent_sdk.llm.messages import UserMessage
 from bu_agent_sdk.tools.decorator import Tool, tool
 from bu_agent_sdk.tools.depends import Depends
 from bu_agent_sdk.tools.system_context import SystemToolContext, get_system_tool_context
+from bu_agent_sdk.system_tools.description import (
+    BASH_USAGE_RULES,
+    READ_USAGE_RULES,
+    WRITE_USAGE_RULES,
+    EDIT_USAGE_RULES,
+    MULTIEDIT_USAGE_RULES,
+    GLOB_USAGE_RULES,
+    GREP_USAGE_RULES,
+    LS_USAGE_RULES,
+    TODO_USAGE_RULES,
+    WEBFETCH_USAGE_RULES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +115,7 @@ def _cleanup_ttl_cache(cache: dict[str, dict[str, Any]], *, now: float, ttl: int
 @tool(
     "Executes a bash command with optional timeout. Returns combined output and exit code.",
     name="Bash",
+    usage_rules=BASH_USAGE_RULES,
 )
 async def Bash(
     command: str,
@@ -154,7 +167,7 @@ async def Bash(
         return {"output": msg, "exitCode": -1, "killed": None}
 
 
-@tool("Reads a text file with line numbers.", name="Read")
+@tool("Reads a text file with line numbers.", name="Read", usage_rules=READ_USAGE_RULES)
 async def Read(
     file_path: str,
     offset: int | None = None,
@@ -195,7 +208,7 @@ async def Read(
         return {"content": msg, "total_lines": 0, "lines_returned": 0}
 
 
-@tool("Writes content to a file (overwrites).", name="Write")
+@tool("Writes content to a file (overwrites).", name="Write", usage_rules=WRITE_USAGE_RULES)
 async def Write(
     file_path: str,
     content: str,
@@ -217,7 +230,7 @@ async def Write(
         return {"message": msg, "bytes_written": 0, "file_path": file_path}
 
 
-@tool("Performs exact string replacement in a file.", name="Edit")
+@tool("Performs exact string replacement in a file.", name="Edit", usage_rules=EDIT_USAGE_RULES)
 async def Edit(
     file_path: str,
     old_string: str,
@@ -288,6 +301,7 @@ class _MultiEditInput(BaseModel):
 @tool(
     "Make multiple edits to a single file atomically (all succeed or none).",
     name="MultiEdit",
+    usage_rules=MULTIEDIT_USAGE_RULES,
 )
 async def MultiEdit(
     params: _MultiEditInput,
@@ -354,7 +368,7 @@ async def MultiEdit(
         return {"message": msg, "replacements": 0, "file_path": file_path}
 
 
-@tool("Find files matching a glob pattern.", name="Glob")
+@tool("Find files matching a glob pattern.", name="Glob", usage_rules=GLOB_USAGE_RULES)
 async def Glob(
     pattern: str,
     path: str | None = None,
@@ -425,7 +439,7 @@ def _run_rg_lines(cmd: list[str]) -> tuple[int, str, str]:
     return int(result.returncode), result.stdout or "", result.stderr or ""
 
 
-@tool("Search file contents with regex (ripgrep).", name="Grep")
+@tool("Search file contents with regex (ripgrep).", name="Grep", usage_rules=GREP_USAGE_RULES)
 async def Grep(
     params: GrepInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -582,7 +596,7 @@ class _LSInput(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-@tool("Lists files and directories in a given path.", name="LS")
+@tool("Lists files and directories in a given path.", name="LS", usage_rules=LS_USAGE_RULES)
 async def LS(
     params: _LSInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -612,9 +626,10 @@ async def LS(
 
 
 class _TodoItem(BaseModel):
-    content: str = Field(min_length=1)
-    status: Literal["pending", "in_progress", "completed"]
-    id: str
+    id: str = Field(description="Unique identifier for the todo item")
+    content: str = Field(min_length=1, description="Description of the task")
+    status: Literal["pending", "in_progress", "completed"] = Field(description="Current status of the task")
+    priority: Literal["high", "medium", "low"] = Field(default="medium", description="Priority level of the task")
 
     model_config = {"extra": "forbid"}
 
@@ -625,25 +640,46 @@ class _TodoWriteInput(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-@tool("Create and manage a structured task list for the current session.", name="TodoWrite")
+@tool("Create and manage a structured task list for the current session.", name="TodoWrite", usage_rules=TODO_USAGE_RULES)
 async def TodoWrite(
     params: _TodoWriteInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    root = _session_root_from_ctx(ctx)
-    if root is None:
-        return {"error": "Error: session_root 未注入，无法持久化 todos", "todos": []}
+) -> str:
+    """创建和管理结构化任务列表
 
+    工具返回时会附加固定提醒文本，强化 Agent 继续执行 TODO 的行为
+    """
     try:
-        root.mkdir(parents=True, exist_ok=True)
-        todo_path = root / "todos.json"
-        data = {"todos": [t.model_dump(mode="json") for t in params.todos]}
-        todo_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        return data
+        # 1. 序列化 todos
+        todos_data = [t.model_dump(mode="json") for t in params.todos]
+
+        # 2. 更新 ContextIR 的 todo 状态（通过 SystemToolContext 中的 agent_context）
+        if ctx.agent_context is not None:
+            ctx.agent_context.set_todo_state(todos_data)
+
+        # 3. 可选：持久化到文件（如果有 session_root）
+        root = _session_root_from_ctx(ctx)
+        if root is not None:
+            root.mkdir(parents=True, exist_ok=True)
+            todo_path = root / "todos.json"
+            data = {"todos": todos_data}
+            todo_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 4. 返回成功消息 + 固定提醒
+        todos_json = json.dumps(todos_data, ensure_ascii=False, indent=2)
+        reminder_text = (
+            "\n\n"
+            "Remember to keep using the TODO list to keep track of your work "
+            "and to now follow the next task on the list. "
+            "Mark tasks as 'in_progress' when you start them and 'completed' when done."
+        )
+
+        return f"TODO list updated successfully:\n{todos_json}{reminder_text}"
+
     except Exception as e:
         msg = f"Error: TodoWrite 失败：{e}"
         logger.error(msg, exc_info=True)
-        return {"error": msg, "todos": []}
+        return msg
 
 
 _WEBFETCH_CACHE: dict[str, dict[str, Any]] = {}
@@ -659,7 +695,7 @@ class _WebFetchInput(BaseModel):
     model_config = {"extra": "forbid"}
 
 
-@tool("Fetch a URL, convert to markdown, and process with a small model.", name="WebFetch")
+@tool("Fetch a URL, convert to markdown, and process with a small model.", name="WebFetch", usage_rules=WEBFETCH_USAGE_RULES)
 async def WebFetch(
     params: _WebFetchInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -667,6 +703,9 @@ async def WebFetch(
     url = params.url.strip()
     prompt = params.prompt
 
+    ## make http protocol to https
+    if url.startswith("http://"):
+        url = "https://" + url[7:]
 
     now = time.time()
     _cleanup_ttl_cache(_WEBFETCH_CACHE, now=now, ttl=_WEBFETCH_CACHE_TTL_SECONDS)

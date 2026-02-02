@@ -30,6 +30,7 @@ class EventType(Enum):
     CONTEXT_CLEARED = "context_cleared"
     CONVERSATION_REPLACED = "conversation_replaced"
     BUDGET_EXCEEDED = "budget_exceeded"
+    TODO_STATE_UPDATED = "todo_state_updated"
 
 
 @dataclass

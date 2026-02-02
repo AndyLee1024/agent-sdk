@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from bu_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
 from bu_agent_sdk.context.items import (
@@ -72,6 +72,7 @@ class ContextIR:
         token_counter: token 计数器
         event_bus: 事件总线
         reminders: 系统提醒列表
+        _todo_state: TODO 状态存储 {todos: [...], updated_at: timestamp}
     """
 
     header: Segment = field(
@@ -85,6 +86,7 @@ class ContextIR:
     event_bus: ContextEventBus = field(default_factory=ContextEventBus)
     reminders: list[SystemReminder] = field(default_factory=list)
     _pending_skill_items: list[ContextItem] = field(default_factory=list)
+    _todo_state: dict[str, Any] = field(default_factory=dict)
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
 
@@ -184,6 +186,39 @@ class ContextIR:
                 item_type=ItemType.SUBAGENT_STRATEGY,
                 item_id=item.id,
                 detail="subagent_strategy set",
+            ))
+
+    def set_tool_strategy(self, prompt: str) -> None:
+        """设置 Tool 策略提示（幂等覆盖）
+
+        插入位置：MEMORY 之后、SUBAGENT_STRATEGY 之前
+        """
+        existing = self.header.find_one_by_type(ItemType.TOOL_STRATEGY)
+        token_count = self.token_counter.count(prompt)
+
+        if existing:
+            existing.content_text = prompt
+            existing.token_count = token_count
+        else:
+            item = ContextItem(
+                item_type=ItemType.TOOL_STRATEGY,
+                content_text=prompt,
+                token_count=token_count,
+                priority=DEFAULT_PRIORITIES[ItemType.TOOL_STRATEGY],
+            )
+            # 在 system_prompt/memory 之后、subagent_strategy/skill_strategy 之前插入
+            insert_idx = 0
+            for i, existing_item in enumerate(self.header.items):
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.MEMORY):
+                    insert_idx = i + 1
+                elif existing_item.item_type in (ItemType.SUBAGENT_STRATEGY, ItemType.SKILL_STRATEGY):
+                    break
+            self.header.items.insert(insert_idx, item)
+            self.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_ADDED,
+                item_type=ItemType.TOOL_STRATEGY,
+                item_id=item.id,
+                detail="tool_strategy set",
             ))
 
     def set_skill_strategy(self, prompt: str) -> None:
@@ -540,6 +575,7 @@ class ContextIR:
         self.conversation.items.clear()
         self._pending_skill_items.clear()
         self.reminders.clear()
+        self._todo_state.clear()
 
         self.event_bus.emit(ContextEvent(
             event_type=EventType.CONTEXT_CLEARED,
@@ -571,3 +607,93 @@ class ContextIR:
     def is_empty(self) -> bool:
         """上下文是否为空（header 和 conversation 都没有内容）"""
         return not self.header.items and not self.conversation.items
+
+    # ===== TODO 状态管理 =====
+
+    def set_todo_state(self, todos: list[dict]) -> None:
+        """设置 TODO 状态并注册 reminder
+
+        Args:
+            todos: TODO 列表（字典格式，来自 TodoWrite 工具）
+        """
+        import time
+        from bu_agent_sdk.context.reminder import ReminderPosition
+
+        self._todo_state = {
+            "todos": todos,
+            "updated_at": time.time(),
+        }
+
+        # 移除旧的 todo reminders
+        self.remove_reminder("todo_list_empty")
+        self.remove_reminder("todo_list_update")
+
+        # 根据状态注册新 reminder
+        if not todos:
+            # 如果 todo 为空，注册"空列表"提醒
+            self.register_reminder(SystemReminder(
+                name="todo_list_empty",
+                content=(
+                    "This is a reminder that your todo list is currently empty. "
+                    "DO NOT mention this to the user explicitly because they are already aware. "
+                    "If you are working on tasks that would benefit from a todo list please use the TodoWrite tool to create one. "
+                    "If not, please feel free to ignore. "
+                    "Again do not mention this message to the user."
+                ),
+                position=ReminderPosition.END,
+                one_shot=False,  # 持续提醒直到创建 todo
+            ))
+        else:
+            # 如果 todo 非空，注册"更新"提醒
+            import json
+            todos_json = json.dumps(todos, ensure_ascii=False)
+            self.register_reminder(SystemReminder(
+                name="todo_list_update",
+                content=(
+                    f"Your todo list has changed. DO NOT mention this explicitly to the user. "
+                    f"Here are the latest contents of your todo list:\n{todos_json}\n"
+                    f"Continue on with the tasks at hand if applicable."
+                ),
+                position=ReminderPosition.END,
+                one_shot=False,  # 持续提醒直到下次更新
+            ))
+
+        # 触发事件
+        self.event_bus.emit(ContextEvent(
+            event_type=EventType.TODO_STATE_UPDATED,
+            detail=f"todo_state updated: {len(todos)} items",
+        ))
+
+    def get_todo_state(self) -> dict[str, Any]:
+        """获取当前 TODO 状态"""
+        return self._todo_state.copy()
+
+    def has_todos(self) -> bool:
+        """检查是否有 TODO 条目"""
+        return bool(self._todo_state.get("todos"))
+
+    def register_initial_todo_reminder_if_needed(self) -> None:
+        """在会话开始时注册初始 TODO 提醒（如果还没有 todo 状态）
+
+        应在第一个 UserMessage 后调用
+        """
+        from bu_agent_sdk.context.reminder import ReminderPosition
+
+        # 如果已经有 todo 状态，不需要初始提醒
+        if self._todo_state:
+            return
+
+        # 如果还没有注册过空列表提醒
+        if not any(r.name == "todo_list_empty" for r in self.reminders):
+            self.register_reminder(SystemReminder(
+                name="todo_list_empty",
+                content=(
+                    "This is a reminder that your todo list is currently empty. "
+                    "DO NOT mention this to the user explicitly because they are already aware. "
+                    "If you are working on tasks that would benefit from a todo list please use the TodoWrite tool to create one. "
+                    "If not, please feel free to ignore. "
+                    "Again do not mention this message to the user."
+                ),
+                position=ReminderPosition.END,
+                one_shot=False,
+            ))

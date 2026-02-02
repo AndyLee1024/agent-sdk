@@ -165,7 +165,9 @@ class TestSystemTools(unittest.TestCase):
                         {"content": "t2", "status": "completed", "id": "2"},
                     ],
                 )
-                self.assertIn("todos", out)
+                # TodoWrite 现在返回 str（包含 JSON + 提醒文本）
+                self.assertIsInstance(out, str)
+                self.assertIn("TODO list updated successfully", out)
                 self.assertTrue((session_root / "todos.json").exists())
                 data = json.loads((session_root / "todos.json").read_text(encoding="utf-8"))
                 self.assertEqual(len(data["todos"]), 2)

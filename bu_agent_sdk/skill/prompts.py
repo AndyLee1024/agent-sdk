@@ -7,10 +7,6 @@
 from bu_agent_sdk.skill.models import SkillDefinition
 
 SKILL_STRATEGY_PROMPT = """
-## Skill 工具使用指南
-
-你可以使用 Skill 工具来执行预定义的技能。每个 skill 是存储在 `SKILL.md` 文件中的一组本地指令。
-
 <avaliable_skills>
 {skill_list}
 </avaliable_skills>
