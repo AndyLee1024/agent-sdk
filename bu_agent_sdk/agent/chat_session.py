@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from bu_agent_sdk.agent.events import AgentEvent, FinalResponseEvent, SessionInitEvent
+from bu_agent_sdk.agent.events import AgentEvent, SessionInitEvent, StopEvent
 from bu_agent_sdk.agent.service import Agent
 from bu_agent_sdk.context.items import ContextItem, ItemType
 from bu_agent_sdk.tokens.views import UsageSummary
@@ -659,7 +659,7 @@ class ChatSession:
             try:
                 async for event in self._agent.query_stream(message):  # type: ignore[arg-type]
                     yield event
-                    if isinstance(event, FinalResponseEvent):
+                    if isinstance(event, StopEvent):
                         break
             finally:
                 evt = _build_conversation_event(

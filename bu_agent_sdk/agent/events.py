@@ -115,14 +115,18 @@ class ToolResultEvent:
 
 
 @dataclass
-class FinalResponseEvent:
-	"""Emitted when the agent produces its final response."""
+class StopEvent:
+	"""Emitted when the agent stops streaming events.
 
-	content: str
-	"""The final response content."""
+	This event is a pure termination signal and does not contain the final text.
+	Final assistant text (if any) is emitted via `TextEvent`.
+	"""
+
+	reason: Literal['completed', 'max_iterations']
+	"""Why the stream stopped."""
 
 	def __str__(self) -> str:
-		return f'✅ Final: {self.content[:100]}...' if len(self.content) > 100 else f'✅ Final: {self.content}'
+		return f'🛑 Stop: {self.reason}'
 
 
 # === New events for BU-like UI ===
@@ -193,6 +197,48 @@ class StepCompleteEvent:
 
 
 @dataclass
+class SubagentStartEvent:
+	"""Emitted when a subagent starts executing (Task tool)."""
+
+	tool_call_id: str
+	"""The tool_call_id for the Task call that launched this subagent."""
+
+	subagent_name: str
+	"""Subagent name (subagent_type)."""
+
+	description: str = ''
+	"""Optional short description for UI display."""
+
+	def __str__(self) -> str:
+		desc = f' · {self.description}' if self.description else ''
+		return f'🤖 Subagent start: {self.subagent_name}{desc}'
+
+
+@dataclass
+class SubagentStopEvent:
+	"""Emitted when a subagent finishes executing (Task tool)."""
+
+	tool_call_id: str
+	"""The tool_call_id for the Task call that launched this subagent."""
+
+	subagent_name: str
+	"""Subagent name (subagent_type)."""
+
+	status: Literal['completed', 'error', 'timeout']
+	"""Final status for the subagent execution."""
+
+	duration_ms: float = 0.0
+	"""Duration in milliseconds."""
+
+	error: str | None = None
+	"""Error message if status is error/timeout."""
+
+	def __str__(self) -> str:
+		icon = '✅' if self.status == 'completed' else '❌'
+		return f'{icon} Subagent stop: {self.subagent_name} ({self.duration_ms:.0f}ms)'
+
+
+@dataclass
 class HiddenUserMessageEvent:
 	"""Emitted when the agent injects a hidden user message (ex: incomplete todos prompt).
 	Hidden messages are saved to history and sent to the LLM but not displayed in the UI.
@@ -213,10 +259,12 @@ AgentEvent = (
 	| ThinkingEvent
 	| ToolCallEvent
 	| ToolResultEvent
-	| FinalResponseEvent
+	| StopEvent
 	| MessageStartEvent
 	| MessageCompleteEvent
 	| StepStartEvent
 	| StepCompleteEvent
+	| SubagentStartEvent
+	| SubagentStopEvent
 	| HiddenUserMessageEvent
 )

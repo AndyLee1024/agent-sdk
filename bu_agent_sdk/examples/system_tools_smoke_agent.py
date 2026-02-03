@@ -7,7 +7,7 @@ from bu_agent_sdk import Agent
 from bu_agent_sdk.agent.llm_levels import resolve_llm_levels
 from bu_agent_sdk.llm import ChatAnthropic, ChatGoogle, ChatOpenAI
 from bu_agent_sdk.system_tools.registry import get_system_tools
-from bu_agent_sdk.tools import ToolRegistry, tool
+from bu_agent_sdk.tools import ToolRegistry
 
 logger = logging.getLogger("bu_agent_sdk.examples.system_tools_smoke_agent")
 
@@ -34,13 +34,6 @@ def _load_main_llm_from_env() -> object:
     raise RuntimeError(f"不支持的 provider：{provider}（BU_AGENT_SDK_MAIN_LLM）")
 
 
-@tool("Signal task completion", name="done")
-async def done(message: str) -> str:
-    from bu_agent_sdk.agent.service import TaskComplete
-
-    raise TaskComplete(message)
-
-
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -50,13 +43,11 @@ async def main() -> None:
     registry = ToolRegistry()
     for t in get_system_tools():
         registry.register(t)
-    registry.register(done)
 
     agent = Agent(
         llm=main_llm,  # type: ignore[arg-type]
         tools=None,  # 触发默认 registry（但我们显式传 tool_registry 覆盖为 registry）
         tool_registry=registry,
-        require_done_tool=True,
         llm_levels=llm_levels,  # type: ignore[arg-type]
     )
 
@@ -66,12 +57,12 @@ async def main() -> None:
         "2) 使用 MultiEdit 在 /tmp/bu_agent_sdk_smoke/agent.txt 创建文件（第一条 old_string 为空），写入一行 'hello'，然后把 hello 改成 hi。\n"
         "3) 使用 LS 列出 /tmp/bu_agent_sdk_smoke\n"
         "4) 使用 TodoWrite 写入 2 条 todo。\n"
-        "5) 最后调用 done，总结你做了什么。\n"
+        "5) 最后总结你做了什么。\n"
         "注意：务必使用工具完成，不要直接编造结果。"
     )
 
     try:
-        result = await agent.query(prompt)  # 在 require_done_tool=True 下会由 done 结束
+        result = await agent.query(prompt)
         logger.info(f"Final -> {result}")
     finally:
         summary = await agent.get_usage()
@@ -83,4 +74,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-

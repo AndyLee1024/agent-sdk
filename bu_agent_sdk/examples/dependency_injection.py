@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import FinalResponseEvent, ToolCallEvent, ToolResultEvent
+from bu_agent_sdk.agent import StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
 from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.tools import Depends, tool
 
@@ -97,8 +97,10 @@ async def main():
                 print(f"🔧 {name}({args})")
             case ToolResultEvent(tool=name, result=result):
                 print(f"   → {result}")
-            case FinalResponseEvent(content=text):
+            case TextEvent(content=text):
                 print(f"\n✅ {text}")
+            case StopEvent(reason=_reason):
+                pass
 
     usage = await agent.get_usage()
     print(f"Token usage: {usage.total_cost}")

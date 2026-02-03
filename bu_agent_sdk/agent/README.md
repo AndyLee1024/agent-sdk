@@ -26,7 +26,7 @@ result = await agent.query("What is 2 + 2?")
 See exactly what the agent is doing:
 
 ```python
-from bu_agent_sdk.agent import ToolCallEvent, ToolResultEvent, FinalResponseEvent
+from bu_agent_sdk.agent import StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
 
 async for event in agent.query_stream("do something"):
     match event:
@@ -34,8 +34,10 @@ async for event in agent.query_stream("do something"):
             print(f"Calling {name}: {args}")
         case ToolResultEvent(tool=name, result=result):
             print(f"{name} returned: {result}")
-        case FinalResponseEvent(content=text):
-            print(f"Done: {text}")
+        case TextEvent(content=text):
+            print(text)
+        case StopEvent(reason=reason):
+            print(f"Done: {reason}")
 ```
 
 ## Pydantic Models

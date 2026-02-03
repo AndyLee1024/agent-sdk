@@ -78,17 +78,12 @@ BU_AGENT_SDK_LLM_HIGH_BASE_URL="http://192.168.100.1:4143/v1"
 import asyncio
 import logging
 
-from bu_agent_sdk import Agent, TaskComplete, tool
-from bu_agent_sdk.agent import FinalResponseEvent, SessionInitEvent, ToolCallEvent, ToolResultEvent
+from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import SessionInitEvent, StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
 from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.tools import get_default_registry
 
 logging.basicConfig(level=logging.INFO)
-
-
-@tool("结束任务（必须调用）")
-async def done(message: str) -> str:
-    raise TaskComplete(message)
 
 
 async def main() -> None:
@@ -101,8 +96,7 @@ async def main() -> None:
     agent = Agent(
         llm=llm_levels["MID"],
         llm_levels=llm_levels,
-        tools=get_default_registry().all() + [done],
-        require_done_tool=True,
+        tools=get_default_registry().all(),
         include_cost=False,
     )
 
@@ -112,7 +106,7 @@ async def main() -> None:
         "请在当前项目根目录里：\n"
         "1) 找到 pyproject.toml\n"
         "2) 读取并告诉我 [project] 的 name\n"
-        "3) 完成后调用 done 给出结论\n"
+        "3) 完成后给出结论\n"
     )
 
     async for event in session.query_stream(prompt):
@@ -122,8 +116,10 @@ async def main() -> None:
             logging.info(f"→ {event.tool}: {event.args}")
         elif isinstance(event, ToolResultEvent):
             logging.info(f"← {event.tool}: is_error={event.is_error}")
-        elif isinstance(event, FinalResponseEvent):
+        elif isinstance(event, TextEvent):
             logging.info(event.content)
+        elif isinstance(event, StopEvent):
+            logging.info(f"done reason={event.reason}")
 
 
 if __name__ == "__main__":
@@ -140,9 +136,8 @@ uv run python your_script.py
 
 ### Agent（核心 for-loop）
 
-- `Agent.query(...)`：一次输入，内部 for-loop 执行工具直到结束（或 `TaskComplete`）
+- `Agent.query(...)`：一次输入，内部 for-loop 执行工具直到结束
 - `Agent.query_stream(...)`：流式事件（便于 UI/日志/可观测性）
-- `require_done_tool=True`：强制显式结束（配合 `done` 工具 + `TaskComplete`）
 
 ### Tool：`@tool(...)`
 

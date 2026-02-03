@@ -2,7 +2,7 @@
 Example demonstrating Claude Code-style tools with sandboxed filesystem.
 
 Includes bash, file operations (read/write/edit), search (glob/grep),
-todo management, and task completion - all with dependency injection
+todo management - all with dependency injection
 for secure filesystem access.
 
 Run with:
@@ -21,27 +21,26 @@ from typing import Annotated
 
 from bu_agent_sdk import Agent
 from bu_agent_sdk.agent import (
-    FinalResponseEvent,
+    StopEvent,
     TextEvent,
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
 from bu_agent_sdk.agent.events import StepCompleteEvent, StepStartEvent
-from bu_agent_sdk.agent.service import TaskComplete
-from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.llm import ChatAnthropic
 from bu_agent_sdk.tools import Depends, tool
 
 # =============================================================================
-# Logging Configuration - 仅显示 WARNING 及以上级别，减少噪音
+# Logging Configuration
 # =============================================================================
 
 logging.basicConfig(
-    level=logging.WARNING,
-    format='%(message)s',
-    stream=sys.stdout
+    level=logging.INFO,
+    format="%(message)s",
+    stream=sys.stdout,
 )
+logger = logging.getLogger("bu_agent_sdk.examples.claude_code")
 
 
 # =============================================================================
@@ -302,21 +301,10 @@ async def todo_write(
 
 
 # =============================================================================
-# Done Tool
-# =============================================================================
-
-
-@tool("Signal that the task is complete")
-async def done(message: str) -> str:
-    """Call this when the task is finished."""
-    raise TaskComplete(message)
-
-
-# =============================================================================
 # All Tools
 # =============================================================================
 
-ALL_TOOLS = [bash, read, write, edit, glob_search, grep, todo_read, todo_write, done]
+ALL_TOOLS = [bash, read, write, edit, glob_search, grep, todo_read, todo_write]
 
 
 # =============================================================================
@@ -327,7 +315,7 @@ ALL_TOOLS = [bash, read, write, edit, glob_search, grep, todo_read, todo_write, 
 async def main():
     # Create a sandbox context
     ctx = SandboxContext.create()
-    print(f"🏗️  Sandbox: {ctx.root_dir}")
+    logger.info(f"🏗️  Sandbox: {ctx.root_dir}")
 
     # Create some test files in the sandbox
     (ctx.root_dir / "hello.py").write_text('print("Hello, World!")\n')
@@ -341,32 +329,32 @@ async def main():
         dependency_overrides={get_sandbox_context: lambda: ctx},
     )
 
-    print(f"🚀 Starting query...\n")
+    logger.info("🚀 Starting query...\n")
     async for event in agent.query_stream(
         "使用frontend design 来设计一个登录页面, write为login.html"
     ):
         match event:
             case ThinkingEvent(content=text):
                 preview = text[:100] + "..." if len(text) > 100 else text
-                print(f"🧠 {preview}")
+                logger.info(f"🧠 {preview}")
             case TextEvent(content=text):
-                print(text, end="", flush=True)
+                logger.info(text)
             case StepStartEvent(step_number=n, title=title):
-                print(f"\n▶️  Step {n}: {title}")
+                logger.info(f"\n▶️  Step {n}: {title}")
             case ToolCallEvent(tool=name, args=args):
-                print(f"🔧 [{name}] {args}")
+                logger.info(f"🔧 [{name}] {args}")
             case ToolResultEvent(tool=name, result=result):
                 result_str = str(result)
-                print(
+                logger.info(
                     f"  ✅ {result_str[:200]}..."
                     if len(result_str) > 200
                     else f"  ✅ {result_str}"
                 )
             case StepCompleteEvent(status=status, duration_ms=ms):
                 icon = "✅" if status == "completed" else "❌"
-                print(f"  {icon} {status} ({ms:.0f}ms)")
-            case FinalResponseEvent(content=text):
-                print(f"\n🏁 {text}")
+                logger.info(f"  {icon} {status} ({ms:.0f}ms)")
+            case StopEvent(reason=reason):
+                logger.info(f"\n🏁 stop={reason}")
 
 
 if __name__ == "__main__":

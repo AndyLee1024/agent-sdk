@@ -3,9 +3,9 @@ Subagent 模块 - 提供 Subagent 功能
 """
 
 from bu_agent_sdk.subagent.events import (
-    SubagentCompleteEvent,
     SubagentEvent,
     SubagentStartEvent,
+    SubagentStopEvent,
 )
 from bu_agent_sdk.subagent.loader import discover_subagents
 from bu_agent_sdk.subagent.models import AgentDefinition, SubagentResult
@@ -20,5 +20,5 @@ __all__ = [
     "create_task_tool",
     "SubagentStartEvent",
     "SubagentEvent",
-    "SubagentCompleteEvent",
+    "SubagentStopEvent",
 ]

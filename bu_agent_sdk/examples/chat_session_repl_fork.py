@@ -6,9 +6,9 @@ from pathlib import Path
 from bu_agent_sdk import Agent
 from bu_agent_sdk.agent.events import (
     SessionInitEvent,
-    FinalResponseEvent,
     StepCompleteEvent,
     StepStartEvent,
+    StopEvent,
     TextEvent,
     ThinkingEvent,
     ToolCallEvent,
@@ -53,8 +53,8 @@ def _log_event(event) -> None:
             logger.info(f"tool_result tool={name} status={status} result={preview}")
         case StepCompleteEvent(status=status, duration_ms=ms):
             logger.info(f"step_complete status={status} duration_ms={ms:.0f}")
-        case FinalResponseEvent(content=text):
-            logger.info(f"final={text}")
+        case StopEvent(reason=reason):
+            logger.info(f"stop reason={reason}")
         case _:
             logger.debug(f"event={event!r}")
 

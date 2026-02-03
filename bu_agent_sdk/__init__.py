@@ -22,7 +22,6 @@ from bu_agent_sdk.agent import Agent, ChatSession, SessionInitEvent
 from bu_agent_sdk.context import MemoryConfig
 from bu_agent_sdk.observability import Laminar, observe, observe_debug
 from bu_agent_sdk.tools import Depends, tool
-from bu_agent_sdk.agent import TaskComplete
 from bu_agent_sdk.skill import (
     SkillDefinition,
     apply_skill_context,
@@ -31,17 +30,16 @@ from bu_agent_sdk.skill import (
 )
 from bu_agent_sdk.subagent import (
     AgentDefinition,
-    SubagentCompleteEvent,
     SubagentEvent,
     SubagentResult,
     SubagentStartEvent,
+    SubagentStopEvent,
 )
 
 __all__ = [
     "Agent",
     "ChatSession",
     "SessionInitEvent",
-    "TaskComplete",
     "Laminar",
     "observe",
     "observe_debug",
@@ -54,7 +52,7 @@ __all__ = [
     "SubagentResult",
     "SubagentStartEvent",
     "SubagentEvent",
-    "SubagentCompleteEvent",
+    "SubagentStopEvent",
     # Skill support
     "SkillDefinition",
     "discover_skills",

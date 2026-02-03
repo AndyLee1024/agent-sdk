@@ -9,8 +9,10 @@ from bu_agent_sdk.agent.compaction import (
 )
 from bu_agent_sdk.agent.events import (
     AgentEvent,
-    FinalResponseEvent,
     SessionInitEvent,
+    StopEvent,
+    SubagentStartEvent,
+    SubagentStopEvent,
     TextEvent,
     ThinkingEvent,
     ToolCallEvent,
@@ -21,19 +23,20 @@ from bu_agent_sdk.agent.chat_session import (
     ChatSessionClosedError,
     ChatSessionError,
 )
-from bu_agent_sdk.agent.service import Agent, TaskComplete
+from bu_agent_sdk.agent.service import Agent
 
 __all__ = [
     "Agent",
-    "TaskComplete",
     # Chat session
     "ChatSession",
     "ChatSessionError",
     "ChatSessionClosedError",
     # Events
     "AgentEvent",
-    "FinalResponseEvent",
     "SessionInitEvent",
+    "StopEvent",
+    "SubagentStartEvent",
+    "SubagentStopEvent",
     "TextEvent",
     "ThinkingEvent",
     "ToolCallEvent",
