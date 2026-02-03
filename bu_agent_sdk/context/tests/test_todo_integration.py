@@ -1,9 +1,7 @@
 """TodoWrite 工具与 ContextIR 集成测试"""
 
-import json
-import pytest
-
 from bu_agent_sdk.context import ContextIR
+from bu_agent_sdk.llm.messages import UserMessage
 
 
 def test_set_todo_state_empty():
@@ -18,19 +16,20 @@ def test_set_todo_state_empty():
 
 
 def test_set_todo_state_with_items():
-    """测试设置非空 TODO 列表"""
+    """测试设置非空 TODO 列表（注册温和提醒，不注入完整 JSON）"""
     ctx = ContextIR()
+    ctx.set_turn_number(1)
     todos = [
         {"id": "1", "content": "Task 1", "status": "pending", "priority": "high"},
         {"id": "2", "content": "Task 2", "status": "in_progress", "priority": "medium"},
     ]
     ctx.set_todo_state(todos)
 
-    # 应该注册 "update" reminder
+    # 应该注册 gentle reminder
     assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_list_update"
-    assert "todo list has changed" in ctx.reminders[0].content
-    assert '"id": "1"' in ctx.reminders[0].content  # JSON 应该在 reminder 中
+    assert ctx.reminders[0].name == "todo_gentle_reminder"
+    assert "active TODO items" in ctx.reminders[0].content
+    assert '"id": "1"' not in ctx.reminders[0].content
 
 
 def test_initial_todo_reminder():
@@ -98,7 +97,7 @@ def test_todo_reminder_replacement():
     # 添加 todos 后替换 reminder
     ctx.set_todo_state([{"id": "1", "content": "Task 1", "status": "pending", "priority": "high"}])
     assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_list_update"
+    assert ctx.reminders[0].name == "todo_gentle_reminder"
 
     # 再次设为空，应替换回 empty reminder
     ctx.set_todo_state([])
@@ -133,22 +132,27 @@ def test_todo_event_emission():
     # 应该有至少一个 TODO_STATE_UPDATED 事件
     todo_events = [e for e in events if e.event_type == EventType.TODO_STATE_UPDATED]
     assert len(todo_events) == 1
-    assert "1 items" in todo_events[0].detail
+    assert "1 active items" in todo_events[0].detail
 
 
-def test_todo_json_in_reminder():
-    """测试 reminder 内容中包含正确的 JSON 格式"""
+def test_todo_gentle_reminder_condition_threshold():
+    """测试温和提醒的触发阈值（gap >= 3 才注入到 lower()）"""
     ctx = ContextIR()
-    todos = [
-        {"id": "1", "content": "Task 1", "status": "pending", "priority": "high"},
-        {"id": "2", "content": "Task 2", "status": "completed", "priority": "low"},
-    ]
-    ctx.set_todo_state(todos)
+    ctx.set_turn_number(1)
+    ctx.set_todo_state([{"id": "1", "content": "Task 1", "status": "pending", "priority": "high"}])
 
-    reminder = ctx.reminders[0]
-    assert reminder.name == "todo_list_update"
+    # gap=2，不应注入
+    ctx.set_turn_number(3)
+    msgs = ctx.lower()
+    assert not any(
+        isinstance(m, UserMessage) and "active TODO items" in m.text
+        for m in msgs
+    )
 
-    # 验证 JSON 格式正确
-    assert '"id": "1"' in reminder.content
-    assert '"content": "Task 1"' in reminder.content
-    assert '"priority": "high"' in reminder.content
+    # gap=3，应注入
+    ctx.set_turn_number(4)
+    msgs = ctx.lower()
+    assert any(
+        isinstance(m, UserMessage) and "active TODO items" in m.text
+        for m in msgs
+    )

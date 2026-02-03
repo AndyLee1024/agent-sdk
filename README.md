@@ -57,6 +57,23 @@ BU_AGENT_SDK_LLM_HIGH_BASE_URL="http://192.168.100.1:4143/v1"
 - 显式 `done` 工具（防止“无工具调用就提前结束”）
 - `ChatSession`（会话持久化到 `~/.agent/sessions/<session_id>/`）
 
+### 系统工具依赖（按工具）
+
+> 说明：Python 包依赖会由 `uv sync` / `uv add bu-agent-sdk` 自动安装；外部命令依赖需要你在系统层安装。
+
+| 工具 | 依赖 | 缺失时行为 | 备注 |
+|---|---|---|---|
+| `Bash` | 系统 shell（Linux/macOS 默认具备） | 无法执行命令 | 具体依赖取决于你在命令里调用的程序（如 `git` / `uv` / `python` 等） |
+| `Read` | 无 | - | - |
+| `Write` | 无 | - | - |
+| `Edit` | 无 | - | - |
+| `MultiEdit` | 无 | - | - |
+| `Glob` | 无 | - | - |
+| `LS` | 无 | - | - |
+| `Grep` | 可选：`rg`（ripgrep） | 若未安装 `rg`，会自动回退到 Python 实现（较慢，部分高级能力可能缺失） | 推荐安装 ripgrep：Ubuntu/Debian `sudo apt-get install ripgrep`；macOS `brew install ripgrep`；Windows `winget install BurntSushi.ripgrep.MSVC` |
+| `TodoWrite` | 无 | - | 会在 session 目录下写入/清理 `todos.json` |
+| `WebFetch` | Python 包：`curl-cffi`、`markdownify`；以及 `llm_levels["LOW"]` | 缺包则报错；未配置 LOW 模型则无法按预期调用低档模型 | 需要联网访问目标 URL；会调用低档模型做摘要/抽取 |
+
 ```python
 import asyncio
 import logging

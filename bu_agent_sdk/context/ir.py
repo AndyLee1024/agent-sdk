@@ -87,6 +87,8 @@ class ContextIR:
     reminders: list[SystemReminder] = field(default_factory=list)
     _pending_skill_items: list[ContextItem] = field(default_factory=list)
     _todo_state: dict[str, Any] = field(default_factory=dict)
+    _turn_number: int = 0
+    _todo_turn_number_at_update: int = 0
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
 
@@ -313,6 +315,13 @@ class ContextIR:
         if item_type is None:
             item_type = _MESSAGE_TYPE_MAP.get(type(message), ItemType.USER_MESSAGE)
 
+        if (
+            item_type == ItemType.USER_MESSAGE
+            and isinstance(message, UserMessage)
+            and not bool(getattr(message, "is_meta", False))
+        ):
+            self._turn_number += 1
+
         # 提取文本内容用于 token 估算
         content_text = message.text if hasattr(message, "text") else ""
 
@@ -364,6 +373,22 @@ class ContextIR:
         ))
 
         return item
+
+    def set_turn_number(self, turn_number: int) -> None:
+        """设置/纠正 turn_number（单调不减）。
+
+        主要用于 ChatSession.resume() 从持久化恢复 turn_number。
+        """
+        try:
+            value = int(turn_number)
+        except Exception:
+            return
+        if value > self._turn_number:
+            self._turn_number = value
+
+    def get_turn_number(self) -> int:
+        """获取当前 turn_number（真实用户输入轮次）。"""
+        return int(self._turn_number)
 
     def add_skill_injection(
         self,
@@ -619,17 +644,24 @@ class ContextIR:
         import time
         from bu_agent_sdk.context.reminder import ReminderPosition
 
+        active_todos = [
+            t for t in todos
+            if isinstance(t, dict) and t.get("status") in ("pending", "in_progress")
+        ]
+
         self._todo_state = {
-            "todos": todos,
+            "todos": active_todos,
             "updated_at": time.time(),
         }
+        self._todo_turn_number_at_update = self._turn_number
 
         # 移除旧的 todo reminders
         self.remove_reminder("todo_list_empty")
         self.remove_reminder("todo_list_update")
+        self.remove_reminder("todo_gentle_reminder")
 
         # 根据状态注册新 reminder
-        if not todos:
+        if not active_todos:
             # 如果 todo 为空，注册"空列表"提醒
             self.register_reminder(SystemReminder(
                 name="todo_list_empty",
@@ -644,25 +676,86 @@ class ContextIR:
                 one_shot=False,  # 持续提醒直到创建 todo
             ))
         else:
-            # 如果 todo 非空，注册"更新"提醒
-            import json
-            todos_json = json.dumps(todos, ensure_ascii=False)
+            # 如果 todo 非空，注册"温和提醒"（不包含完整 JSON）
             self.register_reminder(SystemReminder(
-                name="todo_list_update",
+                name="todo_gentle_reminder",
                 content=(
-                    f"Your todo list has changed. DO NOT mention this explicitly to the user. "
-                    f"Here are the latest contents of your todo list:\n{todos_json}\n"
-                    f"Continue on with the tasks at hand if applicable."
+                    "You have active TODO items. DO NOT mention this reminder to the user. "
+                    "Continue working on the next TODO item(s) and keep the TODO list up to date via the TodoWrite tool."
                 ),
                 position=ReminderPosition.END,
                 one_shot=False,  # 持续提醒直到下次更新
+                condition=self._should_remind_todo,
             ))
 
         # 触发事件
         self.event_bus.emit(ContextEvent(
             event_type=EventType.TODO_STATE_UPDATED,
-            detail=f"todo_state updated: {len(todos)} items",
+            detail=f"todo_state updated: {len(active_todos)} active items",
         ))
+
+    def restore_todo_state(
+        self,
+        *,
+        todos: list[dict],
+        turn_number_at_update: int,
+    ) -> None:
+        """从持久化数据恢复 TODO 状态（用于 session resume）。
+
+        与 set_todo_state() 的区别：
+        - 不用当前 turn_number 覆盖 turn_number_at_update，而是沿用持久化值
+        """
+        import time
+        from bu_agent_sdk.context.reminder import ReminderPosition
+
+        active_todos = [
+            t for t in todos
+            if isinstance(t, dict) and t.get("status") in ("pending", "in_progress")
+        ]
+
+        self._todo_state = {
+            "todos": active_todos,
+            "updated_at": time.time(),
+        }
+        try:
+            self._todo_turn_number_at_update = int(turn_number_at_update)
+        except Exception:
+            self._todo_turn_number_at_update = 0
+
+        self.remove_reminder("todo_list_empty")
+        self.remove_reminder("todo_list_update")
+        self.remove_reminder("todo_gentle_reminder")
+
+        if not active_todos:
+            self.register_reminder(SystemReminder(
+                name="todo_list_empty",
+                content=(
+                    "This is a reminder that your todo list is currently empty. "
+                    "DO NOT mention this to the user explicitly because they are already aware. "
+                    "If you are working on tasks that would benefit from a todo list please use the TodoWrite tool to create one. "
+                    "If not, please feel free to ignore. "
+                    "Again do not mention this message to the user."
+                ),
+                position=ReminderPosition.END,
+                one_shot=False,
+            ))
+        else:
+            self.register_reminder(SystemReminder(
+                name="todo_gentle_reminder",
+                content=(
+                    "You have active TODO items. DO NOT mention this reminder to the user. "
+                    "Continue working on the next TODO item(s) and keep the TODO list up to date via the TodoWrite tool."
+                ),
+                position=ReminderPosition.END,
+                one_shot=False,
+                condition=self._should_remind_todo,
+            ))
+
+    def _should_remind_todo(self) -> bool:
+        if not self.has_todos():
+            return False
+        gap = self._turn_number - self._todo_turn_number_at_update
+        return gap >= 3
 
     def get_todo_state(self) -> dict[str, Any]:
         """获取当前 TODO 状态"""
@@ -671,6 +764,10 @@ class ContextIR:
     def has_todos(self) -> bool:
         """检查是否有 TODO 条目"""
         return bool(self._todo_state.get("todos"))
+
+    def get_todo_persist_turn_number_at_update(self) -> int:
+        """用于持久化的 todo 更新轮次。"""
+        return int(self._todo_turn_number_at_update)
 
     def register_initial_todo_reminder_if_needed(self) -> None:
         """在会话开始时注册初始 TODO 提醒（如果还没有 todo 状态）

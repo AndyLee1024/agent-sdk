@@ -439,6 +439,141 @@ def _run_rg_lines(cmd: list[str]) -> tuple[int, str, str]:
     return int(result.returncode), result.stdout or "", result.stderr or ""
 
 
+def _grep_fallback(
+    *,
+    params: GrepInput,
+    ctx: SystemToolContext,
+    search_path: Path,
+    output_mode: str,
+) -> dict[str, Any]:
+    import re
+
+    before, after = _compute_context_window(params)
+    ignore_case = bool(params.i)
+    multiline = bool(params.multiline)
+
+    flags = re.MULTILINE
+    if ignore_case:
+        flags |= re.IGNORECASE
+    if multiline:
+        flags |= re.DOTALL
+
+    try:
+        rx = re.compile(params.pattern, flags)
+    except Exception as e:
+        logger.error(f"Grep pattern 编译失败：{e}", exc_info=True)
+        if output_mode == "content":
+            return {"matches": [], "total_matches": 0}
+        if output_mode == "count":
+            return {"counts": [], "total_matches": 0}
+        return {"files": [], "count": 0}
+
+    def iter_files() -> list[Path]:
+        if search_path.is_file():
+            return [search_path]
+        if not search_path.exists() or not search_path.is_dir():
+            return []
+
+        candidates = [p for p in search_path.rglob("*") if p.is_file()]
+        if params.glob:
+            pat = str(params.glob)
+            filtered: list[Path] = []
+            for p in candidates:
+                rel = p.relative_to(search_path).as_posix()
+                if fnmatch(rel, pat) or fnmatch(p.name, pat):
+                    filtered.append(p)
+            candidates = filtered
+        return candidates
+
+    files = iter_files()
+
+    if output_mode == "files_with_matches":
+        matched: list[str] = []
+        for f in files:
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            if rx.search(text):
+                matched.append(_relpath(f.resolve(), ctx.project_root))
+                if params.head_limit is not None and params.head_limit >= 0:
+                    if len(matched) >= int(params.head_limit):
+                        break
+        return {"files": matched, "count": len(matched)}
+
+    if output_mode == "count":
+        counts: list[dict[str, Any]] = []
+        total = 0
+        for f in files:
+            try:
+                text = f.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+            c = len(list(rx.finditer(text))) if multiline else sum(1 for line in text.splitlines() if rx.search(line))
+            if c <= 0:
+                continue
+            total += c
+            counts.append({"file": _relpath(f.resolve(), ctx.project_root), "count": c})
+            if params.head_limit is not None and params.head_limit >= 0:
+                if len(counts) >= int(params.head_limit):
+                    break
+        return {"counts": counts, "total_matches": total}
+
+    # content mode
+    matches: list[dict[str, Any]] = []
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+
+        lines = text.splitlines()
+        rel_file = _relpath(f.resolve(), ctx.project_root)
+
+        def add_match(line_no: int) -> None:
+            ln0 = max(0, int(line_no) - 1)
+            line_text = lines[ln0] if ln0 < len(lines) else ""
+            match_item = {
+                "file": rel_file,
+                "line_number": int(line_no) if params.n and line_no is not None else None,
+                "line": _truncate_line(line_text, _LINE_TRUNCATE_CHARS),
+                "before_context": None,
+                "after_context": None,
+            }
+            if before > 0:
+                b0 = max(0, ln0 - before)
+                match_item["before_context"] = [
+                    _truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0:ln0]
+                ]
+            if after > 0:
+                a1 = min(len(lines), ln0 + 1 + after)
+                match_item["after_context"] = [
+                    _truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[ln0 + 1 : a1]
+                ]
+            matches.append(match_item)
+
+        if multiline:
+            for m in rx.finditer(text):
+                line_no = text.count("\n", 0, m.start()) + 1
+                add_match(line_no)
+                if params.head_limit is not None and params.head_limit >= 0:
+                    if len(matches) >= int(params.head_limit):
+                        break
+        else:
+            for idx, line in enumerate(lines, start=1):
+                if rx.search(line):
+                    add_match(idx)
+                    if params.head_limit is not None and params.head_limit >= 0:
+                        if len(matches) >= int(params.head_limit):
+                            break
+
+        if params.head_limit is not None and params.head_limit >= 0:
+            if len(matches) >= int(params.head_limit):
+                break
+
+    return {"matches": matches, "total_matches": len(matches)}
+
+
 @tool("Search file contents with regex (ripgrep).", name="Grep", usage_rules=GREP_USAGE_RULES)
 async def Grep(
     params: GrepInput,
@@ -449,12 +584,13 @@ async def Grep(
 
     rg_path = shutil.which("rg")
     if not rg_path:
-        logger.error("未找到 rg (ripgrep)，Grep 工具不可用")
-        if output_mode == "content":
-            return {"matches": [], "total_matches": 0}
-        if output_mode == "count":
-            return {"counts": [], "total_matches": 0}
-        return {"files": [], "count": 0}
+        logger.warning("未找到 rg (ripgrep)，Grep 将使用 Python fallback 实现（性能较差）")
+        return _grep_fallback(
+            params=params,
+            ctx=ctx,
+            search_path=search_path,
+            output_mode=output_mode,
+        )
 
     if output_mode == "files_with_matches":
         cmd = _rg_base_args(params) + ["-l", params.pattern, str(search_path)]
@@ -653,20 +789,39 @@ async def TodoWrite(
         # 1. 序列化 todos
         todos_data = [t.model_dump(mode="json") for t in params.todos]
 
+        has_active = any(t.get("status") in ("pending", "in_progress") for t in todos_data)
+
         # 2. 更新 ContextIR 的 todo 状态（通过 SystemToolContext 中的 agent_context）
         if ctx.agent_context is not None:
-            ctx.agent_context.set_todo_state(todos_data)
+            if has_active:
+                ctx.agent_context.set_todo_state(todos_data)
+            else:
+                ctx.agent_context.set_todo_state([])
 
         # 3. 可选：持久化到文件（如果有 session_root）
         root = _session_root_from_ctx(ctx)
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
             todo_path = root / "todos.json"
-            data = {"todos": todos_data}
-            todo_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            if not has_active:
+                try:
+                    todo_path.unlink()
+                except FileNotFoundError:
+                    pass
+            else:
+                data = {
+                    "schema_version": 2,
+                    "todos": todos_data,
+                    "turn_number_at_update": (
+                        ctx.agent_context.get_todo_persist_turn_number_at_update()
+                        if ctx.agent_context is not None
+                        else 0
+                    ),
+                }
+                todo_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 4. 返回成功消息 + 固定提醒
-        todos_json = json.dumps(todos_data, ensure_ascii=False, indent=2)
+        # 注意：不返回 todos_json，因为会占用 token；TODO 状态通过 ContextIR 管理（必要时会注入温和提醒）
         reminder_text = (
             "\n\n"
             "Remember to keep using the TODO list to keep track of your work "
@@ -674,7 +829,7 @@ async def TodoWrite(
             "Mark tasks as 'in_progress' when you start them and 'completed' when done."
         )
 
-        return f"TODO list updated successfully:\n{todos_json}{reminder_text}"
+        return f"TODO list updated successfully: {len(todos_data)} items.{reminder_text}"
 
     except Exception as e:
         msg = f"Error: TodoWrite 失败：{e}"

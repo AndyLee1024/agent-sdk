@@ -170,6 +170,7 @@ class TestSystemTools(unittest.TestCase):
                 self.assertIn("TODO list updated successfully", out)
                 self.assertTrue((session_root / "todos.json").exists())
                 data = json.loads((session_root / "todos.json").read_text(encoding="utf-8"))
+                self.assertEqual(data.get("schema_version"), 2)
                 self.assertEqual(len(data["todos"]), 2)
 
     def test_webfetch_uses_low_llm_and_records_usage(self) -> None:

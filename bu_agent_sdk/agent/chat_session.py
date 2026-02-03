@@ -486,6 +486,22 @@ class ChatSession:
         else:
             logger.info(f"No persisted conversation found for session_id={session_id}, starting empty")
 
+        session._agent._context.set_turn_number(session._turn_number)
+
+        todo_path = session._storage_root / "todos.json"
+        if todo_path.exists():
+            try:
+                data = json.loads(todo_path.read_text(encoding="utf-8"))
+                todos = data.get("todos", []) or []
+                turn_number_at_update = int(data.get("turn_number_at_update", 0) or 0)
+                session._agent._context.restore_todo_state(
+                    todos=todos,
+                    turn_number_at_update=turn_number_at_update,
+                )
+                logger.info(f"Restored {len(todos)} TODO items from todos.json")
+            except Exception as e:
+                logger.warning(f"Failed to restore TODO state for session_id={session_id}: {e}", exc_info=True)
+
         return session
 
     def fork_session(

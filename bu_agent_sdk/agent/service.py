@@ -893,7 +893,7 @@ Please provide a concise summary of:
 Keep the summary brief but informative."""
 
         # Add the summary request as a user message temporarily
-        temp_item = self._context.add_message(UserMessage(content=summary_prompt))
+        temp_item = self._context.add_message(UserMessage(content=summary_prompt, is_meta=True))
 
         try:
             # Invoke LLM without tools to get a summary response
@@ -1037,7 +1037,7 @@ Keep the summary brief but informative."""
                         if incomplete_prompt:
                             incomplete_todos_prompted = True
                             self._context.add_message(
-                                UserMessage(content=incomplete_prompt)
+                                UserMessage(content=incomplete_prompt, is_meta=True)
                             )
                             continue  # Give the LLM a chance to handle incomplete todos
 
@@ -1053,7 +1053,7 @@ Keep the summary brief but informative."""
                         "please call the 'done' tool with a summary of what was accomplished. "
                         "If you still have work to do, please continue with the appropriate tools."
                     )
-                    self._context.add_message(UserMessage(content=done_prompt))
+                    self._context.add_message(UserMessage(content=done_prompt, is_meta=True))
                     continue
                 else:
                     # Already prompted but still no tool calls - finish with current response
@@ -1163,7 +1163,7 @@ Keep the summary brief but informative."""
                         if incomplete_prompt:
                             incomplete_todos_prompted = True
                             self._context.add_message(
-                                UserMessage(content=incomplete_prompt)
+                                UserMessage(content=incomplete_prompt, is_meta=True)
                             )
                             yield HiddenUserMessageEvent(content=incomplete_prompt)
                             continue  # Give the LLM a chance to handle incomplete todos
@@ -1183,7 +1183,7 @@ Keep the summary brief but informative."""
                         "please call the 'done' tool with a summary of what was accomplished. "
                         "If you still have work to do, please continue with the appropriate tools."
                     )
-                    self._context.add_message(UserMessage(content=done_prompt))
+                    self._context.add_message(UserMessage(content=done_prompt, is_meta=True))
                     yield HiddenUserMessageEvent(content=done_prompt)
                     if response.content:
                         yield TextEvent(content=response.content)

@@ -45,13 +45,15 @@ async def test_todo_write_updates_context():
         assert todo_state["todos"][0]["priority"] == "high"
 
         # 检查是否注册了 reminder
-        assert any(r.name == "todo_list_update" for r in ctx_ir.reminders)
+        assert any(r.name == "todo_gentle_reminder" for r in ctx_ir.reminders)
 
         # 检查文件是否被写入
         todo_file = session_root / "todos.json"
         assert todo_file.exists()
         file_data = json.loads(todo_file.read_text(encoding="utf-8"))
+        assert file_data.get("schema_version") == 2
         assert len(file_data["todos"]) == 2
+        assert isinstance(file_data.get("turn_number_at_update", 0), int)
 
 
 @pytest.mark.anyio
@@ -73,6 +75,7 @@ async def test_todo_write_empty_list():
         # 检查 ContextIR 注册了 empty reminder
         assert any(r.name == "todo_list_empty" for r in ctx_ir.reminders)
         assert not ctx_ir.has_todos()
+        assert not (session_root / "todos.json").exists()
 
 
 @pytest.mark.anyio
@@ -101,6 +104,9 @@ async def test_todo_write_without_agent_context():
         # 文件应该被写入
         todo_file = session_root / "todos.json"
         assert todo_file.exists()
+        file_data = json.loads(todo_file.read_text(encoding="utf-8"))
+        assert file_data.get("schema_version") == 2
+        assert len(file_data.get("todos", [])) == 1
 
 
 @pytest.mark.anyio
@@ -125,10 +131,8 @@ async def test_todo_write_with_priority_field():
         ):
             result = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
 
-        # 检查返回的 JSON 包含 priority
-        assert '"priority": "high"' in result
-        assert '"priority": "medium"' in result
-        assert '"priority": "low"' in result
+        assert isinstance(result, str)
+        assert "TODO list updated successfully" in result
 
         # 检查 ContextIR 中的状态
         todo_state = ctx_ir.get_todo_state()
@@ -136,6 +140,38 @@ async def test_todo_write_with_priority_field():
         assert todo_state["todos"][1]["priority"] == "medium"
         assert todo_state["todos"][2]["priority"] == "low"
 
+        todo_file = session_root / "todos.json"
+        file_data = json.loads(todo_file.read_text(encoding="utf-8"))
+        assert file_data.get("schema_version") == 2
+        assert file_data["todos"][0]["priority"] == "high"
+
+
+@pytest.mark.anyio
+async def test_todo_write_deletes_file_when_all_completed():
+    """测试 todos 全部 completed 时删除 todos.json"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        session_root = root / "sessions" / "test"
+        ctx_ir = ContextIR()
+
+        with bind_system_tool_context(
+            project_root=root,
+            session_id="test",
+            session_root=session_root,
+            agent_context=ctx_ir,
+        ):
+            await TodoWrite.execute(todos=[
+                {"id": "1", "content": "t1", "status": "pending", "priority": "low"},
+            ])
+
+            todo_file = session_root / "todos.json"
+            assert todo_file.exists()
+
+            await TodoWrite.execute(todos=[
+                {"id": "1", "content": "t1", "status": "completed", "priority": "low"},
+            ])
+
+        assert not (session_root / "todos.json").exists()
 
 @pytest.mark.anyio
 async def test_todo_write_default_priority():
