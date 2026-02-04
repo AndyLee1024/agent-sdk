@@ -11,6 +11,7 @@ from bu_agent_sdk.agent.llm_levels import LLMLevel
 from bu_agent_sdk.agent.system_prompt import SystemPromptType, resolve_system_prompt
 from bu_agent_sdk.context import ContextIR
 from bu_agent_sdk.context.fs import ContextFileSystem
+from bu_agent_sdk.context.offload import OffloadPolicy
 from bu_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from bu_agent_sdk.llm.messages import (
     BaseMessage,
@@ -76,6 +77,8 @@ class Agent:
     """超过此 token 数的条目才会被卸载"""
     offload_root_path: str | None = None
     """卸载文件存储根目录。None 使用默认 ~/.agent/context/{session_id}"""
+    offload_policy: OffloadPolicy | None = None
+    """可选：细粒度卸载策略（按类型开关与阈值）。None 时使用默认策略。"""
     llm_max_retries: int = 5
     """Maximum retries for LLM errors at the agent level (matches browser-use default)."""
     llm_retry_base_delay: float = 1.0
@@ -329,4 +332,3 @@ class Agent:
         from bu_agent_sdk.agent.setup import rebuild_skill_tool
 
         rebuild_skill_tool(self)
-

@@ -9,6 +9,7 @@ from bu_agent_sdk.agent.compaction import CompactionConfig, CompactionService
 from bu_agent_sdk.agent.llm_levels import LLMLevel
 from bu_agent_sdk.context import ContextIR
 from bu_agent_sdk.context.fs import ContextFileSystem
+from bu_agent_sdk.context.offload import OffloadPolicy
 from bu_agent_sdk.tokens import TokenCost
 from bu_agent_sdk.tools.decorator import Tool
 
@@ -120,6 +121,13 @@ def agent_post_init(agent: "Agent") -> None:
         )
         logger.info(f"Context FileSystem enabled at {root_path}")
 
+        # Initialize offload policy (default: only tool_call/tool_result enabled)
+        if agent.offload_policy is None:
+            agent.offload_policy = OffloadPolicy(
+                enabled=True,
+                token_threshold=agent.offload_token_threshold,
+            )
+
     # Initialize ContextIR
     agent._context = ContextIR()
 
@@ -152,4 +160,3 @@ def agent_post_init(agent: "Agent") -> None:
     # Initialize memory support
     if agent.memory:
         agent._setup_memory()
-

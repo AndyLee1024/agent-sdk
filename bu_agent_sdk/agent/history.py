@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from bu_agent_sdk.llm.messages import BaseMessage, ToolMessage
+from bu_agent_sdk.llm.messages import AssistantMessage, BaseMessage, ToolMessage
 from bu_agent_sdk.tools.decorator import Tool
 
 logger = logging.getLogger("bu_agent_sdk.agent")
@@ -61,6 +61,26 @@ def load_history(agent: "Agent", messages: list[BaseMessage]) -> None:
 
 def destroy_ephemeral_messages(agent: "Agent") -> None:
     """销毁旧的 ephemeral tool 输出（保留每个 tool 最近 N 条）。"""
+    # 落盘阈值/开关（按类型）
+    policy = getattr(agent, "offload_policy", None)
+    tool_call_enabled = True
+    tool_result_enabled = True
+    tool_call_offload_threshold = 400
+    tool_result_offload_threshold = agent.offload_token_threshold
+
+    if policy is not None:
+        if not bool(getattr(policy, "enabled", True)):
+            tool_call_enabled = False
+            tool_result_enabled = False
+        else:
+            type_enabled = getattr(policy, "type_enabled", {}) or {}
+            tool_call_enabled = bool(type_enabled.get("tool_call", tool_call_enabled))
+            tool_result_enabled = bool(type_enabled.get("tool_result", tool_result_enabled))
+
+            threshold_by_type = getattr(policy, "token_threshold_by_type", {}) or {}
+            tool_call_offload_threshold = int(threshold_by_type.get("tool_call", tool_call_offload_threshold))
+            tool_result_offload_threshold = int(threshold_by_type.get("tool_result", getattr(policy, "token_threshold", tool_result_offload_threshold)))
+
     # 构建每个工具的 keep_count 映射
     tool_keep_counts: dict[str, int] = {}
     for tool in (agent.tools or []):
@@ -71,6 +91,9 @@ def destroy_ephemeral_messages(agent: "Agent") -> None:
             else:
                 keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
             tool_keep_counts[tool.name] = keep_count
+
+    conversation = agent._context.conversation.items
+    idx_by_id = {it.id: i for i, it in enumerate(conversation)}
 
     # 遍历所有 ephemeral items，卸载需要被销毁的
     for tool_name, keep in tool_keep_counts.items():
@@ -97,14 +120,56 @@ def destroy_ephemeral_messages(agent: "Agent") -> None:
                 # 使用 ContextFS 卸载（如果启用）
                 if agent._context_fs:
                     try:
-                        path = agent._context_fs.offload(item)
-                        item.offload_path = path
-                        item.offloaded = True
-                        # 同步更新 message 对象
-                        if isinstance(item.message, ToolMessage):
+                        tm = item.message if isinstance(item.message, ToolMessage) else None
+
+                        # 尝试落盘 tool_call（arguments 可能很大），与 tool_result 独立门控
+                        idx = idx_by_id.get(item.id)
+                        if tm is not None and idx is not None:
+                            found_tc = None
+                            found_assistant_item_id: str | None = None
+                            for j in range(idx - 1, -1, -1):
+                                prev = conversation[j]
+                                msg = prev.message
+                                if isinstance(msg, AssistantMessage) and msg.tool_calls:
+                                    for tc in msg.tool_calls:
+                                        if tc.id == tm.tool_call_id:
+                                            found_tc = tc
+                                            found_assistant_item_id = prev.id
+                                            break
+                                if found_tc is not None:
+                                    break
+
+                            if found_tc is not None:
+                                args = found_tc.function.arguments
+                                args_tokens = agent._context.token_counter.count(args)
+                                if tool_call_enabled and args_tokens >= tool_call_offload_threshold:
+                                    agent._context_fs.offload_tool_call(
+                                        tool_call_id=found_tc.id,
+                                        tool_name=found_tc.function.name,
+                                        arguments=args,
+                                        assistant_item_id=found_assistant_item_id,
+                                        arguments_token_count=args_tokens,
+                                    )
+
+                        # 只对超过阈值的 tool_result 落盘；否则直接销毁以省 tokens
+                        if tool_result_enabled and item.token_count >= tool_result_offload_threshold:
+                            if tm is None:
+                                raise ValueError("Expected ToolMessage for TOOL_RESULT item")
+
+                            wr = agent._context_fs.offload_tool_result(
+                                item,
+                                tool_call_id=tm.tool_call_id,
+                                tool_name=tm.tool_name,
+                                result_token_count=item.token_count,
+                            )
+
+                            item.offload_path = wr.relative_path
+                            item.offloaded = True
+
+                            # 同步更新 message 对象（serializer 里会显示 Path）
                             item.message.offloaded = True
                             item.message.offload_path = str(
-                                agent._context_fs.root_path / path
+                                agent._context_fs.root_path / wr.relative_path
                             )
                     except Exception as e:
                         logger.warning(
@@ -131,4 +196,3 @@ def build_tool_keep_counts(
                 keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
             tool_keep_counts[tool.name] = keep_count
     return tool_keep_counts
-

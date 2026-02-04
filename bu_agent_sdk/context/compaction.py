@@ -20,8 +20,26 @@ if TYPE_CHECKING:
     from bu_agent_sdk.context.offload import OffloadPolicy
     from bu_agent_sdk.tokens import TokenCost
     from bu_agent_sdk.agent.llm_levels import LLMLevel
+    from bu_agent_sdk.context.items import ContextItem
 
 logger = logging.getLogger("bu_agent_sdk.context.compaction")
+
+
+@dataclass(frozen=True)
+class _ToolCallInfo:
+    tool_call_id: str
+    tool_name: str
+    arguments: str
+    arguments_token_count: int
+
+
+@dataclass(frozen=True)
+class _ToolInteractionBlock:
+    start_idx: int
+    end_idx: int
+    assistant_item_id: str
+    tool_calls: list[_ToolCallInfo]
+    tool_result_items: list["ContextItem"]
 
 
 class CompactionStrategy(Enum):
@@ -74,6 +92,9 @@ DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
         strategy=CompactionStrategy.NONE
     ),
     ItemType.COMPACTION_SUMMARY.value: TypeCompactionRule(
+        strategy=CompactionStrategy.NONE
+    ),
+    ItemType.OFFLOAD_PLACEHOLDER.value: TypeCompactionRule(
         strategy=CompactionStrategy.NONE
     ),
 }
@@ -162,28 +183,43 @@ class SelectiveCompactionPolicy:
                     )
 
             elif rule.strategy == CompactionStrategy.TRUNCATE:
-                # 保留最近 N 个，删除更早的
-                if rule.keep_recent > 0 and len(items) <= rule.keep_recent:
-                    continue
-
-                if rule.keep_recent <= 0:
-                    items_to_remove = items
+                # TOOL_RESULT：按“工具交互块”截断，避免 tool_call/tool_result 结构不一致
+                if item_type == ItemType.TOOL_RESULT:
+                    removed_blocks = await self._truncate_tool_blocks(
+                        context, keep_recent=rule.keep_recent
+                    )
+                    if removed_blocks:
+                        compacted_any = True
+                        logger.info(
+                            f"TRUNCATE tool_blocks: 移除 {removed_blocks} 个块 "
+                            f"(保留最近 {rule.keep_recent}), "
+                            f"释放 ~{tokens_before - context.total_tokens} tokens"
+                        )
                 else:
-                    items_to_remove = items[:-rule.keep_recent]
-                for item in items_to_remove:
-                    # 跳过已 destroyed 的（已被 ephemeral 处理）
-                    if item.destroyed:
+                    # 其它类型：保留最近 N 个，删除更早的
+                    if rule.keep_recent > 0 and len(items) <= rule.keep_recent:
                         continue
-                    # 检查是否需要卸载
-                    if self._should_offload(item):
-                        self.fs.offload(item)
-                    context.conversation.remove_by_id(item.id)
-                compacted_any = True
-                logger.info(
-                    f"TRUNCATE {item_type.value}: 移除 {len(items_to_remove)} 条 "
-                    f"(保留最近 {rule.keep_recent}), "
-                    f"释放 ~{tokens_before - context.total_tokens} tokens"
-                )
+
+                    if rule.keep_recent <= 0:
+                        items_to_remove = items
+                    else:
+                        items_to_remove = items[:-rule.keep_recent]
+
+                    for item in items_to_remove:
+                        # 跳过已 destroyed 的（已被 ephemeral 处理）
+                        if item.destroyed:
+                            continue
+                        # 检查是否需要卸载
+                        if self._should_offload(item):
+                            self.fs.offload(item)
+                        context.conversation.remove_by_id(item.id)
+
+                    compacted_any = True
+                    logger.info(
+                        f"TRUNCATE {item_type.value}: 移除 {len(items_to_remove)} 条 "
+                        f"(保留最近 {rule.keep_recent}), "
+                        f"释放 ~{tokens_before - context.total_tokens} tokens"
+                    )
 
             # 检查是否已降到阈值以下
             current_tokens = context.total_tokens
@@ -211,6 +247,186 @@ class SelectiveCompactionPolicy:
 
         return compacted_any
 
+    async def _truncate_tool_blocks(self, context: "ContextIR", *, keep_recent: int) -> int:
+        """按工具交互块截断历史，并用 meta 占位符替换旧块。"""
+        blocks = self._extract_tool_blocks(context)
+        if not blocks:
+            return 0
+
+        if keep_recent > 0 and len(blocks) <= keep_recent:
+            return 0
+
+        blocks_to_remove = blocks if keep_recent <= 0 else blocks[:-keep_recent]
+        if not blocks_to_remove:
+            return 0
+
+        removed = 0
+
+        # 反向处理，避免索引位移
+        for block in sorted(blocks_to_remove, key=lambda b: b.start_idx, reverse=True):
+            placeholder = await self._build_tool_block_placeholder_item(context, block)
+            context.conversation.items[block.start_idx : block.end_idx + 1] = [placeholder]
+            removed += 1
+
+        return removed
+
+    def _extract_tool_blocks(self, context: "ContextIR") -> list[_ToolInteractionBlock]:
+        """从 conversation 中提取工具交互块（assistant tool_calls + tool_results）。"""
+        from bu_agent_sdk.llm.messages import AssistantMessage, ToolMessage, UserMessage
+
+        items = context.conversation.items
+        blocks: list[_ToolInteractionBlock] = []
+        i = 0
+        while i < len(items):
+            item = items[i]
+            msg = item.message
+            if not isinstance(msg, AssistantMessage) or not msg.tool_calls:
+                i += 1
+                continue
+
+            tool_calls: list[_ToolCallInfo] = []
+            for tc in msg.tool_calls:
+                args = tc.function.arguments
+                tool_calls.append(
+                    _ToolCallInfo(
+                        tool_call_id=tc.id,
+                        tool_name=tc.function.name,
+                        arguments=args,
+                        arguments_token_count=context.token_counter.count(args),
+                    )
+                )
+
+            call_ids = {tc.tool_call_id for tc in tool_calls}
+
+            found: set[str] = set()
+            tool_result_items: list["ContextItem"] = []
+            end_idx = i
+
+            for j in range(i + 1, len(items)):
+                next_msg = items[j].message
+
+                # 避免跨越到下一个 tool_calls 起点
+                if isinstance(next_msg, AssistantMessage) and next_msg.tool_calls:
+                    break
+
+                # 避免跨越到下一轮真实用户输入
+                if isinstance(next_msg, UserMessage) and not bool(getattr(next_msg, "is_meta", False)):
+                    break
+
+                if isinstance(next_msg, ToolMessage) and next_msg.tool_call_id in call_ids:
+                    tool_result_items.append(items[j])
+                    found.add(next_msg.tool_call_id)
+                    end_idx = j
+                    if len(found) >= len(call_ids):
+                        break
+
+            blocks.append(
+                _ToolInteractionBlock(
+                    start_idx=i,
+                    end_idx=end_idx,
+                    assistant_item_id=item.id,
+                    tool_calls=tool_calls,
+                    tool_result_items=tool_result_items,
+                )
+            )
+            i = end_idx + 1
+
+        return blocks
+
+    async def _build_tool_block_placeholder_item(
+        self, context: "ContextIR", block: _ToolInteractionBlock
+    ) -> "ContextItem":
+        """为一个旧工具块生成 meta 占位符，并（按阈值）落盘 tool_call/tool_result。"""
+        from bu_agent_sdk.context.items import ContextItem
+        from bu_agent_sdk.llm.messages import ToolMessage, UserMessage
+
+        tool_results_by_call_id: dict[str, "ContextItem"] = {}
+        for it in block.tool_result_items:
+            tm = it.message if isinstance(it.message, ToolMessage) else None
+            if tm is None:
+                continue
+            tool_results_by_call_id.setdefault(tm.tool_call_id, it)
+
+        lines: list[str] = ["[Tool interaction offloaded]", "reason=compaction_truncate"]
+
+        for tc in block.tool_calls:
+            call_abs: str | None = None
+            result_abs: str | None = None
+            redacted = False
+
+            # ---- tool_call 落盘（可复用 index）----
+            if self.fs is not None and self.offload_policy is not None and self.offload_policy.enabled:
+                rec = self.fs.tool_calls.get(tc.tool_call_id) if hasattr(self.fs, "tool_calls") else None
+                if rec and rec.tool_call_path:
+                    call_abs = str(self.fs.root_path / rec.tool_call_path)
+                elif self._should_offload_tool_call_tokens(tc.arguments_token_count):
+                    wr = self.fs.offload_tool_call(
+                        tool_call_id=tc.tool_call_id,
+                        tool_name=tc.tool_name,
+                        arguments=tc.arguments,
+                        assistant_item_id=block.assistant_item_id,
+                        arguments_token_count=tc.arguments_token_count,
+                    )
+                    call_abs = str(self.fs.root_path / wr.relative_path)
+                    redacted = bool(redacted or wr.redacted)
+
+            # ---- tool_result 落盘（可复用 item.offload_path）----
+            result_item = tool_results_by_call_id.get(tc.tool_call_id)
+            if result_item is not None and self.fs is not None and self.offload_policy is not None and self.offload_policy.enabled:
+                if result_item.offloaded and result_item.offload_path:
+                    result_abs = str(self.fs.root_path / result_item.offload_path)
+                elif self._should_offload_tool_result_tokens(result_item.token_count):
+                    wr = self.fs.offload_tool_result(
+                        result_item,
+                        tool_call_id=tc.tool_call_id,
+                        tool_name=tc.tool_name,
+                        result_token_count=result_item.token_count,
+                    )
+                    result_abs = str(self.fs.root_path / wr.relative_path)
+                    redacted = bool(redacted or wr.redacted)
+
+            call_path_disp = call_abs or "<not offloaded>"
+            result_path_disp = result_abs or "<not offloaded>"
+            lines.append(
+                f"- tool={tc.tool_name} call_id={tc.tool_call_id} args~{tc.arguments_token_count} "
+                f"call_path={call_path_disp} result_path={result_path_disp} redacted={redacted}"
+            )
+
+        lines.append("Use Read tool to view details.")
+        text = "\n".join(lines)
+
+        msg = UserMessage(content=text, is_meta=True)
+        return ContextItem(
+            item_type=ItemType.OFFLOAD_PLACEHOLDER,
+            message=msg,
+            content_text=text,
+            token_count=context.token_counter.count(text),
+            priority=DEFAULT_PRIORITIES[ItemType.OFFLOAD_PLACEHOLDER],
+            metadata={"reason": "compaction_truncate"},
+        )
+
+    def _should_offload_tool_call_tokens(self, token_count: int) -> bool:
+        if not self.fs or not self.offload_policy:
+            return False
+        if not self.offload_policy.enabled:
+            return False
+        if not bool(self.offload_policy.type_enabled.get("tool_call", False)):
+            return False
+        threshold_by_type = getattr(self.offload_policy, "token_threshold_by_type", {}) or {}
+        threshold = int(threshold_by_type.get("tool_call", 200))
+        return int(token_count) >= threshold
+
+    def _should_offload_tool_result_tokens(self, token_count: int) -> bool:
+        if not self.fs or not self.offload_policy:
+            return False
+        if not self.offload_policy.enabled:
+            return False
+        if not bool(self.offload_policy.type_enabled.get(ItemType.TOOL_RESULT.value, True)):
+            return False
+        threshold_by_type = getattr(self.offload_policy, "token_threshold_by_type", {}) or {}
+        threshold = int(threshold_by_type.get(ItemType.TOOL_RESULT.value, self.offload_policy.token_threshold))
+        return int(token_count) >= threshold
+
     def _should_offload(self, item) -> bool:
         """判断是否需要卸载
 
@@ -234,7 +450,9 @@ class SelectiveCompactionPolicy:
         if not type_enabled:
             return False
         # 检查 token 阈值
-        return item.token_count >= self.offload_policy.token_threshold
+        threshold_by_type = getattr(self.offload_policy, "token_threshold_by_type", {}) or {}
+        threshold = int(threshold_by_type.get(item.item_type.value, self.offload_policy.token_threshold))
+        return item.token_count >= threshold
 
     async def _fallback_full_summary(self, context: ContextIR) -> bool:
         """回退到全量摘要

@@ -36,6 +36,7 @@ class ItemType(Enum):
 
     # 特殊
     COMPACTION_SUMMARY = "compaction_summary"
+    OFFLOAD_PLACEHOLDER = "offload_placeholder"
     SYSTEM_REMINDER = "system_reminder"
     DEVELOPER_MESSAGE = "developer_message"
 
@@ -49,6 +50,7 @@ DEFAULT_PRIORITIES: dict[ItemType, int] = {
     ItemType.USER_MESSAGE: 50,
     ItemType.DEVELOPER_MESSAGE: 60,
     ItemType.SYSTEM_REMINDER: 70,
+    ItemType.OFFLOAD_PLACEHOLDER: 75,   # 块级卸载占位符（默认不再压缩）
     ItemType.COMPACTION_SUMMARY: 80,     # 不压缩
     ItemType.SKILL_STRATEGY: 90,
     ItemType.TOOL_STRATEGY: 93,          # 在 SUBAGENT 和 SKILL 之间

@@ -73,10 +73,10 @@ async def check_and_compact(agent: "Agent", response: ChatInvokeCompletion) -> b
 
     actual_tokens = TokenUsage.from_usage(response.usage).total_tokens
 
-    # 创建 OffloadPolicy
+    # 创建/复用 OffloadPolicy
     offload_policy = None
     if agent.offload_enabled and agent._context_fs:
-        offload_policy = OffloadPolicy(
+        offload_policy = agent.offload_policy or OffloadPolicy(
             enabled=True,
             token_threshold=agent.offload_token_threshold,
         )
@@ -179,4 +179,3 @@ async def query(agent: "Agent", message: str) -> str:
 
     # Max iterations reached - generate summary of what was accomplished
     return await generate_max_iterations_summary(agent)
-
