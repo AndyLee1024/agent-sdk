@@ -32,10 +32,12 @@ class SettingsConfig:
     Attributes:
         llm_levels: LLM 三档配置，格式为 {"LOW": "provider:model", ...}
         llm_levels_base_url: 各档 base_url 覆盖，值为 None 表示不覆盖
+        llm_levels_api_key: 各档 api_key 覆盖，值为 None 表示不覆盖（优先级低于 env var）
     """
 
     llm_levels: dict[str, str] | None = None
     llm_levels_base_url: dict[str, str | None] | None = None
+    llm_levels_api_key: dict[str, str | None] | None = None
 
 
 def load_settings_file(path: Path) -> SettingsConfig | None:
@@ -71,6 +73,7 @@ def load_settings_file(path: Path) -> SettingsConfig | None:
 
     llm_levels: dict[str, str] | None = None
     llm_levels_base_url: dict[str, str | None] | None = None
+    llm_levels_api_key: dict[str, str | None] | None = None
 
     # 解析 llm_levels
     raw_levels = data.get("llm_levels")
@@ -98,10 +101,23 @@ def load_settings_file(path: Path) -> SettingsConfig | None:
                     continue
                 llm_levels_base_url[k] = v
 
-    if llm_levels is None and llm_levels_base_url is None:
+    # 解析 llm_levels_api_key
+    raw_api_keys = data.get("llm_levels_api_key")
+    if raw_api_keys is not None:
+        if not isinstance(raw_api_keys, dict):
+            logger.warning(f"settings.json llm_levels_api_key 不是对象，跳过: {resolved}")
+        else:
+            llm_levels_api_key = {}
+            for k, v in raw_api_keys.items():
+                if v is not None and not isinstance(v, str):
+                    logger.warning(f"settings.json llm_levels_api_key.{k} 不是字符串或 null，跳过该项")
+                    continue
+                llm_levels_api_key[k] = v
+
+    if llm_levels is None and llm_levels_base_url is None and llm_levels_api_key is None:
         return None
 
-    return SettingsConfig(llm_levels=llm_levels, llm_levels_base_url=llm_levels_base_url)
+    return SettingsConfig(llm_levels=llm_levels, llm_levels_base_url=llm_levels_base_url, llm_levels_api_key=llm_levels_api_key)
 
 
 def resolve_settings(
@@ -150,6 +166,7 @@ def resolve_settings(
     return SettingsConfig(
         llm_levels=project_settings.llm_levels if project_settings.llm_levels is not None else user_settings.llm_levels,
         llm_levels_base_url=project_settings.llm_levels_base_url if project_settings.llm_levels_base_url is not None else user_settings.llm_levels_base_url,
+        llm_levels_api_key=project_settings.llm_levels_api_key if project_settings.llm_levels_api_key is not None else user_settings.llm_levels_api_key,
     )
 
 
