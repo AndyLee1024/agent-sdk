@@ -20,10 +20,13 @@ class ItemType(Enum):
 
     # Header 段（lowered 为 SystemMessage 的一部分）
     SYSTEM_PROMPT = "system_prompt"
+    AGENT_LOOP = "agent_loop"
     MEMORY = "memory"
     TOOL_STRATEGY = "tool_strategy"
     SUBAGENT_STRATEGY = "subagent_strategy"
     SKILL_STRATEGY = "skill_strategy"
+    SYSTEM_ENV = "system_env"
+    GIT_ENV = "git_env"
 
     # Conversation 段
     USER_MESSAGE = "user_message"
@@ -55,7 +58,10 @@ DEFAULT_PRIORITIES: dict[ItemType, int] = {
     ItemType.SKILL_STRATEGY: 90,
     ItemType.TOOL_STRATEGY: 93,          # 在 SUBAGENT 和 SKILL 之间
     ItemType.SUBAGENT_STRATEGY: 95,
+    ItemType.SYSTEM_ENV: 100,            # 永不压缩
+    ItemType.GIT_ENV: 100,               # 永不压缩
     ItemType.MEMORY: 100,                # 永不压缩
+    ItemType.AGENT_LOOP: 100,            # 永不压缩
     ItemType.SYSTEM_PROMPT: 100,         # 永不压缩
 }
 

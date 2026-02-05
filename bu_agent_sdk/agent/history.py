@@ -29,6 +29,11 @@ def clear_history(agent: "Agent") -> None:
     if tool_strategy:
         agent._context.set_tool_strategy(tool_strategy)
 
+    # 重建 agent_loop
+    from bu_agent_sdk.agent.prompts import AGENT_LOOP_PROMPT
+
+    agent._context.set_agent_loop(AGENT_LOOP_PROMPT, cache=False)
+
     # 重建 subagent_strategy（如果有 agents）
     if agent.agents:
         from bu_agent_sdk.subagent.prompts import generate_subagent_prompt

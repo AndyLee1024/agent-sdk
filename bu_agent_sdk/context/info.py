@@ -98,9 +98,12 @@ def _build_categories(
     # 类别聚合规则：display_label -> ItemType list
     category_mapping = {
         "System Prompt": [ItemType.SYSTEM_PROMPT],
+        "Agent Loop": [ItemType.AGENT_LOOP],
         "Memory": [ItemType.MEMORY],
         "Subagent Strategy": [ItemType.SUBAGENT_STRATEGY],
         "Skill Strategy": [ItemType.SKILL_STRATEGY],
+        "System Env": [ItemType.SYSTEM_ENV],
+        "Git Env": [ItemType.GIT_ENV],
         "Messages": [ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE],
         "Tool Results": [ItemType.TOOL_RESULT],
         "Skills": [ItemType.SKILL_METADATA, ItemType.SKILL_PROMPT],

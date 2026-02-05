@@ -17,6 +17,9 @@ from bu_agent_sdk.tools.registry import ToolRegistry
 
 logger = logging.getLogger("bu_agent_sdk.subagent.task_tool")
 
+_INTERNAL_TASK_TOOL_MARKER_ATTR = "_bu_agent_sdk_internal"
+_INTERNAL_TASK_TOOL_MARKER_VALUE = True
+
 
 def create_task_tool(
     agents: list[AgentDefinition],
@@ -159,6 +162,7 @@ def create_task_tool(
             logger.error(error_msg, exc_info=True)
             return error_msg
 
+    setattr(Task, _INTERNAL_TASK_TOOL_MARKER_ATTR, _INTERNAL_TASK_TOOL_MARKER_VALUE)
     return Task
 
 

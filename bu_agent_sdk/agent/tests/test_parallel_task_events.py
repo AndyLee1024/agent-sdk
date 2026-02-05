@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import unittest
+from pathlib import Path
 
 from bu_agent_sdk.agent import Agent
 from bu_agent_sdk.agent.events import SubagentStartEvent, SubagentStopEvent, ToolResultEvent
@@ -84,6 +85,7 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
         agent = Agent(
             llm=llm,  # type: ignore[arg-type]
             tools=[Task],
+            agents=[],
             offload_enabled=False,
             task_parallel_enabled=True,
             task_parallel_max_concurrency=4,
@@ -165,6 +167,7 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
         agent = Agent(
             llm=llm,  # type: ignore[arg-type]
             tools=[Task],
+            agents=[],
             offload_enabled=False,
             task_parallel_enabled=True,
             task_parallel_max_concurrency=4,
@@ -181,3 +184,20 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
         tool_msg_ids = [m.tool_call_id for m in tool_msgs if getattr(m, "tool_name", "") == "Task"]
         self.assertEqual(tool_msg_ids, ["tc1", "tc2", "tc3"])
 
+    async def test_user_task_tool_conflict_raises_when_subagents_enabled(self) -> None:
+        @tool("Task tool (test)")
+        async def Task(subagent_type: str, prompt: str, description: str = "") -> str:
+            return f"ok:{subagent_type}"
+
+        llm = _FakeChatModel([ChatInvokeCompletion(content="done")])
+
+        project_root = Path(__file__).resolve().parents[3]
+        with self.assertRaises(ValueError) as ctx:
+            _ = Agent(
+                llm=llm,  # type: ignore[arg-type]
+                tools=[Task],
+                project_root=project_root,
+                offload_enabled=False,
+            )
+
+        self.assertIn("Task", str(ctx.exception))

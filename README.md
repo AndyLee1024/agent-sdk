@@ -438,6 +438,42 @@ model: opus     # 使用opus模型
 
 - `Task(subagent_type="researcher", prompt="...", description="...")`
 
+### 自动发现与 `agents` 语义（重要）
+
+Subagent 支持**自动发现**（从文件系统加载）与**代码显式传入**两种方式，并且可以混用。
+
+#### 自动发现路径与优先级
+
+SDK 会从以下路径发现 subagent 定义（`.md` 文件）：
+
+- **Project 级（优先）**：`{project_root}/.agent/subagents/*.md`
+- **User 级（fallback）**：`~/.agent/subagents/*.md`
+
+优先级规则：
+- 当 project 级存在任意 `.md` 文件时，**完全忽略** user 级（不会合并）。
+- `project_root` 未显式传入时，默认使用当前工作目录（`cwd`）。
+
+#### `Agent(agents=...)` 的约定
+
+`agents` 参数用于控制是否启用/合并 subagent（注意 `None` 与 `[]` 的语义不同）：
+
+| 传参 | 行为 | 典型用途 |
+|---|---|---|
+| `agents=None`（默认） | 允许自动发现；若发现到 subagent，会注入系统 `Task` 工具 | 纯自动发现 |
+| `agents=[]` | **显式禁用**自动发现；不会注入系统 `Task` 工具 | 测试隔离 / 完全不启用 subagent |
+| `agents=[...]`（非空） | 自动发现 + 代码传入 **合并**（同名以代码传入为准） | 混合模式（推荐） |
+
+### `Task` 是保留名：避免静默覆盖
+
+当启用了 subagent（最终 `agent.agents` 非空）时，SDK 会注入系统级 `Task` 工具作为 subagent 调度入口，因此：
+
+- 若你在 `tools=[...]` 中手动提供了同名工具 `Tool(name="Task")`，SDK 会直接抛出 `ValueError`（避免静默替换导致误用）。
+
+解决方式（三选一）：
+1) 将你的工具改名（不要叫 `Task`）  
+2) 显式禁用 subagent：`Agent(..., agents=[])`  
+3) 移除/调整自动发现的 subagent 定义（例如删除/修改 `.agent/subagents/*.md`）  
+
 ## Skill：`.agent/skills/*/SKILL.md` + `Skill`
 
 在项目根目录创建 `.agent/skills/<skill_name>/SKILL.md`，例如 `.agent/skills/release/SKILL.md`：

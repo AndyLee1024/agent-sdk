@@ -20,6 +20,7 @@ from bu_agent_sdk.context.compaction import (
     SelectiveCompactionPolicy,
     TypeCompactionRule,
 )
+from bu_agent_sdk.context.env import EnvOptions
 from bu_agent_sdk.context.fs import ContextFileSystem, OffloadedMeta
 from bu_agent_sdk.context.info import ContextCategoryInfo, ContextInfo
 from bu_agent_sdk.context.ir import ContextIR
@@ -61,6 +62,8 @@ __all__ = [
     # Info
     "ContextInfo",
     "ContextCategoryInfo",
+    # Env
+    "EnvOptions",
     # Memory
     "MemoryConfig",
     # Reminder

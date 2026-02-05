@@ -28,6 +28,7 @@ logger = logging.getLogger("bu_agent_sdk.agent")
 
 if TYPE_CHECKING:
     from bu_agent_sdk.agent.events import AgentEvent
+    from bu_agent_sdk.context.env import EnvOptions
     from bu_agent_sdk.llm.views import ChatInvokeCompletion
 
 
@@ -93,7 +94,12 @@ class Agent:
     # Subagent support
     name: str | None = None
     agents: list | None = None  # type: ignore  # list[AgentDefinition]
-    """List of AgentDefinition for creating subagents."""
+    """List of AgentDefinition for creating subagents.
+
+    约定：
+    - None：允许自动发现 subagent（默认；也支持与代码传入的 agents 进行 merge）
+    - []：显式禁用自动发现（用于测试隔离或完全手动模式）
+    """
     tool_registry: object | None = None  # type: ignore  # ToolRegistry
     """Tool registry for resolving tools by name (e.g. for subagents). If None, will be built from tools."""
     project_root: Path | None = None
@@ -123,6 +129,9 @@ class Agent:
     - "project": 加载 .agent/settings.json 和 AGENTS.md
     - None 或 (): 不加载任何配置文件（向后兼容模式）
     """
+
+    env_options: EnvOptions | None = None
+    """环境信息配置（初始化时快照写入 header）。None 或默认 EnvOptions() 表示不启用。"""
 
     llm_levels: dict[LLMLevel, BaseChatModel] | None = None
     """三档 LLM（LOW/MID/HIGH）。用于工具内二次模型调用（如 WebFetch），默认可由 env 覆盖。"""
@@ -316,6 +325,11 @@ class Agent:
         from bu_agent_sdk.agent.setup import setup_tool_strategy
 
         setup_tool_strategy(self)
+
+    def _setup_agent_loop(self) -> None:
+        from bu_agent_sdk.agent.setup import setup_agent_loop
+
+        setup_agent_loop(self)
 
     def _setup_subagents(self) -> None:
         from bu_agent_sdk.agent.setup import setup_subagents

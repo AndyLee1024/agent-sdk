@@ -46,6 +46,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("bu_agent_sdk.context.ir")
 
+_HEADER_ITEM_ORDER: dict[ItemType, int] = {
+    ItemType.SYSTEM_PROMPT: 0,
+    ItemType.AGENT_LOOP: 1,
+    ItemType.MEMORY: 2,
+    ItemType.TOOL_STRATEGY: 3,
+    ItemType.SUBAGENT_STRATEGY: 4,
+    ItemType.SKILL_STRATEGY: 5,
+    ItemType.SYSTEM_ENV: 6,
+    ItemType.GIT_ENV: 7,
+}
+
 
 # 消息类型 → ItemType 映射
 _MESSAGE_TYPE_MAP: dict[type, ItemType] = {
@@ -92,6 +103,30 @@ class ContextIR:
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
 
+    def _ensure_header_item_position(self, item: ContextItem) -> None:
+        """确保 header item 在预期顺序中的位置（用于幂等 setter 的插入顺序稳定）"""
+        try:
+            current_idx = self.header.items.index(item)
+        except ValueError:
+            return
+
+        order = _HEADER_ITEM_ORDER.get(item.item_type)
+        if order is None:
+            return
+
+        item_ref = self.header.items.pop(current_idx)
+
+        insert_idx = len(self.header.items)
+        for i, existing_item in enumerate(self.header.items):
+            existing_order = _HEADER_ITEM_ORDER.get(existing_item.item_type)
+            if existing_order is None:
+                continue
+            if existing_order > order:
+                insert_idx = i
+                break
+
+        self.header.items.insert(insert_idx, item_ref)
+
     def set_system_prompt(self, prompt: str, cache: bool = True) -> None:
         """设置系统提示（幂等覆盖）
 
@@ -122,6 +157,51 @@ class ContextIR:
                 detail="system_prompt set",
             ))
 
+    def set_agent_loop(self, prompt: str, cache: bool = False) -> None:
+        """设置 Agent 循环控制指令（幂等覆盖）
+
+        插入位置：SYSTEM_PROMPT 之后、MEMORY 之前
+
+        Args:
+            prompt: Agent 循环控制指令文本
+            cache: 是否建议缓存（如 Anthropic prompt cache）
+        """
+        existing = self.header.find_one_by_type(ItemType.AGENT_LOOP)
+        token_count = self.token_counter.count(prompt)
+
+        if existing:
+            existing.content_text = prompt
+            existing.token_count = token_count
+            existing.cache_hint = cache
+        else:
+            item = ContextItem(
+                item_type=ItemType.AGENT_LOOP,
+                content_text=prompt,
+                token_count=token_count,
+                priority=DEFAULT_PRIORITIES[ItemType.AGENT_LOOP],
+                cache_hint=cache,
+            )
+            # 在 SYSTEM_PROMPT 之后、MEMORY/TOOL_STRATEGY/SUBAGENT_STRATEGY/SKILL_STRATEGY 之前插入
+            insert_idx = 0
+            for i, existing_item in enumerate(self.header.items):
+                if existing_item.item_type == ItemType.SYSTEM_PROMPT:
+                    insert_idx = i + 1
+                elif existing_item.item_type in (
+                    ItemType.MEMORY,
+                    ItemType.TOOL_STRATEGY,
+                    ItemType.SUBAGENT_STRATEGY,
+                    ItemType.SKILL_STRATEGY,
+                ):
+                    insert_idx = i
+                    break
+            self.header.items.insert(insert_idx, item)
+            self.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_ADDED,
+                item_type=ItemType.AGENT_LOOP,
+                item_id=item.id,
+                detail="agent_loop set",
+            ))
+
     def set_memory(self, content: str, cache: bool = True) -> None:
         """设置 MEMORY 静态背景知识（幂等覆盖）
 
@@ -150,12 +230,12 @@ class ContextIR:
                 priority=DEFAULT_PRIORITIES[ItemType.MEMORY],
                 cache_hint=cache,
             )
-            # 在 system_prompt 之后、subagent_strategy 之前插入
+            # 在 system_prompt/agent_loop 之后、tool_strategy/subagent_strategy 之前插入
             insert_idx = len(self.header.items)  # 默认插入到末尾
             for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type == ItemType.SYSTEM_PROMPT:
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP):
                     insert_idx = i + 1
-                elif existing_item.item_type == ItemType.SUBAGENT_STRATEGY:
+                elif existing_item.item_type in (ItemType.TOOL_STRATEGY, ItemType.SUBAGENT_STRATEGY):
                     insert_idx = i
                     break
             self.header.items.insert(insert_idx, item)
@@ -181,10 +261,10 @@ class ContextIR:
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.SUBAGENT_STRATEGY],
             )
-            # 在 system_prompt/memory 之后、skill_strategy 之前插入
+            # 在 system_prompt/agent_loop/memory/tool_strategy 之后、skill_strategy 之前插入
             insert_idx = 0
             for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.MEMORY):
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP, ItemType.MEMORY, ItemType.TOOL_STRATEGY):
                     insert_idx = i + 1
                 elif existing_item.item_type == ItemType.SKILL_STRATEGY:
                     break
@@ -214,10 +294,10 @@ class ContextIR:
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.TOOL_STRATEGY],
             )
-            # 在 system_prompt/memory 之后、subagent_strategy/skill_strategy 之前插入
+            # 在 system_prompt/agent_loop/memory 之后、subagent_strategy/skill_strategy 之前插入
             insert_idx = 0
             for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.MEMORY):
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP, ItemType.MEMORY):
                     insert_idx = i + 1
                 elif existing_item.item_type in (ItemType.SUBAGENT_STRATEGY, ItemType.SKILL_STRATEGY):
                     break
@@ -237,6 +317,7 @@ class ContextIR:
         if existing:
             existing.content_text = prompt
             existing.token_count = token_count
+            self._ensure_header_item_position(existing)
         else:
             item = ContextItem(
                 item_type=ItemType.SKILL_STRATEGY,
@@ -244,12 +325,69 @@ class ContextIR:
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.SKILL_STRATEGY],
             )
-            self.header.items.append(item)  # skill_strategy 总在最后
+            self.header.items.append(item)
+            self._ensure_header_item_position(item)
             self.event_bus.emit(ContextEvent(
                 event_type=EventType.ITEM_ADDED,
                 item_type=ItemType.SKILL_STRATEGY,
                 item_id=item.id,
                 detail="skill_strategy set",
+            ))
+
+    def set_system_env(self, content: str) -> None:
+        """设置系统环境信息（幂等覆盖）
+
+        插入位置：Header 段末尾（SKILL_STRATEGY 之后）
+        """
+        existing = self.header.find_one_by_type(ItemType.SYSTEM_ENV)
+        token_count = self.token_counter.count(content)
+
+        if existing:
+            existing.content_text = content
+            existing.token_count = token_count
+            self._ensure_header_item_position(existing)
+        else:
+            item = ContextItem(
+                item_type=ItemType.SYSTEM_ENV,
+                content_text=content,
+                token_count=token_count,
+                priority=DEFAULT_PRIORITIES[ItemType.SYSTEM_ENV],
+            )
+            self.header.items.append(item)
+            self._ensure_header_item_position(item)
+            self.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_ADDED,
+                item_type=ItemType.SYSTEM_ENV,
+                item_id=item.id,
+                detail="system_env set",
+            ))
+
+    def set_git_env(self, content: str) -> None:
+        """设置 Git 状态信息（幂等覆盖）
+
+        插入位置：SYSTEM_ENV 之后（Header 段最末尾）
+        """
+        existing = self.header.find_one_by_type(ItemType.GIT_ENV)
+        token_count = self.token_counter.count(content)
+
+        if existing:
+            existing.content_text = content
+            existing.token_count = token_count
+            self._ensure_header_item_position(existing)
+        else:
+            item = ContextItem(
+                item_type=ItemType.GIT_ENV,
+                content_text=content,
+                token_count=token_count,
+                priority=DEFAULT_PRIORITIES[ItemType.GIT_ENV],
+            )
+            self.header.items.append(item)
+            self._ensure_header_item_position(item)
+            self.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_ADDED,
+                item_type=ItemType.GIT_ENV,
+                item_id=item.id,
+                detail="git_env set",
             ))
 
     def remove_skill_strategy(self) -> None:

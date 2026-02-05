@@ -19,6 +19,34 @@ if TYPE_CHECKING:
     from bu_agent_sdk.agent.core import Agent
 
 
+def _setup_env_info(agent: "Agent") -> None:
+    opts = agent.env_options
+    if opts is None:
+        return
+    if not opts.system_env and not opts.git_env:
+        return
+
+    from bu_agent_sdk.context.env import EnvProvider
+
+    working_dir = opts.working_dir or agent.project_root or Path.cwd()
+    provider = EnvProvider(
+        git_status_limit=opts.git_status_limit,
+        git_log_limit=opts.git_log_limit,
+    )
+
+    if opts.system_env:
+        agent._context.set_system_env(provider.get_system_env(working_dir))
+        logger.info(f"已注入 SYSTEM_ENV（working_dir={working_dir}）")
+
+    if opts.git_env:
+        git_env = provider.get_git_env(working_dir)
+        if git_env:
+            agent._context.set_git_env(git_env)
+            logger.info(f"已注入 GIT_ENV（working_dir={working_dir}）")
+        else:
+            logger.info(f"未注入 GIT_ENV：working_dir={working_dir} 不在 git 仓库中或无法读取")
+
+
 def agent_post_init(agent: "Agent") -> None:
     # ====== 自动推断 tools 和 tool_registry ======
     # 设计目标：
@@ -55,20 +83,27 @@ def agent_post_init(agent: "Agent") -> None:
     # ====== Subagent 自动发现和 Merge ======
     # 只在非 subagent 时执行自动发现（subagent 不支持嵌套）
     if not agent._is_subagent:
-        from bu_agent_sdk.subagent import discover_subagents
+        # 约定：
+        # - agents is None：允许自动发现（纯自动 / 混合模式的一部分）
+        # - agents 为非空 list：允许自动发现并 merge（同名时以代码传入为准）
+        # - agents == []：显式禁用自动发现（用于测试隔离或完全手动模式）
+        if agent.agents == []:
+            logger.debug("Subagent auto-discovery disabled because agents=[]")
+        else:
+            from bu_agent_sdk.subagent import discover_subagents
 
-        discovered = discover_subagents(project_root=agent.project_root)
-        user_agents = agent.agents or []
+            discovered = discover_subagents(project_root=agent.project_root)
+            user_agents = agent.agents or []
 
-        if discovered or user_agents:
-            # Merge：代码传入的覆盖自动发现的同名 subagent
-            user_agent_names = {a.name for a in user_agents}
-            merged = [a for a in discovered if a.name not in user_agent_names]
-            merged.extend(user_agents)
-            agent.agents = merged if merged else None
+            if discovered or user_agents:
+                # Merge：代码传入的覆盖自动发现的同名 subagent
+                user_agent_names = {a.name for a in user_agents}
+                merged = [a for a in discovered if a.name not in user_agent_names]
+                merged.extend(user_agents)
+                agent.agents = merged if merged else None
 
-            if discovered:
-                logger.info(f"Auto-discovered {len(discovered)} subagent(s)")
+                if discovered:
+                    logger.info(f"Auto-discovered {len(discovered)} subagent(s)")
 
     # 检查嵌套 - Subagent 不能再定义 agents
     if agent._is_subagent and agent.agents:
@@ -178,6 +213,9 @@ def agent_post_init(agent: "Agent") -> None:
     # Initialize tool strategy (writes to IR header)
     agent._setup_tool_strategy()
 
+    # Initialize agent loop control (writes to IR header)
+    agent._setup_agent_loop()
+
     # Initialize subagent support (writes to IR header)
     if agent.agents:
         agent._setup_subagents()
@@ -193,3 +231,6 @@ def agent_post_init(agent: "Agent") -> None:
     # Initialize memory support
     if agent.memory:
         agent._setup_memory()
+
+    # Initialize environment info (writes to IR header; initialization snapshot)
+    _setup_env_info(agent)

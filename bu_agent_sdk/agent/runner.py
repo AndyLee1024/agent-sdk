@@ -147,12 +147,26 @@ async def query(agent: "Agent", message: str) -> str:
 
                 async def _run(tc: ToolCall) -> tuple[str, ToolMessage]:
                     async with semaphore:
-                        return tc.id, await execute_tool_call(agent, tc)
+                        try:
+                            return tc.id, await execute_tool_call(agent, tc)
+                        except asyncio.CancelledError:
+                            # 用户取消 - 传播以触发 TaskGroup 取消其他任务
+                            raise
+                        except Exception as e:
+                            # 业务异常 - 返回错误消息，不影响其他 subagent
+                            logger.warning(f"Subagent {tc.id} failed: {e}")
+                            error_msg = ToolMessage(
+                                tool_call_id=tc.id,
+                                content=f"[Subagent Error] {type(e).__name__}: {e}",
+                            )
+                            return tc.id, error_msg
 
-                results = await asyncio.gather(
-                    *[asyncio.create_task(_run(tc)) for tc in group]
-                )
-                results_by_id = {tc_id: msg for tc_id, msg in results}
+                tasks_map: dict[str, asyncio.Task[tuple[str, ToolMessage]]] = {}
+                async with asyncio.TaskGroup() as tg:
+                    for tc in group:
+                        tasks_map[tc.id] = tg.create_task(_run(tc))
+
+                results_by_id = {tc_id: task.result()[1] for tc_id, task in tasks_map.items()}
 
                 # Write results to context in original order for reproducibility
                 for tc in group:

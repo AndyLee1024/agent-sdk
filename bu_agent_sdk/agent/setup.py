@@ -21,6 +21,13 @@ def setup_tool_strategy(agent: "Agent") -> None:
         agent._context.set_tool_strategy(tool_strategy)
 
 
+def setup_agent_loop(agent: "Agent") -> None:
+    """设置 Agent 循环控制指令（写入 ContextIR header）。"""
+    from bu_agent_sdk.agent.prompts import AGENT_LOOP_PROMPT
+
+    agent._context.set_agent_loop(AGENT_LOOP_PROMPT, cache=False)
+
+
 def setup_subagents(agent: "Agent") -> None:
     """设置 Subagent 支持
 
@@ -33,12 +40,31 @@ def setup_subagents(agent: "Agent") -> None:
     if not agent.agents or agent.tool_registry is None:
         return
 
+    task_tools = [t for t in agent.tools if t.name == "Task"]
+    user_task_tools = [
+        t
+        for t in task_tools
+        if getattr(t, "_bu_agent_sdk_internal", False) is not True
+    ]
+    if user_task_tools:
+        raise ValueError(
+            "启用 subagent 时检测到用户提供了同名工具 'Task'。"
+            "'Task' 为 subagent 调度保留名，SDK 会注入系统 Task 工具，禁止静默替换。"
+            "解决方式：1) 将你的工具改名（不要叫 'Task'）；"
+            "2) 显式禁用 subagent（例如 agents=[]）；"
+            "3) 或移除/调整 .agent/subagents 下的定义。"
+        )
+
     # 生成 Subagent 策略提示并写入 ContextIR header
     subagent_prompt = generate_subagent_prompt(agent.agents)
     agent._context.set_subagent_strategy(subagent_prompt)
 
     # 避免重复添加 Task 工具
-    agent.tools = [t for t in agent.tools if t.name != "Task"]
+    agent.tools = [
+        t
+        for t in agent.tools
+        if t.name != "Task" or getattr(t, "_bu_agent_sdk_internal", False) is not True
+    ]
     agent._tool_map.pop("Task", None)
 
     # 创建 Task 工具
@@ -59,7 +85,6 @@ def setup_subagents(agent: "Agent") -> None:
     logger.info(
         f"Initialized {len(agent.agents)} subagents: {[a.name for a in agent.agents]}"
     )
-
 
 def setup_memory(agent: "Agent") -> None:
     """设置 Memory 静态背景知识。"""
@@ -196,4 +221,3 @@ def rebuild_skill_tool(agent: "Agent") -> None:
 def remove_skill_strategy(agent: "Agent") -> None:
     """辅助函数：仅移除 skill_strategy（用于调试/外部调用）。"""
     agent._context.remove_skill_strategy()
-
