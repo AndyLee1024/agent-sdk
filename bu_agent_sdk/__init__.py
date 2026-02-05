@@ -3,6 +3,7 @@ A framework for building agentic applications with LLMs.
 
 Example:
     from bu_agent_sdk import Agent
+    from bu_agent_sdk.agent import ComateAgentOptions
     from bu_agent_sdk.llm import ChatOpenAI
     from bu_agent_sdk.tools import tool
 
@@ -12,7 +13,7 @@ Example:
 
     agent = Agent(
         llm=ChatOpenAI(model="gpt-4o"),
-        tools=[add],
+        options=ComateAgentOptions(tools=[add]),
     )
 
     result = await agent.query("What is 2 + 3?")
@@ -35,6 +36,7 @@ from bu_agent_sdk.subagent import (
     SubagentStartEvent,
     SubagentStopEvent,
 )
+from bu_agent_sdk.mcp import create_sdk_mcp_server, mcp_tool
 
 __all__ = [
     "Agent",
@@ -58,4 +60,7 @@ __all__ = [
     "discover_skills",
     "create_skill_tool",
     "apply_skill_context",
+    # MCP support
+    "create_sdk_mcp_server",
+    "mcp_tool",
 ]

@@ -5,31 +5,34 @@
     uv run python bu_agent_sdk/examples/test_tool_strategy.py
 """
 
+import logging
+
 from bu_agent_sdk.agent.service import Agent
-from bu_agent_sdk.system_tools.tools import SYSTEM_TOOLS
+from bu_agent_sdk.agent import ComateAgentOptions
+
+
+logger = logging.getLogger(__name__)
 
 
 def test_tool_strategy_generation():
     """测试 tool_strategy 是否正确生成"""
-    print("=== 测试 1: 验证 tool_strategy 生成 ===")
+    logger.info("=== 测试 1: 验证 tool_strategy 生成 ===")
 
     # 创建 Agent（使用默认系统工具）
     agent = Agent(
-        system_prompt="Test agent for tool strategy",
+        options=ComateAgentOptions(
+            system_prompt="Test agent for tool strategy",
+        ),
     )
 
     # 验证 ContextIR 中是否有 TOOL_STRATEGY
     from bu_agent_sdk.context.items import ItemType
 
     tool_strategy_item = agent._context.header.find_one_by_type(ItemType.TOOL_STRATEGY)
-
-    if tool_strategy_item:
-        print("✓ TOOL_STRATEGY 已成功写入 ContextIR header")
-        print(f"  Token count: {tool_strategy_item.token_count}")
-        print(f"  Content preview: {tool_strategy_item.content_text[:200]}...")
-    else:
-        print("✗ TOOL_STRATEGY 未找到")
-        return False
+    assert tool_strategy_item is not None, "TOOL_STRATEGY 未找到"
+    logger.info(
+        f"✓ TOOL_STRATEGY 已成功写入 ContextIR header（tokens={tool_strategy_item.token_count}）"
+    )
 
     # 验证内容包含关键元素
     content = tool_strategy_item.content_text
@@ -37,14 +40,12 @@ def test_tool_strategy_generation():
     assert "<tool_overview>" in content, "缺少 <tool_overview> 标签"
     assert "Bash" in content, "缺少 Bash 工具"
     assert "Read" in content, "缺少 Read 工具"
-    print("✓ 内容验证通过")
-
-    return True
+    logger.info("✓ 内容验证通过")
 
 
 def test_custom_tools_no_usage_rules():
     """测试自定义工具（无 usage_rules）不出现在 tool_strategy 中"""
-    print("\n=== 测试 2: 自定义工具不应出现在 tool_strategy ===")
+    logger.info("=== 测试 2: 自定义工具不应出现在 tool_strategy ===")
 
     from bu_agent_sdk.tools.decorator import tool
 
@@ -53,28 +54,28 @@ def test_custom_tools_no_usage_rules():
         return f"Result: {query}"
 
     agent = Agent(
-        system_prompt="Agent with custom tool",
-        tools=[custom_tool],
+        options=ComateAgentOptions(
+            system_prompt="Agent with custom tool",
+            tools=[custom_tool],
+        ),
     )
 
     from bu_agent_sdk.context.items import ItemType
 
     tool_strategy_item = agent._context.header.find_one_by_type(ItemType.TOOL_STRATEGY)
 
-    if tool_strategy_item is None:
-        print("✓ 自定义工具无 usage_rules，TOOL_STRATEGY 为空（符合预期）")
-        return True
-    else:
-        print("✗ 应该为空但不为空")
-        return False
+    assert tool_strategy_item is None, "自定义工具无 usage_rules 时，TOOL_STRATEGY 应为空"
+    logger.info("✓ 自定义工具无 usage_rules，TOOL_STRATEGY 为空（符合预期）")
 
 
 def test_system_message_order():
     """测试 system message 拼接顺序"""
-    print("\n=== 测试 3: 验证 system message 拼接顺序 ===")
+    logger.info("=== 测试 3: 验证 system message 拼接顺序 ===")
 
     agent = Agent(
-        system_prompt="TEST_SYSTEM_PROMPT",
+        options=ComateAgentOptions(
+            system_prompt="TEST_SYSTEM_PROMPT",
+        ),
     )
 
     # 手动添加 memory 用于测试顺序
@@ -82,9 +83,7 @@ def test_system_message_order():
 
     # Lower IR 并检查顺序
     messages = agent._context.lower()
-    if not messages:
-        print("✗ 没有消息")
-        return False
+    assert messages, "没有消息"
 
     system_msg = messages[0]
     content = system_msg.content
@@ -96,16 +95,15 @@ def test_system_message_order():
         "TOOL_STRATEGY": content.find("<system_tools_definition>"),
     }
 
-    if positions["SYSTEM_PROMPT"] < positions["MEMORY"] < positions["TOOL_STRATEGY"]:
-        print("✓ 顺序正确：SYSTEM_PROMPT → MEMORY → TOOL_STRATEGY")
-        return True
-    else:
-        print(f"✗ 顺序错误: {positions}")
-        return False
+    assert (
+        positions["SYSTEM_PROMPT"] < positions["MEMORY"] < positions["TOOL_STRATEGY"]
+    ), f"顺序错误: {positions}"
+    logger.info("✓ 顺序正确：SYSTEM_PROMPT → MEMORY → TOOL_STRATEGY")
 
 
 def main():
-    print("开始测试 Tool Strategy 功能...\n")
+    logging.basicConfig(level=logging.INFO)
+    logger.info("开始测试 Tool Strategy 功能...")
 
     tests = [
         test_tool_strategy_generation,
@@ -116,21 +114,21 @@ def main():
     results = []
     for test in tests:
         try:
-            result = test()
-            results.append(result)
+            test()
+            results.append(True)
         except Exception as e:
-            print(f"✗ 测试失败: {e}")
+            logger.exception(f"✗ 测试失败: {e}")
             results.append(False)
 
-    print("\n" + "=" * 60)
-    print(f"测试结果: {sum(results)}/{len(results)} 通过")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info(f"测试结果: {sum(1 for r in results if r)}/{len(results)} 通过")
+    logger.info("=" * 60)
 
     if all(results):
-        print("✓ 所有测试通过！")
+        logger.info("✓ 所有测试通过！")
         return 0
     else:
-        print("✗ 部分测试失败")
+        logger.error("✗ 部分测试失败")
         return 1
 
 

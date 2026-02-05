@@ -51,10 +51,11 @@ _HEADER_ITEM_ORDER: dict[ItemType, int] = {
     ItemType.AGENT_LOOP: 1,
     ItemType.MEMORY: 2,
     ItemType.TOOL_STRATEGY: 3,
-    ItemType.SUBAGENT_STRATEGY: 4,
-    ItemType.SKILL_STRATEGY: 5,
-    ItemType.SYSTEM_ENV: 6,
-    ItemType.GIT_ENV: 7,
+    ItemType.MCP_TOOL: 4,
+    ItemType.SUBAGENT_STRATEGY: 5,
+    ItemType.SKILL_STRATEGY: 6,
+    ItemType.SYSTEM_ENV: 7,
+    ItemType.GIT_ENV: 8,
 }
 
 
@@ -307,6 +308,51 @@ class ContextIR:
                 item_type=ItemType.TOOL_STRATEGY,
                 item_id=item.id,
                 detail="tool_strategy set",
+            ))
+
+    def set_mcp_tools(self, overview_text: str, *, metadata: dict[str, Any] | None = None) -> None:
+        """设置 MCP tools 概览（幂等覆盖）
+
+        设计目标：
+        - 将 MCP tool 的概览注入到 header（lowered 后进入 SystemMessage）
+        - 结构化信息保存在 ContextItem.metadata（不直接进入 prompt，避免 token 爆炸）
+        """
+        existing = self.header.find_one_by_type(ItemType.MCP_TOOL)
+        token_count = self.token_counter.count(overview_text)
+        meta = metadata or {}
+
+        if existing:
+            existing.content_text = overview_text
+            existing.token_count = token_count
+            existing.metadata = meta
+            self._ensure_header_item_position(existing)
+            return
+
+        item = ContextItem(
+            item_type=ItemType.MCP_TOOL,
+            content_text=overview_text,
+            token_count=token_count,
+            priority=DEFAULT_PRIORITIES[ItemType.MCP_TOOL],
+            metadata=meta,
+        )
+        self.header.items.append(item)
+        self._ensure_header_item_position(item)
+        self.event_bus.emit(ContextEvent(
+            event_type=EventType.ITEM_ADDED,
+            item_type=ItemType.MCP_TOOL,
+            item_id=item.id,
+            detail="mcp_tools set",
+        ))
+
+    def remove_mcp_tools(self) -> None:
+        """移除 MCP tools 概览。"""
+        removed = self.header.remove_by_type(ItemType.MCP_TOOL)
+        for item in removed:
+            self.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_REMOVED,
+                item_type=ItemType.MCP_TOOL,
+                item_id=item.id,
+                detail="mcp_tools removed",
             ))
 
     def set_skill_strategy(self, prompt: str) -> None:

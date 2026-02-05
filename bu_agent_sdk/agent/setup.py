@@ -60,7 +60,7 @@ def setup_subagents(agent: "Agent") -> None:
     agent._context.set_subagent_strategy(subagent_prompt)
 
     # 避免重复添加 Task 工具
-    agent.tools = [
+    agent.tools[:] = [
         t
         for t in agent.tools
         if t.name != "Task" or getattr(t, "_bu_agent_sdk_internal", False) is not True
@@ -141,7 +141,7 @@ def setup_skills(agent: "Agent") -> None:
         agent._context.set_skill_strategy(skill_prompt)
 
     # 避免重复添加 Skill 工具（例如用户手动传入 tools 里已包含 Skill）
-    agent.tools = [t for t in agent.tools if t.name != "Skill"]
+    agent.tools[:] = [t for t in agent.tools if t.name != "Skill"]
     agent._tool_map.pop("Skill", None)
 
     # 创建 Skill 工具（现在只包含简洁描述）
@@ -195,7 +195,7 @@ def rebuild_skill_tool(agent: "Agent") -> None:
     from bu_agent_sdk.skill import create_skill_tool, generate_skill_prompt
 
     # 1. 移除旧的 Skill 工具
-    agent.tools = [t for t in agent.tools if t.name != "Skill"]
+    agent.tools[:] = [t for t in agent.tools if t.name != "Skill"]
     agent._tool_map.pop("Skill", None)
 
     # 2. 移除 IR 中的旧 Skill 策略

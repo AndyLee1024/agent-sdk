@@ -155,21 +155,197 @@ SDK 支持通过配置文件管理 LLM 配置和 Agent 指令，分为 **user �
 
 ```python
 from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
 
 # 默认：加载 user 和 project 两层
-agent = Agent(llm=..., setting_sources=("user", "project"))
+agent = Agent(llm=..., options=ComateAgentOptions(setting_sources=("user", "project")))
 
 # 只加载 project 级配置
-agent = Agent(llm=..., setting_sources=("project",))
+agent = Agent(llm=..., options=ComateAgentOptions(setting_sources=("project",)))
 
 # 只加载 user 级配置
-agent = Agent(llm=..., setting_sources=("user",))
+agent = Agent(llm=..., options=ComateAgentOptions(setting_sources=("user",)))
 
 # 完全不加载配置文件（向后兼容模式）
-agent = Agent(llm=..., setting_sources=None)
+agent = Agent(llm=..., options=ComateAgentOptions(setting_sources=None))
 ```
 
 **注意**：`setting_sources` 同时控制 `settings.json` 和 `AGENTS.md` 的加载范围。
+
+## MCP：接入外部工具（stdio/sse/http）与本地 SDK Server
+
+SDK 支持通过 MCP（Model Context Protocol）接入外部工具生态。MCP tools 会被映射为普通 `Tool`，并遵循统一命名规则：
+
+- **所有 MCP tools 都以 `mcp__` 开头**
+- 命名格式：`mcp__{server_alias}__{tool_name}`
+  - `server_alias` 来自 `ComateAgentOptions(mcp_servers={...})` 的 key，或 `.mcp.json` 里的 key
+  - `tool_name` 来自 MCP server 返回的原始 tool name（会做安全字符规整）
+
+> 说明：SDK 会在**第一次调用 LLM 前**懒加载 MCP tools；如果你使用 `ChatSession.resume()` 恢复会话，SDK 会在下一次调用 LLM 前自动刷新 MCP tools。
+
+### 1) 配置 MCP server（stdio / sse / http）
+
+默认配置文件位置（两层合并，project 覆盖同名 alias 的 user 配置）：
+
+- **User 级**：`~/.agent/.mcp.json`
+- **Project 级**：`{项目根}/.agent/.mcp.json`
+
+`.mcp.json` 支持两种等价写法：
+
+1) 直接写成 `alias -> config`：
+
+```json
+{
+  "fs": { "type": "stdio", "command": "python", "args": ["-m", "my_fs_mcp_server"] }
+}
+```
+
+2) 包一层 `servers`（更清晰，推荐）：
+
+```json
+{
+  "servers": {
+    "fs": { "type": "stdio", "command": "python", "args": ["-m", "my_fs_mcp_server"] }
+  }
+}
+```
+
+#### stdio 示例（本机启动子进程）
+
+```json
+{
+  "servers": {
+    "calc": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-m", "my_calc_mcp_server"],
+      "env": { "LOG_LEVEL": "INFO" }
+    }
+  }
+}
+```
+
+> `type` 对 stdio 可省略（缺省即按 stdio 处理）。
+
+#### SSE 示例（远程/本地 SSE 端点）
+
+```json
+{
+  "servers": {
+    "search": {
+      "type": "sse",
+      "url": "http://127.0.0.1:8000/sse",
+      "headers": { "Authorization": "Bearer YOUR_TOKEN" }
+    }
+  }
+}
+```
+
+#### HTTP 示例（Streamable HTTP 端点）
+
+```json
+{
+  "servers": {
+    "internal": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": { "X-API-Key": "YOUR_KEY" }
+    }
+  }
+}
+```
+
+#### 代码中显式指定/覆盖配置
+
+你也可以直接在代码里传 `mcp_servers`（会覆盖默认文件发现逻辑）：
+
+```python
+from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
+
+agent = Agent(
+    llm=...,
+    options=ComateAgentOptions(
+        mcp_servers={
+            "internal": {"type": "http", "url": "http://127.0.0.1:8000/mcp"},
+        },
+        tools=["mcp__internal__some_tool"],
+    ),
+)
+```
+
+或者传一个配置文件路径：
+
+```python
+from bu_agent_sdk import Agent
+
+from bu_agent_sdk.agent import ComateAgentOptions
+
+agent = Agent(llm=..., options=ComateAgentOptions(mcp_servers="/abs/path/to/.mcp.json", tools=[...]))
+```
+
+> 注意：`.mcp.json` **不支持** `type="sdk"`（因为 `instance` 无法序列化），`sdk` 只能代码注入。
+
+### 2) 创建本地 MCP server（SDK in-process，FastMCP）
+
+如果你希望把一组工具“像 MCP server 一样”以内嵌方式提供给 Agent，可以用 `create_sdk_mcp_server()`。
+
+要点：
+- 使用 `@mcp_tool(name=..., description=...)` 声明工具
+- **输入 schema 来自函数签名的类型注解**（推荐显式参数，不要用 `args: dict`）
+- 注册到 Agent 时，用 `mcp_servers` dict 的 key 作为 `server_alias`（决定最终 tool name 前缀）
+
+```python
+import asyncio
+import logging
+
+from bu_agent_sdk import Agent, create_sdk_mcp_server, mcp_tool
+from bu_agent_sdk.agent import ComateAgentOptions
+from bu_agent_sdk.llm import ChatOpenAI
+
+logging.basicConfig(level=logging.INFO)
+
+
+@mcp_tool(name="add", description="Add two numbers")
+async def add(a: float, b: float) -> str:
+    return f"Sum: {a + b}"
+
+
+@mcp_tool(name="multiply", description="Multiply two numbers")
+async def multiply(a: float, b: float) -> str:
+    return f"Product: {a * b}"
+
+
+calculator = create_sdk_mcp_server(
+    name="calculator",
+    version="2.0.0",
+    tools=[add, multiply],
+)
+
+
+async def main() -> None:
+    agent = Agent(
+        llm=ChatOpenAI(model="gpt-4o-mini"),
+        options=ComateAgentOptions(
+            mcp_servers={"calc": calculator},  # alias = "calc"
+            tools=["mcp__calc__add", "mcp__calc__multiply"],  # allowlist（推荐）
+            agents=[],  # 如不需要 subagent，建议显式禁用，减少自动注入
+        ),
+    )
+
+    result = await agent.query("请用工具计算 12.5 + 3.5，然后再乘以 2。")
+    logging.info(result)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+运行：
+
+```bash
+uv run python your_script.py
+```
 
 ## 快速上手：Claude Code 风格（系统工具 + 显式 done + Session）
 
@@ -201,7 +377,7 @@ import asyncio
 import logging
 
 from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import SessionInitEvent, StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
+from bu_agent_sdk.agent import ComateAgentOptions, SessionInitEvent, StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
 from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.tools import get_default_registry
 
@@ -217,9 +393,11 @@ async def main() -> None:
 
     agent = Agent(
         llm=llm_levels["MID"],
-        llm_levels=llm_levels,
-        tools=get_default_registry().all(),
-        include_cost=False,
+        options=ComateAgentOptions(
+            llm_levels=llm_levels,
+            tools=get_default_registry().all(),
+            include_cost=False,
+        ),
     )
 
     session = agent.chat()
@@ -331,12 +509,14 @@ session.clear_history()
 ### 1) 自动压缩（Compaction）
 
 ```python
-from bu_agent_sdk.agent import CompactionConfig
+from bu_agent_sdk.agent import ComateAgentOptions, CompactionConfig
 
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
-    tools=[...],
-    compaction=CompactionConfig(threshold_ratio=0.80),
+    options=ComateAgentOptions(
+        tools=[...],
+        compaction=CompactionConfig(threshold_ratio=0.80),
+    ),
 )
 ```
 
@@ -349,12 +529,16 @@ agent = Agent(
 常用配置：
 
 ```python
+from bu_agent_sdk.agent import ComateAgentOptions
+
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
-    tools=[...],
-    offload_enabled=True,
-    offload_token_threshold=2000,
-    offload_root_path=None,
+    options=ComateAgentOptions(
+        tools=[...],
+        offload_enabled=True,
+        offload_token_threshold=2000,
+        offload_root_path=None,
+    ),
 )
 ```
 
@@ -453,7 +637,7 @@ SDK 会从以下路径发现 subagent 定义（`.md` 文件）：
 - 当 project 级存在任意 `.md` 文件时，**完全忽略** user 级（不会合并）。
 - `project_root` 未显式传入时，默认使用当前工作目录（`cwd`）。
 
-#### `Agent(agents=...)` 的约定
+#### `ComateAgentOptions(agents=...)` 的约定
 
 `agents` 参数用于控制是否启用/合并 subagent（注意 `None` 与 `[]` 的语义不同）：
 
@@ -471,7 +655,7 @@ SDK 会从以下路径发现 subagent 定义（`.md` 文件）：
 
 解决方式（三选一）：
 1) 将你的工具改名（不要叫 `Task`）  
-2) 显式禁用 subagent：`Agent(..., agents=[])`  
+2) 显式禁用 subagent：`Agent(..., options=ComateAgentOptions(agents=[]))`  
 3) 移除/调整自动发现的 subagent 定义（例如删除/修改 `.agent/subagents/*.md`）  
 
 ## Skill：`.agent/skills/*/SKILL.md` + `Skill`
@@ -510,7 +694,7 @@ summary = await agent.get_usage()
 
 ### 计算成本（需要拉取定价并缓存）
 
-- 代码层：`Agent(include_cost=True, ...)`
+- 代码层：`Agent(options=ComateAgentOptions(include_cost=True, ...))`
 - 或环境变量：`bu_agent_sdk_CALCULATE_COST=true`
 
 定价数据会缓存到 `XDG_CACHE_HOME`（默认 `~/.cache/bu_agent_sdk/token_cost/`）。

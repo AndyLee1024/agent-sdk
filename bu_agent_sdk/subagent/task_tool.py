@@ -87,6 +87,7 @@ def create_task_tool(
         """
         # 延迟导入避免循环依赖
         from bu_agent_sdk.agent.service import Agent
+        from bu_agent_sdk.agent.options import ComateAgentOptions
 
         if subagent_type not in agent_map:
             available = ", ".join(agent_map.keys())
@@ -119,12 +120,14 @@ def create_task_tool(
         subagent = Agent(
             name=agent_def.name,
             llm=llm,
-            tools=tools,
-            system_prompt=agent_def.prompt,
-            max_iterations=agent_def.max_iterations,
-            compaction=agent_def.compaction,
-            dependency_overrides=parent_dependency_overrides,  # 继承父级
-            llm_levels=parent_llm_levels,  # 继承三档池
+            options=ComateAgentOptions(
+                tools=tools,
+                system_prompt=agent_def.prompt,
+                max_iterations=agent_def.max_iterations,
+                compaction=agent_def.compaction,
+                dependency_overrides=parent_dependency_overrides,  # 继承父级
+                llm_levels=parent_llm_levels,  # 继承三档池
+            ),
             _parent_token_cost=parent_token_cost,  # 共享 TokenCost
             _is_subagent=True,  # 禁止嵌套
         )

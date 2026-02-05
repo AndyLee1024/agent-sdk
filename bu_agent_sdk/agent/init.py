@@ -50,35 +50,85 @@ def _setup_env_info(agent: "Agent") -> None:
 def agent_post_init(agent: "Agent") -> None:
     # ====== 自动推断 tools 和 tool_registry ======
     # 设计目标：
-    # - @tool 默认不做全局注册，工具作用域由 Agent 管理
-    # - 全局 default registry 仅用于 SDK 内置工具（可为空）
-    # - 若未提供 tool_registry，则基于 tools 构建一个本地 registry 供 subagent 等按名解析
+    # - tools 支持 list[Tool | str]（str 为按名选择，支持 mcp__... 延迟解析）
+    # - tool_registry 必须是“可变的、Agent 私有”的 registry（用于后续 MCP 动态注入，避免污染全局 built-in registry）
+    from bu_agent_sdk.tools import ToolRegistry, get_default_registry
+
+    builtin = get_default_registry()
+
     if agent.tool_registry is None:
-        if agent.tools is None:
-            from bu_agent_sdk.tools import get_default_registry
+        local_registry = ToolRegistry()
+        # seed：拷贝 built-in tools（避免后续动态注入污染全局）
+        for t in builtin.all():
+            local_registry.register(t)
+        agent.tool_registry = local_registry
+        logger.debug(f"Initialized agent-local registry with {len(local_registry)} built-in tool(s)")
 
-            builtin = get_default_registry()
-            agent.tool_registry = builtin
-            agent.tools = builtin.all()
-            logger.info(f"Using built-in registry with {len(agent.tools)} tool(s)")
-        else:
-            from bu_agent_sdk.tools import ToolRegistry
-
-            local_registry = ToolRegistry()
-            for t in agent.tools:
-                local_registry.register(t)
-            agent.tool_registry = local_registry
-            logger.debug(f"Using local registry with {len(agent.tools)} tool(s)")
-    else:
-        if agent.tools is None:
-            agent.tools = agent.tool_registry.all()
-            logger.debug(
-                f"Using all {len(agent.tools)} tool(s) from provided registry"
-            )
-
-    # 确保 tools 不是 None
+    # 解析 tools：
+    # - tools is None：默认使用 registry 中的所有工具（后续 MCP 会动态扩展）
+    # - tools 为 list：允许 Tool 与 str 混合；str 按名解析，mcp__... 允许 pending
     if agent.tools is None:
-        agent.tools = []  # 空工具列表
+        agent._tools_allowlist_mode = False
+        agent.tools = agent.tool_registry.all()
+        logger.debug(f"Using all {len(agent.tools)} tool(s) from registry")
+    else:
+        agent._tools_allowlist_mode = True
+
+        resolved: list[Tool] = []
+        pending_mcp: list[str] = []
+        requested_names: list[str] = []
+
+        # 先注册 Tool 实例，保证后续 str 可解析到这些工具
+        for item in agent.tools:
+            if isinstance(item, Tool):
+                try:
+                    agent.tool_registry.register(item)  # type: ignore[union-attr]
+                except Exception:
+                    logger.debug(f"注册工具失败（忽略覆盖/重复）：{item.name}", exc_info=True)
+
+        for item in agent.tools:
+            if isinstance(item, Tool):
+                resolved.append(item)
+                continue
+
+            if isinstance(item, str):
+                name = item
+                requested_names.append(name)
+
+                if name in agent.tool_registry:  # type: ignore[operator]
+                    resolved.append(agent.tool_registry.get(name))  # type: ignore[union-attr]
+                    continue
+
+                if name.startswith("mcp__"):
+                    pending_mcp.append(name)
+                    continue
+
+                raise ValueError(f"Unknown tool name: {name}")
+
+            raise TypeError(f"tools 仅支持 Tool 或 str，收到：{type(item).__name__}")
+
+        agent._mcp_pending_tool_names = pending_mcp
+        agent._requested_tool_names = requested_names
+        agent.tools = resolved
+
+    # ====== Tool 名冲突检查 ======
+    # 约定：若未显式禁用 subagent（agents != []），则 'Task' 为保留名。
+    # 即使当前未发现 subagent，也禁止用户静默提供同名工具，避免后续开启 subagent 时出现不可预期行为。
+    if agent.agents != []:
+        user_task_tools = [
+            t
+            for t in agent.tools
+            if isinstance(t, Tool)
+            and t.name == "Task"
+            and getattr(t, "_bu_agent_sdk_internal", False) is not True
+        ]
+        if user_task_tools:
+            raise ValueError(
+                "检测到用户提供了同名工具 'Task'。"
+                "'Task' 为 subagent 调度保留名（除非显式禁用 subagent：agents=[]）。"
+                "解决方式：1) 将你的工具改名（不要叫 'Task'）；"
+                "2) 显式禁用 subagent（例如 agents=[]）。"
+            )
 
     # ====== Subagent 自动发现和 Merge ======
     # 只在非 subagent 时执行自动发现（subagent 不支持嵌套）

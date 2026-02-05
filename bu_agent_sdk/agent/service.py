@@ -5,6 +5,7 @@ Usage:
     from bu_agent_sdk.llm import ChatOpenAI
     from bu_agent_sdk.tools import tool
     from bu_agent_sdk import Agent
+    from bu_agent_sdk.agent import ComateAgentOptions
 
     @tool("Search the web")
     async def search(query: str) -> str:
@@ -12,7 +13,7 @@ Usage:
 
     agent = Agent(
         llm=ChatOpenAI(model="gpt-4o"),
-        tools=[search],
+        options=ComateAgentOptions(tools=[search]),
     )
 
     response = await agent.query("Find information about Python")
@@ -23,15 +24,17 @@ Usage:
 
     agent = Agent(
         llm=ChatOpenAI(model="gpt-4o"),
-        tools=[search],
-        # Custom threshold ratio (default is 0.80 = 80% of model's context window)
-        compaction=CompactionConfig(threshold_ratio=0.70),
-        # Or disable compaction entirely:
-        # compaction=CompactionConfig(enabled=False),
+        options=ComateAgentOptions(
+            tools=[search],
+            # Custom threshold ratio (default is 0.80 = 80% of model's context window)
+            compaction=CompactionConfig(threshold_ratio=0.70),
+            # Or disable compaction entirely:
+            # compaction=CompactionConfig(enabled=False),
+        ),
     )
 
     # Access usage statistics:
-    summary = await agent.usage
+    summary = await agent.get_usage()
     print(f"Total tokens: {summary.total_tokens}")
     print(f"Total cost: ${summary.total_cost:.4f}")
 """
@@ -48,4 +51,3 @@ Agent.__module__ = __name__
 SystemPromptConfig.__module__ = __name__
 
 __all__ = ["Agent", "SystemPromptConfig", "SystemPromptType"]
-

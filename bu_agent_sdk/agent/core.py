@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any
 
 from bu_agent_sdk.agent.compaction import CompactionConfig, CompactionService
 from bu_agent_sdk.agent.llm_levels import LLMLevel
+from bu_agent_sdk.agent.options import ComateAgentOptions
 from bu_agent_sdk.agent.system_prompt import SystemPromptType, resolve_system_prompt
 from bu_agent_sdk.context import ContextIR
 from bu_agent_sdk.context.fs import ContextFileSystem
@@ -48,110 +50,284 @@ class Agent:
 
     Attributes:
         llm: The language model to use for the agent.
-        tools: List of Tool instances. If None, uses tools from the built-in registry.
-        system_prompt: Optional system prompt to guide the agent.
-        max_iterations: Maximum number of LLM calls before stopping.
-        tool_choice: How the LLM should choose tools ('auto', 'required', 'none').
-        compaction: Optional configuration for automatic context compaction.
-        include_cost: Whether to calculate costs (requires fetching pricing data).
-        dependency_overrides: Optional dict to override tool dependencies.
+        options: Common configuration for Comate queries.
     """
 
     llm: BaseChatModel | None = None
     level: LLMLevel | None = None
-    tools: list[Tool] | None = None
-    system_prompt: SystemPromptType = None
-    max_iterations: int = 200  # 200 steps max for now
-    tool_choice: ToolChoice = "auto"
-    compaction: CompactionConfig | None = None
-    include_cost: bool = False
-    dependency_overrides: dict | None = None
-    ephemeral_storage_path: Path | None = None
-    """Path to store destroyed ephemeral message content. If None, content is discarded."""
-    ephemeral_keep_recent: int | None = None
-    """Default keep_recent for ephemeral tools. Overrides tool's _ephemeral value."""
-
-    # Context FileSystem 配置
-    offload_enabled: bool = True
-    """是否启用上下文卸载到文件系统"""
-    offload_token_threshold: int = 2000
-    """超过此 token 数的条目才会被卸载"""
-    offload_root_path: str | None = None
-    """卸载文件存储根目录。None 使用默认 ~/.agent/context/{session_id}"""
-    offload_policy: OffloadPolicy | None = None
-    """可选：细粒度卸载策略（按类型开关与阈值）。None 时使用默认策略。"""
-    llm_max_retries: int = 5
-    """Maximum retries for LLM errors at the agent level (matches browser-use default)."""
-    llm_retry_base_delay: float = 1.0
-    """Base delay in seconds for exponential backoff on LLM retries."""
-    llm_retry_max_delay: float = 60.0
-    """Maximum delay in seconds between LLM retry attempts."""
-    llm_retryable_status_codes: set[int] = field(
-        default_factory=lambda: {429, 500, 502, 503, 504}
-    )
-    """HTTP status codes that trigger retries (matches browser-use)."""
-
-    # Subagent support
+    options: ComateAgentOptions = field(default_factory=ComateAgentOptions)
     name: str | None = None
-    agents: list | None = None  # type: ignore  # list[AgentDefinition]
-    """List of AgentDefinition for creating subagents.
-
-    约定：
-    - None：允许自动发现 subagent（默认；也支持与代码传入的 agents 进行 merge）
-    - []：显式禁用自动发现（用于测试隔离或完全手动模式）
-    """
-    tool_registry: object | None = None  # type: ignore  # ToolRegistry
-    """Tool registry for resolving tools by name (e.g. for subagents). If None, will be built from tools."""
-    project_root: Path | None = None
-    """Project root directory for discovering subagents. Defaults to cwd."""
     _is_subagent: bool = field(default=False, repr=False)
-    """Internal flag to prevent nested subagents."""
-
-    # Task (subagent) 并行执行配置
-    task_parallel_enabled: bool = True
-    """是否允许并行执行同一轮中的多个 Task tool call。"""
-    task_parallel_max_concurrency: int = 4
-    """并行执行 Task 的最大并发数。"""
-
-    # Skill support
-    skills: list | None = None  # type: ignore  # list[SkillDefinition]
-    """List of SkillDefinition for Skill support. Auto-discovered if None."""
-
-    # Memory support
-    memory: object | None = None  # type: ignore  # MemoryConfig
-    """Memory configuration for loading static background knowledge."""
-
-    # Settings 配置
-    setting_sources: tuple[Literal["user", "project"], ...] | None = ("user", "project")
-    """控制加载哪些文件系统设置。默认加载 user 和 project。
-
-    - "user": 加载 ~/.agent/settings.json 和 ~/.agent/AGENTS.md（当 project 无 AGENTS.md 时生效）
-    - "project": 加载 .agent/settings.json 和 AGENTS.md
-    - None 或 (): 不加载任何配置文件（向后兼容模式）
-    """
-
-    env_options: EnvOptions | None = None
-    """环境信息配置（初始化时快照写入 header）。None 或默认 EnvOptions() 表示不启用。"""
-
-    llm_levels: dict[LLMLevel, BaseChatModel] | None = None
-    """三档 LLM（LOW/MID/HIGH）。用于工具内二次模型调用（如 WebFetch），默认可由 env 覆盖。"""
-
-    session_id: str | None = None
-    """Optional session id override (UUID string). Used to locate session storage."""
+    _parent_token_cost: TokenCost | None = field(default=None, repr=False)
 
     # Internal state
-    _context: ContextIR = field(default=None, repr=False)  # type: ignore  # 在 __post_init__ 中初始化
-    _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False)
-    _compaction_service: CompactionService | None = field(default=None, repr=False)
-    _token_cost: TokenCost = field(default=None, repr=False)  # type: ignore
-    _parent_token_cost: TokenCost | None = field(default=None, repr=False)
-    _context_fs: ContextFileSystem | None = field(default=None, repr=False)
-    _session_id: str = field(default="", repr=False)
+    _context: ContextIR = field(default=None, repr=False, init=False)  # type: ignore[assignment]
+    _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False, init=False)
+    _compaction_service: CompactionService | None = field(
+        default=None, repr=False, init=False
+    )
+    _token_cost: TokenCost = field(default=None, repr=False, init=False)  # type: ignore[assignment]
+    _context_fs: ContextFileSystem | None = field(default=None, repr=False, init=False)
+    _session_id: str = field(default="", repr=False, init=False)
+
+    # MCP internal state
+    _mcp_manager: Any | None = field(default=None, repr=False, init=False)
+    _mcp_loaded: bool = field(default=False, repr=False, init=False)
+    _mcp_dirty: bool = field(default=False, repr=False, init=False)
+    _mcp_pending_tool_names: list[str] = field(default_factory=list, repr=False, init=False)
+    _mcp_load_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, init=False)
+    _tools_allowlist_mode: bool = field(default=False, repr=False, init=False)
+    _requested_tool_names: list[str] = field(default_factory=list, repr=False, init=False)
 
     def __post_init__(self):
+        if not isinstance(self.options, ComateAgentOptions):
+            raise TypeError(
+                f"options 必须是 ComateAgentOptions，收到：{type(self.options).__name__}"
+            )
+
         from bu_agent_sdk.agent.init import agent_post_init
 
         agent_post_init(self)
+
+    @property
+    def tools(self) -> list[Tool | str] | None:
+        return self.options.tools
+
+    @tools.setter
+    def tools(self, value: list[Tool | str] | None) -> None:
+        self.options.tools = value
+
+    @property
+    def system_prompt(self) -> SystemPromptType:
+        return self.options.system_prompt
+
+    @system_prompt.setter
+    def system_prompt(self, value: SystemPromptType) -> None:
+        self.options.system_prompt = value
+
+    @property
+    def max_iterations(self) -> int:
+        return self.options.max_iterations
+
+    @max_iterations.setter
+    def max_iterations(self, value: int) -> None:
+        self.options.max_iterations = value
+
+    @property
+    def tool_choice(self) -> ToolChoice:
+        return self.options.tool_choice
+
+    @tool_choice.setter
+    def tool_choice(self, value: ToolChoice) -> None:
+        self.options.tool_choice = value
+
+    @property
+    def compaction(self) -> CompactionConfig | None:
+        return self.options.compaction
+
+    @compaction.setter
+    def compaction(self, value: CompactionConfig | None) -> None:
+        self.options.compaction = value
+
+    @property
+    def include_cost(self) -> bool:
+        return self.options.include_cost
+
+    @include_cost.setter
+    def include_cost(self, value: bool) -> None:
+        self.options.include_cost = value
+
+    @property
+    def dependency_overrides(self) -> dict | None:
+        return self.options.dependency_overrides
+
+    @dependency_overrides.setter
+    def dependency_overrides(self, value: dict | None) -> None:
+        self.options.dependency_overrides = value
+
+    @property
+    def ephemeral_storage_path(self) -> Path | None:
+        return self.options.ephemeral_storage_path
+
+    @ephemeral_storage_path.setter
+    def ephemeral_storage_path(self, value: Path | None) -> None:
+        self.options.ephemeral_storage_path = value
+
+    @property
+    def ephemeral_keep_recent(self) -> int | None:
+        return self.options.ephemeral_keep_recent
+
+    @ephemeral_keep_recent.setter
+    def ephemeral_keep_recent(self, value: int | None) -> None:
+        self.options.ephemeral_keep_recent = value
+
+    @property
+    def offload_enabled(self) -> bool:
+        return self.options.offload_enabled
+
+    @offload_enabled.setter
+    def offload_enabled(self, value: bool) -> None:
+        self.options.offload_enabled = value
+
+    @property
+    def offload_token_threshold(self) -> int:
+        return self.options.offload_token_threshold
+
+    @offload_token_threshold.setter
+    def offload_token_threshold(self, value: int) -> None:
+        self.options.offload_token_threshold = value
+
+    @property
+    def offload_root_path(self) -> str | None:
+        return self.options.offload_root_path
+
+    @offload_root_path.setter
+    def offload_root_path(self, value: str | None) -> None:
+        self.options.offload_root_path = value
+
+    @property
+    def offload_policy(self) -> OffloadPolicy | None:
+        return self.options.offload_policy
+
+    @offload_policy.setter
+    def offload_policy(self, value: OffloadPolicy | None) -> None:
+        self.options.offload_policy = value
+
+    @property
+    def llm_max_retries(self) -> int:
+        return self.options.llm_max_retries
+
+    @llm_max_retries.setter
+    def llm_max_retries(self, value: int) -> None:
+        self.options.llm_max_retries = value
+
+    @property
+    def llm_retry_base_delay(self) -> float:
+        return self.options.llm_retry_base_delay
+
+    @llm_retry_base_delay.setter
+    def llm_retry_base_delay(self, value: float) -> None:
+        self.options.llm_retry_base_delay = value
+
+    @property
+    def llm_retry_max_delay(self) -> float:
+        return self.options.llm_retry_max_delay
+
+    @llm_retry_max_delay.setter
+    def llm_retry_max_delay(self, value: float) -> None:
+        self.options.llm_retry_max_delay = value
+
+    @property
+    def llm_retryable_status_codes(self) -> set[int]:
+        return self.options.llm_retryable_status_codes
+
+    @llm_retryable_status_codes.setter
+    def llm_retryable_status_codes(self, value: set[int]) -> None:
+        self.options.llm_retryable_status_codes = value
+
+    @property
+    def agents(self) -> list | None:
+        return self.options.agents
+
+    @agents.setter
+    def agents(self, value: list | None) -> None:
+        self.options.agents = value
+
+    @property
+    def tool_registry(self) -> object | None:
+        return self.options.tool_registry
+
+    @tool_registry.setter
+    def tool_registry(self, value: object | None) -> None:
+        self.options.tool_registry = value
+
+    @property
+    def project_root(self) -> Path | None:
+        return self.options.project_root
+
+    @project_root.setter
+    def project_root(self, value: Path | None) -> None:
+        self.options.project_root = value
+
+    @property
+    def task_parallel_enabled(self) -> bool:
+        return self.options.task_parallel_enabled
+
+    @task_parallel_enabled.setter
+    def task_parallel_enabled(self, value: bool) -> None:
+        self.options.task_parallel_enabled = value
+
+    @property
+    def task_parallel_max_concurrency(self) -> int:
+        return self.options.task_parallel_max_concurrency
+
+    @task_parallel_max_concurrency.setter
+    def task_parallel_max_concurrency(self, value: int) -> None:
+        self.options.task_parallel_max_concurrency = value
+
+    @property
+    def skills(self) -> list | None:
+        return self.options.skills
+
+    @skills.setter
+    def skills(self, value: list | None) -> None:
+        self.options.skills = value
+
+    @property
+    def memory(self) -> object | None:
+        return self.options.memory
+
+    @memory.setter
+    def memory(self, value: object | None) -> None:
+        self.options.memory = value
+
+    @property
+    def setting_sources(self) -> tuple[Literal["user", "project"], ...] | None:
+        return self.options.setting_sources
+
+    @setting_sources.setter
+    def setting_sources(self, value: tuple[Literal["user", "project"], ...] | None) -> None:
+        self.options.setting_sources = value
+
+    @property
+    def env_options(self) -> "EnvOptions | None":
+        return self.options.env_options
+
+    @env_options.setter
+    def env_options(self, value: "EnvOptions | None") -> None:
+        self.options.env_options = value
+
+    @property
+    def mcp_enabled(self) -> bool:
+        return self.options.mcp_enabled
+
+    @mcp_enabled.setter
+    def mcp_enabled(self, value: bool) -> None:
+        self.options.mcp_enabled = value
+
+    @property
+    def mcp_servers(self) -> Any:
+        return self.options.mcp_servers
+
+    @mcp_servers.setter
+    def mcp_servers(self, value: Any) -> None:
+        self.options.mcp_servers = value
+
+    @property
+    def llm_levels(self) -> dict[LLMLevel, BaseChatModel] | None:
+        return self.options.llm_levels
+
+    @llm_levels.setter
+    def llm_levels(self, value: dict[LLMLevel, BaseChatModel] | None) -> None:
+        self.options.llm_levels = value
+
+    @property
+    def session_id(self) -> str | None:
+        return self.options.session_id
+
+    @session_id.setter
+    def session_id(self, value: str | None) -> None:
+        self.options.session_id = value
 
     @property
     def tool_definitions(self) -> list[ToolDefinition]:
@@ -355,3 +531,159 @@ class Agent:
         from bu_agent_sdk.agent.setup import rebuild_skill_tool
 
         rebuild_skill_tool(self)
+
+    # ===== MCP =====
+
+    def invalidate_mcp_tools(self, *, reason: str = "") -> None:
+        """标记 MCP tools 需要刷新（下次 invoke_llm 前生效）。"""
+        self._mcp_dirty = True
+        if reason:
+            logger.debug(f"已标记 MCP tools dirty：{reason}")
+
+    async def ensure_mcp_tools_loaded(self, *, force: bool = False) -> None:
+        """确保 MCP tools 已加载并注入到 Agent/ContextIR。
+
+        触发时机：
+        - invoke_llm() 前（首次自动加载）
+        - session resume 后（dirty 标记触发刷新）
+        """
+        if not bool(self.mcp_enabled):
+            # MCP 被禁用：清理已注入的 MCP header 与工具（若存在）
+            if self._mcp_loaded:
+                self._remove_mcp_tools_from_agent()
+            self._mcp_loaded = True
+            self._mcp_dirty = False
+            return
+
+        if self._mcp_loaded and not force and not self._mcp_dirty:
+            return
+
+        async with self._mcp_load_lock:
+            if self._mcp_loaded and not force and not self._mcp_dirty:
+                return
+
+            from bu_agent_sdk.mcp.config import resolve_mcp_servers
+            from bu_agent_sdk.mcp.manager import McpManager
+
+            servers = resolve_mcp_servers(self.mcp_servers, project_root=self.project_root)
+            if not servers:
+                # 明确无 server：移除注入，保持 agent 可用
+                self._remove_mcp_tools_from_agent()
+                self._mcp_loaded = True
+                self._mcp_dirty = False
+                return
+
+            # refresh：关闭旧 manager
+            if self._mcp_manager is not None:
+                try:
+                    await self._mcp_manager.aclose()  # type: ignore[union-attr]
+                except Exception as e:
+                    logger.warning(f"关闭旧 MCP manager 失败（忽略）：{e}")
+                finally:
+                    self._mcp_manager = None
+
+            manager = McpManager(servers)
+            await manager.start()
+            mcp_tools = manager.tools
+
+            # 1) 注册到 registry（用于按名解析/子代理）
+            if self.tool_registry is not None:
+                try:
+                    # 先卸载旧的 MCP 工具
+                    if hasattr(self.tool_registry, "all") and hasattr(self.tool_registry, "unregister"):
+                        for t in self.tool_registry.all():  # type: ignore[attr-defined]
+                            if getattr(t, "_bu_agent_sdk_mcp_tool", False) is True:
+                                self.tool_registry.unregister(t.name)  # type: ignore[attr-defined]
+
+                    for t in mcp_tools:
+                        self.tool_registry.register(t)  # type: ignore[attr-defined]
+                except Exception as e:
+                    logger.warning(f"更新 tool_registry 的 MCP tools 失败：{e}")
+
+            # 2) 更新 agent.tools（保持 list identity，避免 subagent 闭包拿到旧引用）
+            self._apply_mcp_tools_to_agent(mcp_tools)
+
+            # 3) 注入 ContextIR header（只注入概览；schema 存 metadata）
+            overview = manager.build_overview_text()
+            meta = manager.build_metadata()
+            try:
+                self._context.set_mcp_tools(overview, metadata=meta)
+            except Exception as e:
+                logger.warning(f"注入 MCP tools 到 ContextIR 失败：{e}")
+
+            # 4) 若 tools allowlist 模式且有 pending 名称，尝试补全
+            if self._tools_allowlist_mode and self._mcp_pending_tool_names:
+                missing: list[str] = []
+                resolved: list[Tool] = []
+                mcp_by_name = {t.name: t for t in mcp_tools}
+                for name in self._mcp_pending_tool_names:
+                    tool_obj = mcp_by_name.get(name)
+                    if tool_obj is None:
+                        missing.append(name)
+                    else:
+                        resolved.append(tool_obj)
+
+                if missing:
+                    raise ValueError(f"未找到 MCP tool(s): {missing}")
+
+                # 将 resolved MCP tools 附加到 allowlist tools（按 pending 顺序）
+                existing_names = {t.name for t in self.tools if isinstance(t, Tool)}  # type: ignore[arg-type]
+                new_tools = list(self.tools)
+                for t in resolved:
+                    if t.name not in existing_names:
+                        new_tools.append(t)
+                self.tools[:] = new_tools  # type: ignore[index]
+
+                # 清空 pending
+                self._mcp_pending_tool_names = []
+
+            # 5) 重建 tool_map（用于执行阶段查找）
+            self._tool_map = {t.name: t for t in self.tools if isinstance(t, Tool)}  # type: ignore[arg-type]
+
+            self._mcp_manager = manager
+            self._mcp_loaded = True
+            self._mcp_dirty = False
+
+    def _remove_mcp_tools_from_agent(self) -> None:
+        """移除已注入的 MCP tools 与 header。"""
+        try:
+            # tools list 原地过滤，保持 list identity
+            self.tools[:] = [t for t in self.tools if not (isinstance(t, Tool) and getattr(t, "_bu_agent_sdk_mcp_tool", False) is True)]  # type: ignore[index]
+            self._tool_map = {t.name: t for t in self.tools if isinstance(t, Tool)}  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+        try:
+            if self.tool_registry is not None and hasattr(self.tool_registry, "all") and hasattr(self.tool_registry, "unregister"):
+                for t in self.tool_registry.all():  # type: ignore[attr-defined]
+                    if getattr(t, "_bu_agent_sdk_mcp_tool", False) is True:
+                        self.tool_registry.unregister(t.name)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        try:
+            self._context.remove_mcp_tools()
+        except Exception:
+            pass
+
+    def _apply_mcp_tools_to_agent(self, mcp_tools: list[Tool]) -> None:
+        """根据工具模式，将 MCP tools 合并到 agent.tools 中（原地）。"""
+        # 先移除旧 MCP tools
+        base_tools: list[Tool | str] = [
+            t
+            for t in self.tools
+            if not (isinstance(t, Tool) and getattr(t, "_bu_agent_sdk_mcp_tool", False) is True)
+        ]
+
+        if self._tools_allowlist_mode:
+            # allowlist：不自动加全量 MCP tools，只在 pending 或用户后续显式解析时添加
+            self.tools[:] = base_tools  # type: ignore[index]
+            return
+
+        # 默认模式：自动追加全部 MCP tools
+        merged: list[Tool | str] = list(base_tools)
+        existing_names = {t.name for t in merged if isinstance(t, Tool)}
+        for t in mcp_tools:
+            if t.name not in existing_names:
+                merged.append(t)
+        self.tools[:] = merged  # type: ignore[index]

@@ -4,6 +4,7 @@ import os
 from typing import Literal
 
 from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
 from bu_agent_sdk.agent.llm_levels import resolve_llm_levels
 from bu_agent_sdk.llm import ChatAnthropic, ChatGoogle, ChatOpenAI
 from bu_agent_sdk.system_tools.registry import get_system_tools
@@ -46,9 +47,11 @@ async def main() -> None:
 
     agent = Agent(
         llm=main_llm,  # type: ignore[arg-type]
-        tools=None,  # 触发默认 registry（但我们显式传 tool_registry 覆盖为 registry）
-        tool_registry=registry,
-        llm_levels=llm_levels,  # type: ignore[arg-type]
+        options=ComateAgentOptions(
+            tools=None,  # 触发默认 registry（但我们显式传 tool_registry 覆盖为 registry）
+            tool_registry=registry,
+            llm_levels=llm_levels,  # type: ignore[arg-type]
+        ),
     )
 
     prompt = (

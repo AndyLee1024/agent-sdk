@@ -23,6 +23,7 @@ class ItemType(Enum):
     AGENT_LOOP = "agent_loop"
     MEMORY = "memory"
     TOOL_STRATEGY = "tool_strategy"
+    MCP_TOOL = "mcp_tool"
     SUBAGENT_STRATEGY = "subagent_strategy"
     SKILL_STRATEGY = "skill_strategy"
     SYSTEM_ENV = "system_env"
@@ -57,6 +58,7 @@ DEFAULT_PRIORITIES: dict[ItemType, int] = {
     ItemType.COMPACTION_SUMMARY: 80,     # 不压缩
     ItemType.SKILL_STRATEGY: 90,
     ItemType.TOOL_STRATEGY: 93,          # 在 SUBAGENT 和 SKILL 之间
+    ItemType.MCP_TOOL: 94,
     ItemType.SUBAGENT_STRATEGY: 95,
     ItemType.SYSTEM_ENV: 100,            # 永不压缩
     ItemType.GIT_ENV: 100,               # 永不压缩

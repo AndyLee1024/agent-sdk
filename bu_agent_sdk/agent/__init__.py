@@ -23,11 +23,13 @@ from bu_agent_sdk.agent.chat_session import (
     ChatSessionClosedError,
     ChatSessionError,
 )
+from bu_agent_sdk.agent.options import ComateAgentOptions
 from bu_agent_sdk.agent.service import Agent
 from bu_agent_sdk.agent.prompts import MEMORY_NOTICE
 
 __all__ = [
     "Agent",
+    "ComateAgentOptions",
     # Chat session
     "ChatSession",
     "ChatSessionError",

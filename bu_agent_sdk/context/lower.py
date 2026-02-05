@@ -87,6 +87,7 @@ class LoweringPipeline:
             ItemType.AGENT_LOOP,
             ItemType.MEMORY,
             ItemType.TOOL_STRATEGY,
+            ItemType.MCP_TOOL,
             ItemType.SUBAGENT_STRATEGY,
             ItemType.SKILL_STRATEGY,
             ItemType.SYSTEM_ENV,

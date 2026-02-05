@@ -29,19 +29,22 @@ Ephemeral 机制 ──────► Context FileSystem
 
 ```python
 from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
 from bu_agent_sdk.llm import ChatAnthropic
 
 agent = Agent(
     llm=ChatAnthropic(),
-    tools=[...],
+    options=ComateAgentOptions(
+        tools=[...],
 
-    # Context FileSystem 配置
-    offload_enabled=True,              # 是否启用卸载（默认 True）
-    offload_token_threshold=2000,      # 超过此 token 数才卸载（默认 2000）
-    offload_root_path=None,            # 存储路径，None 使用默认 ~/.agent/context/{session_id}
+        # Context FileSystem 配置
+        offload_enabled=True,              # 是否启用卸载（默认 True）
+        offload_token_threshold=2000,      # 超过此 token 数才卸载（默认 2000）
+        offload_root_path=None,            # 存储路径，None 使用默认 ~/.agent/context/{session_id}
 
-    # Ephemeral 配置（与 offload 协作）
-    ephemeral_keep_recent=None,        # 全局覆盖工具的 ephemeral 值
+        # Ephemeral 配置（与 offload 协作）
+        ephemeral_keep_recent=None,        # 全局覆盖工具的 ephemeral 值
+    ),
 )
 ```
 
@@ -175,6 +178,7 @@ SelectiveCompactionPolicy.compact()
 
 ```python
 from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
 from bu_agent_sdk.llm import ChatAnthropic
 from bu_agent_sdk.tools import tool
 
@@ -184,9 +188,11 @@ async def read_file(path: str) -> str:
 
 agent = Agent(
     llm=ChatAnthropic(),
-    tools=[read_file],
-    offload_enabled=True,
-    offload_token_threshold=1000,
+    options=ComateAgentOptions(
+        tools=[read_file],
+        offload_enabled=True,
+        offload_token_threshold=1000,
+    ),
 )
 
 # 第1次调用：输出保留

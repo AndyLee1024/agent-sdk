@@ -9,13 +9,23 @@ Run with:
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Annotated
 
 from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
+from bu_agent_sdk.agent import (
+    ComateAgentOptions,
+    StopEvent,
+    TextEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+)
 from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.tools import Depends, tool
+
+
+logger = logging.getLogger(__name__)
 
 
 # Simulated database
@@ -82,10 +92,13 @@ async def count_by_role(
 
 
 async def main():
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     agent = Agent(
         llm=ChatOpenAI(model="gpt-5.2"),
-        tools=[get_user, list_users, count_by_role],
-        system_prompt="You are a helpful assistant that can query user information from a database.",
+        options=ComateAgentOptions(
+            tools=[get_user, list_users, count_by_role],
+            system_prompt="You are a helpful assistant that can query user information from a database.",
+        ),
     )
 
     # Ask about users with streaming
@@ -94,16 +107,16 @@ async def main():
     ):
         match event:
             case ToolCallEvent(tool=name, args=args):
-                print(f"🔧 {name}({args})")
+                logger.info(f"🔧 {name}({args})")
             case ToolResultEvent(tool=name, result=result):
-                print(f"   → {result}")
+                logger.info(f"   → {result}")
             case TextEvent(content=text):
-                print(f"\n✅ {text}")
+                logger.info(f"\n✅ {text}")
             case StopEvent(reason=_reason):
                 pass
 
     usage = await agent.get_usage()
-    print(f"Token usage: {usage.total_cost}")
+    logger.info(f"Token usage: {usage.total_cost}")
 
 
 if __name__ == "__main__":

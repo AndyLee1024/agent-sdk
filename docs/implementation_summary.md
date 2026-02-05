@@ -124,11 +124,13 @@ Use Read tool to view details.
 ```python
 agent = Agent(
     llm=ChatAnthropic(),
-    tools=[...],
-    offload_enabled=True,              # 启用卸载
-    offload_token_threshold=2000,      # Token 阈值
-    offload_root_path=None,            # 使用默认路径
-    ephemeral_keep_recent=None,        # 使用工具的默认值
+    options=ComateAgentOptions(
+        tools=[...],
+        offload_enabled=True,              # 启用卸载
+        offload_token_threshold=2000,      # Token 阈值
+        offload_root_path=None,            # 使用默认路径
+        ephemeral_keep_recent=None,        # 使用工具的默认值
+    ),
 )
 ```
 

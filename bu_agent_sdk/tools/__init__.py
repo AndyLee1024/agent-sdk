@@ -66,8 +66,10 @@ def get_default_registry() -> ToolRegistry:
 
         agent = Agent(
             llm=llm,
-            tools=registry.all(),
-            tool_registry=registry,
+            options=ComateAgentOptions(
+                tools=registry.all(),
+                tool_registry=registry,
+            ),
         )
     """
     return _default_registry

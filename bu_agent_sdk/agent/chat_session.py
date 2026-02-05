@@ -502,6 +502,12 @@ class ChatSession:
             except Exception as e:
                 logger.warning(f"Failed to restore TODO state for session_id={session_id}: {e}", exc_info=True)
 
+        # MCP tools：resume 后标记 dirty，下一次 invoke_llm 前刷新
+        try:
+            session._agent.invalidate_mcp_tools(reason="session_resume")
+        except Exception:
+            pass
+
         return session
 
     def fork_session(

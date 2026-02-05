@@ -20,6 +20,16 @@ async def invoke_llm(agent: "Agent") -> ChatInvokeCompletion:
 
     for attempt in range(agent.llm_max_retries):
         try:
+            # MCP tools：首次调用前加载；resume 后 dirty 时刷新
+            try:
+                await agent.ensure_mcp_tools_loaded()
+            except Exception as e:
+                # MCP 加载失败不应阻断所有场景；
+                # 但若用户显式请求了某些 mcp__ 工具名，则应直接抛出，避免 silent degrade。
+                if getattr(agent, "_tools_allowlist_mode", False) and getattr(agent, "_mcp_pending_tool_names", []):
+                    raise
+                logger.warning(f"MCP tools 加载失败（已降级继续）：{e}")
+
             response = await agent.llm.ainvoke(
                 messages=agent._context.lower(),
                 tools=agent.tool_definitions if agent.tools else None,
@@ -105,4 +115,3 @@ async def invoke_llm(agent: "Agent") -> ChatInvokeCompletion:
     if last_error is not None:
         raise last_error
     raise RuntimeError("Retry loop completed without return or exception")
-

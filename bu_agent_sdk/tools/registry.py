@@ -87,6 +87,13 @@ class ToolRegistry:
         self._tools.clear()
         logging.debug("Tool registry cleared")
 
+    def unregister(self, name: str) -> Tool | None:
+        """移除一个工具（若不存在则返回 None）。"""
+        tool = self._tools.pop(name, None)
+        if tool is not None:
+            logging.debug(f"Unregistered tool: {name}")
+        return tool
+
     def __len__(self) -> int:
         """返回注册表中的工具数量"""
         return len(self._tools)

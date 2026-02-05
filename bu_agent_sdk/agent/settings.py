@@ -183,7 +183,9 @@ def discover_agents_md(project_root: Path | None) -> list[Path]:
     Returns:
         存在的 AGENTS.md 文件路径列表（按上述顺序去重）
     """
-    root = (project_root or Path.cwd()).expanduser().resolve()
+    # 注意：不要在这里调用 resolve()，避免在 macOS 上把 /var/... 解析成 /private/var/...，
+    # 导致调用方（尤其是测试）拿到的路径与输入不一致。
+    root = (project_root or Path.cwd()).expanduser()
     candidates = [
         root / "AGENTS.md",
         root / ".agent" / "AGENTS.md",

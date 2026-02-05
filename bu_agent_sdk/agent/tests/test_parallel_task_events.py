@@ -4,7 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
-from bu_agent_sdk.agent import Agent
+from bu_agent_sdk.agent import Agent, ComateAgentOptions
 from bu_agent_sdk.agent.events import SubagentStartEvent, SubagentStopEvent, ToolResultEvent
 from bu_agent_sdk.llm.messages import Function, ToolCall
 from bu_agent_sdk.llm.views import ChatInvokeCompletion
@@ -84,11 +84,13 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
 
         agent = Agent(
             llm=llm,  # type: ignore[arg-type]
-            tools=[Task],
-            agents=[],
-            offload_enabled=False,
-            task_parallel_enabled=True,
-            task_parallel_max_concurrency=4,
+            options=ComateAgentOptions(
+                tools=[Task],
+                agents=[],
+                offload_enabled=False,
+                task_parallel_enabled=True,
+                task_parallel_max_concurrency=4,
+            ),
         )
 
         events = []
@@ -166,11 +168,13 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
 
         agent = Agent(
             llm=llm,  # type: ignore[arg-type]
-            tools=[Task],
-            agents=[],
-            offload_enabled=False,
-            task_parallel_enabled=True,
-            task_parallel_max_concurrency=4,
+            options=ComateAgentOptions(
+                tools=[Task],
+                agents=[],
+                offload_enabled=False,
+                task_parallel_enabled=True,
+                task_parallel_max_concurrency=4,
+            ),
         )
 
         _ = await agent.query("hi")
@@ -195,9 +199,11 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError) as ctx:
             _ = Agent(
                 llm=llm,  # type: ignore[arg-type]
-                tools=[Task],
-                project_root=project_root,
-                offload_enabled=False,
+                options=ComateAgentOptions(
+                    tools=[Task],
+                    project_root=project_root,
+                    offload_enabled=False,
+                ),
             )
 
         self.assertIn("Task", str(ctx.exception))

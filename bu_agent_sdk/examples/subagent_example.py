@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 
 from bu_agent_sdk import Agent, AgentDefinition
+from bu_agent_sdk.agent import ComateAgentOptions
 from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.tools import ToolRegistry, tool 
 
@@ -106,8 +107,10 @@ async def main():
     logger.info("创建主 Agent...")
     agent = Agent(
         llm=ChatOpenAI(model="gpt-5-mini", api_key="sk-KXdioVlee9i7DpUNBZtKM4FCXDqUCONdJGgpeTQfGFmJrRwD",base_url="http://454443.xyz:3022/v1"),
-        agents=[researcher, writer],
-        system_prompt="你是一个项目经理，可以协调研究员和作家来完成任务。",
+        options=ComateAgentOptions(
+            agents=[researcher, writer],
+            system_prompt="你是一个项目经理，可以协调研究员和作家来完成任务。",
+        ),
     )
 
     # 5. 测试场景 1: 串行调用（先研究后写作）
@@ -182,7 +185,9 @@ async def main_with_hybrid_mode():
     # Agent 会自动发现 + 代码传入的 subagent
     agent = Agent(
         llm=ChatOpenAI(model="gpt-5-mini", api_key="sk-test"),
-        agents=[custom_agent],  # 传入额外的 subagent
+        options=ComateAgentOptions(
+            agents=[custom_agent],  # 传入额外的 subagent
+        ),
     )
 
     logger.info(f"总共加载 {len(agent.agents) if agent.agents else 0} 个 Subagent:")

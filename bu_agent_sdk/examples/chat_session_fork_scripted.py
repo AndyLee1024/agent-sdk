@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
 from bu_agent_sdk.agent.events import (
     SessionInitEvent,
     StepCompleteEvent,
@@ -74,7 +75,7 @@ async def main() -> None:
         model=os.getenv("OPENAI_MODEL", "gpt-4o"),
         api_key=_get_openai_api_key(),
     )
-    agent = Agent(llm=llm, tools=[])
+    agent = Agent(llm=llm, options=ComateAgentOptions(tools=[]))
 
     seed_messages = iter(
         [

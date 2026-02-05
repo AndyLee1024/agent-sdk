@@ -6,6 +6,7 @@ Simple agentic loop with native tool calling.
 
 ```python
 from bu_agent_sdk import Agent
+from bu_agent_sdk.agent import ComateAgentOptions
 from bu_agent_sdk.llm import ChatOpenAI
 from bu_agent_sdk.tools import tool
 
@@ -15,7 +16,7 @@ async def add(a: int, b: int) -> int:
 
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
-    tools=[add],
+    options=ComateAgentOptions(tools=[add]),
 )
 
 result = await agent.query("What is 2 + 2?")
