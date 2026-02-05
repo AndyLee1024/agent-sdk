@@ -4,7 +4,7 @@ import logging
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from bu_agent_sdk.agent.compaction import CompactionConfig, CompactionService
 from bu_agent_sdk.agent.llm_levels import LLMLevel
@@ -114,6 +114,15 @@ class Agent:
     # Memory support
     memory: object | None = None  # type: ignore  # MemoryConfig
     """Memory configuration for loading static background knowledge."""
+
+    # Settings 配置
+    setting_sources: tuple[Literal["user", "project"], ...] | None = ("user", "project")
+    """控制加载哪些文件系统设置。默认加载 user 和 project。
+
+    - "user": 加载 ~/.agent/settings.json 和 ~/.agent/AGENTS.md（当 project 无 AGENTS.md 时生效）
+    - "project": 加载 .agent/settings.json 和 AGENTS.md
+    - None 或 (): 不加载任何配置文件（向后兼容模式）
+    """
 
     llm_levels: dict[LLMLevel, BaseChatModel] | None = None
     """三档 LLM（LOW/MID/HIGH）。用于工具内二次模型调用（如 WebFetch），默认可由 env 覆盖。"""

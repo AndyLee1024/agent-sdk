@@ -84,7 +84,7 @@ async def main():
 3. 整理并总结你的发现
 4. 返回清晰、有组织的研究结果""",
         tools=["search", "read_file"],
-        model="gpt-5-mini",  # 使用更快的模型
+        level="LOW",  # 使用低档位模型（快速、便宜）
         timeout=60,  # 60秒超时
     )
 
@@ -99,7 +99,7 @@ async def main():
 3. 使用 write_file 工具将内容写入文件
 4. 确保内容质量高、易于理解""",
         tools=["write_file"],
-        model="gpt-5-mini",  # 使用更快的模型
+        level="LOW",  # 使用低档位模型（快速、便宜）
     )
 
     # 4. 创建主 Agent
@@ -176,7 +176,7 @@ async def main_with_hybrid_mode():
         name="analyzer",
         description="代码分析专家",
         prompt="你是一个代码分析专家，擅长分析代码质量和提出改进建议。",
-        model="gpt-5-mini",
+        level="MID",  # 使用中档位模型
     )
 
     # Agent 会自动发现 + 代码传入的 subagent

@@ -24,6 +24,7 @@ from bu_agent_sdk.agent.chat_session import (
     ChatSessionError,
 )
 from bu_agent_sdk.agent.service import Agent
+from bu_agent_sdk.agent.prompts import MEMORY_NOTICE
 
 __all__ = [
     "Agent",
@@ -45,4 +46,7 @@ __all__ = [
     "CompactionConfig",
     "CompactionResult",
     "CompactionService",
+
+    ## prompts
+    "MEMORY_NOTICE",
 ]

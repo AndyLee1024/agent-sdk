@@ -171,42 +171,53 @@ def resolve_model(
     """解析模型配置
 
     Args:
-        model: 模型名称（None/"inherit" 代表继承；也支持任意模型字符串）
+        model: 模型别名（仅支持 "sonnet"/"opus"/"haiku"/"inherit"）
         level: 档位（LOW/MID/HIGH）。当 model 未指定时优先生效。
         parent_llm: 父 Agent 的 LLM 实例
-        llm_levels: 父 Agent 的三档模型池（用于 level/alias 映射）
+        llm_levels: 父 Agent 的三档模型池
 
     Returns:
         解析后的 LLM 实例
 
     Notes:
-        - "sonnet"/"opus"/"haiku" 会使用内置 Anthropic 预设
-        - 其他字符串会尽量克隆 parent_llm，仅替换 model 字段
+        - model只支持别名："sonnet"/"opus"/"haiku"/"inherit"
+        - 不支持的model会被忽略，回退到level或parent_llm
     """
     # 1) model= 非 None 且非 "inherit"
     if model and model.strip().lower() != "inherit":
         model = model.strip()
 
-        alias: dict[str, LLMLevel] = {"sonnet": "MID", "opus": "HIGH", "haiku": "LOW"}
-        pool_key = alias.get(model.lower())
-        if pool_key and llm_levels and pool_key in llm_levels:
-            return llm_levels[pool_key]
-
-        hard = {
-            "sonnet": lambda: ChatAnthropic(model="claude-sonnet-4-5"),
-            "opus": lambda: ChatAnthropic(model="claude-opus-4-5"),
-            "haiku": lambda: ChatAnthropic(model="claude-haiku-4-5"),
+        # 别名映射（仅支持这三个）
+        alias: dict[str, LLMLevel] = {
+            "sonnet": "MID",
+            "opus": "HIGH",
+            "haiku": "LOW"
         }
-        if model.lower() in hard:
-            return hard[model.lower()]()
 
-        if is_dataclass(parent_llm):
-            try:
-                return replace(parent_llm, model=model)
-            except TypeError:
-                pass
+        model_lower = model.lower()
 
-        return ChatAnthropic(model=model)
+        # 检查是否为支持的alias
+        if model_lower in alias:
+            pool_key = alias[model_lower]
+
+            # 尝试从llm_levels池获取
+            if llm_levels and pool_key in llm_levels:
+                return llm_levels[pool_key]
+
+            # 池不存在时，使用硬编码的Anthropic模型
+            hard = {
+                "sonnet": lambda: ChatAnthropic(model="claude-sonnet-4-5"),
+                "opus": lambda: ChatAnthropic(model="claude-opus-4-5"),
+                "haiku": lambda: ChatAnthropic(model="claude-haiku-4-5"),
+            }
+            return hard[model_lower]()
+        else:
+            # 不支持的model：记录警告并忽略
+            logger.warning(
+                f"不支持的model值 '{model}'。仅支持别名：sonnet/opus/haiku。"
+                f"将回退到level或继承父agent的模型。"
+            )
+            # 继续检查level
 
     # 2) level= 从池取
     if level is not None:

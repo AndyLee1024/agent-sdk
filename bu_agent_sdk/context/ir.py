@@ -129,17 +129,23 @@ class ContextIR:
             content: MEMORY 内容
             cache: 是否建议缓存（如 Anthropic prompt cache）
         """
+        # 延迟导入避免循环依赖
+        from bu_agent_sdk.agent.prompts import MEMORY_NOTICE
+
+        # 包裹 <memory> 标签
+        wrapped_content = f"<memory>\n{content}\n {MEMORY_NOTICE}\n</memory>"
+
         existing = self.header.find_one_by_type(ItemType.MEMORY)
-        token_count = self.token_counter.count(content)
+        token_count = self.token_counter.count(wrapped_content)
 
         if existing:
-            existing.content_text = content
+            existing.content_text = wrapped_content
             existing.token_count = token_count
             existing.cache_hint = cache
         else:
             item = ContextItem(
                 item_type=ItemType.MEMORY,
-                content_text=content,
+                content_text=wrapped_content,
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.MEMORY],
                 cache_hint=cache,

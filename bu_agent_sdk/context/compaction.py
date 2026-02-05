@@ -64,6 +64,46 @@ class TypeCompactionRule:
     keep_recent: int = 5
 
 
+@dataclass
+class ToolTypeCompactionRule:
+    """单个工具类型的压缩规则
+
+    用于差异化处理不同工具的交互块压缩策略。
+
+    Attributes:
+        keep_recent: 保留最近 N 个该工具的交互块
+        priority: 工具压缩优先级（低数值先压缩）
+    """
+
+    keep_recent: int = 3
+    priority: int = 50
+
+
+# 工具类型差异化压缩规则
+# 按工具特性设定不同的保留策略和压缩优先级
+DEFAULT_TOOL_TYPE_RULES: dict[str, ToolTypeCompactionRule] = {
+    # 可重新获取的结果 - 激进压缩
+    "Read": ToolTypeCompactionRule(keep_recent=1, priority=10),
+    "Glob": ToolTypeCompactionRule(keep_recent=1, priority=10),
+    "Grep": ToolTypeCompactionRule(keep_recent=1, priority=10),
+    "WebFetch": ToolTypeCompactionRule(keep_recent=0, priority=5),
+    "WebSearch": ToolTypeCompactionRule(keep_recent=0, priority=5),
+
+    # 代码修改记录 - 保留更久
+    "Edit": ToolTypeCompactionRule(keep_recent=5, priority=60),
+    "Write": ToolTypeCompactionRule(keep_recent=5, priority=60),
+
+    # 命令执行 - 中等保留
+    "Bash": ToolTypeCompactionRule(keep_recent=3, priority=40),
+
+    # 子Agent结果 - 重要研究成果
+    "Task": ToolTypeCompactionRule(keep_recent=5, priority=80),
+}
+
+# 未配置工具的默认规则
+DEFAULT_TOOL_RULE = ToolTypeCompactionRule(keep_recent=3, priority=50)
+
+
 # 默认规则
 DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
     ItemType.TOOL_RESULT.value: TypeCompactionRule(
@@ -221,48 +261,99 @@ class SelectiveCompactionPolicy:
                         f"释放 ~{tokens_before - context.total_tokens} tokens"
                     )
 
-            # 检查是否已降到阈值以下
+            # 检查是否已降到阈值以下（提前终止选择性压缩循环）
             current_tokens = context.total_tokens
             if current_tokens < self.threshold:
                 logger.info(
-                    f"选择性压缩完成: {initial_tokens} → {current_tokens} tokens "
+                    f"选择性压缩达到阈值: {initial_tokens} → {current_tokens} tokens "
                     f"(阈值={self.threshold})"
                 )
-                return True
+                break
 
-        # 选择性压缩不够，检查是否需要回退全量摘要
+        # 选择性压缩后，必须执行 LLM Summary
+        # 这是关键变更：无论选择性压缩是否已达阈值，都执行 LLM Summary 进行进一步压缩
         current_tokens = context.total_tokens
-        if current_tokens >= self.threshold and self.fallback_to_full_summary:
+        if self.fallback_to_full_summary:
             logger.info(
-                f"选择性压缩不足 ({initial_tokens} → {current_tokens}), "
-                f"回退到全量摘要"
+                f"选择性压缩完成 ({initial_tokens} → {current_tokens})，执行 LLM Summary"
             )
             return await self._fallback_full_summary(context)
 
         if compacted_any:
             logger.info(
-                f"选择性压缩部分完成: {initial_tokens} → {current_tokens} tokens "
-                f"(未达阈值 {self.threshold})"
+                f"选择性压缩完成: {initial_tokens} → {current_tokens} tokens "
+                f"(LLM Summary 未启用)"
             )
 
         return compacted_any
 
     async def _truncate_tool_blocks(self, context: "ContextIR", *, keep_recent: int) -> int:
-        """按工具交互块截断历史，并用 meta 占位符替换旧块。"""
+        """按工具类型差异化截断历史，并用 meta 占位符替换旧块。
+
+        按工具类型分组处理，每种工具根据其 ToolTypeCompactionRule 决定保留策略。
+        工具按优先级排序（低优先级先压缩）。
+
+        Args:
+            context: ContextIR 实例
+            keep_recent: 全局 keep_recent（作为未配置工具的参考，但实际使用工具类型规则）
+
+        Returns:
+            移除的块数量
+        """
         blocks = self._extract_tool_blocks(context)
         if not blocks:
             return 0
 
-        if keep_recent > 0 and len(blocks) <= keep_recent:
-            return 0
+        # 1. 按工具类型分组
+        blocks_by_tool: dict[str, list[_ToolInteractionBlock]] = {}
+        for block in blocks:
+            # 取块中第一个工具名作为分类依据
+            tool_name = block.tool_calls[0].tool_name if block.tool_calls else "unknown"
+            blocks_by_tool.setdefault(tool_name, []).append(block)
 
-        blocks_to_remove = blocks if keep_recent <= 0 else blocks[:-keep_recent]
+        # 2. 按工具优先级排序（低优先级先压缩）
+        sorted_tools = sorted(
+            blocks_by_tool.keys(),
+            key=lambda t: DEFAULT_TOOL_TYPE_RULES.get(t, DEFAULT_TOOL_RULE).priority
+        )
+
+        blocks_to_remove: list[_ToolInteractionBlock] = []
+
+        # 3. 逐工具类型处理
+        for tool_name in sorted_tools:
+            rule = DEFAULT_TOOL_TYPE_RULES.get(tool_name, DEFAULT_TOOL_RULE)
+            tool_blocks = blocks_by_tool[tool_name]
+
+            # 按出现顺序排序（start_idx 越小越早）
+            tool_blocks_sorted = sorted(tool_blocks, key=lambda b: b.start_idx)
+
+            # 根据 keep_recent 决定要移除的块
+            if rule.keep_recent == 0:
+                # 全部移除
+                blocks_to_remove.extend(tool_blocks_sorted)
+                logger.debug(
+                    f"工具 {tool_name}: 全部移除 {len(tool_blocks_sorted)} 个块 "
+                    f"(keep_recent=0, priority={rule.priority})"
+                )
+            elif len(tool_blocks_sorted) > rule.keep_recent:
+                # 保留最近 N 个，移除更早的
+                to_remove = tool_blocks_sorted[:-rule.keep_recent]
+                blocks_to_remove.extend(to_remove)
+                logger.debug(
+                    f"工具 {tool_name}: 移除 {len(to_remove)} 个块，"
+                    f"保留最近 {rule.keep_recent} 个 (priority={rule.priority})"
+                )
+            else:
+                logger.debug(
+                    f"工具 {tool_name}: 无需移除 ({len(tool_blocks_sorted)} <= {rule.keep_recent})"
+                )
+
         if not blocks_to_remove:
             return 0
 
         removed = 0
 
-        # 反向处理，避免索引位移
+        # 4. 反向处理，避免索引位移
         for block in sorted(blocks_to_remove, key=lambda b: b.start_idx, reverse=True):
             placeholder = await self._build_tool_block_placeholder_item(context, block)
             context.conversation.items[block.start_idx : block.end_idx + 1] = [placeholder]

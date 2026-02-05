@@ -49,6 +49,128 @@ BU_AGENT_SDK_LLM_MID_BASE_URL="http://192.168.100.1:4142/v1"
 BU_AGENT_SDK_LLM_HIGH_BASE_URL="http://192.168.100.1:4143/v1"
 ```
 
+## 配置文件：settings.json 和 AGENTS.md
+
+SDK 支持通过配置文件管理 LLM 配置和 Agent 指令，分为 **user 级**（全局）和 **project 级**（项目）两层：
+
+| 配置文件 | User 级（全局） | Project 级 | 优先级 |
+|---------|----------------|-----------|--------|
+| `settings.json` | `~/.agent/settings.json` | `{项目根}/.agent/settings.json` | project **字段级覆盖** user |
+| `AGENTS.md` | `~/.agent/AGENTS.md` | `{项目根}/AGENTS.md` 或 `{项目根}/.agent/AGENTS.md` | project **完全替代** user |
+
+### settings.json 配置模板
+
+```json
+{
+  "llm_levels": {
+    "LOW": "openai:gpt-4o-mini",
+    "MID": "openai:gpt-4o",
+    "HIGH": "anthropic:claude-opus-4-5"
+  },
+  "llm_levels_base_url": {
+    "LOW": "http://192.168.100.1:4141/v1",
+    "MID": null,
+    "HIGH": "https://api.anthropic.com"
+  }
+}
+```
+
+**说明**：
+- `llm_levels`：三档模型配置，格式为 `"provider:model"`（`provider` 可选：`openai`、`anthropic`、`google`）
+- `llm_levels_base_url`：可选，为每档模型指定 base_url（`null` 表示使用默认）
+- **优先级**（从高到低）：代码参数 `llm_levels=` > project settings.json > user settings.json > 环境变量 > 默认值
+
+#### 字段级覆盖示例
+
+假设你有：
+
+**`~/.agent/settings.json`（user 级）**：
+```json
+{
+  "llm_levels": {
+    "LOW": "openai:gpt-4o-mini",
+    "MID": "openai:gpt-4o",
+    "HIGH": "openai:gpt-4o"
+  },
+  "llm_levels_base_url": {
+    "LOW": "http://192.168.100.1:4141/v1"
+  }
+}
+```
+
+**`{项目根}/.agent/settings.json`（project 级）**：
+```json
+{
+  "llm_levels": {
+    "HIGH": "anthropic:claude-opus-4-5"
+  }
+}
+```
+
+**最终生效**：
+- `llm_levels`：project 的 `llm_levels` **完全覆盖** user（只有 `HIGH` 生效，`LOW` 和 `MID` 消失）
+- `llm_levels_base_url`：project 未定义，回退到 user 的配置
+
+### AGENTS.md 加载规则
+
+`AGENTS.md` 是用于写入 Agent 背景指令的 Markdown 文件，会被自动注入到 `memory`（类似 system prompt，但不计入 prompt token 限制）。
+
+**搜索路径**（按优先级）：
+
+1. **Project 级**（任一存在即生效）：
+   - `{项目根}/AGENTS.md`
+   - `{项目根}/.agent/AGENTS.md`
+
+2. **User 级**（仅当 project 级不存在时 fallback）：
+   - `~/.agent/AGENTS.md`
+
+**重要规则**：
+- 当 project 级存在任何 `AGENTS.md` 时，user 级会被**完全忽略**（不会合并）
+- 只有在 project 级完全不存在时，才会 fallback 到 user 级
+- 如果用户代码手动指定了 `memory=...`，则不会自动加载任何 `AGENTS.md`
+
+#### AGENTS.md 示例
+
+**`~/.agent/AGENTS.md`（user 级，全局指令）**：
+```markdown
+# 全局 Agent 规则
+
+- 所有代码必须使用 f-string
+- 必须使用 logging 模块，禁止 print
+```
+
+**`{项目根}/.agent/AGENTS.md`（project 级，项目特定指令）**：
+```markdown
+# 本项目 Agent 规则
+
+这是一个 Django 项目，请遵循：
+- 使用 Django ORM 查询数据库
+- 在 views.py 中编写视图函数
+- 测试文件放在 tests/ 目录
+```
+
+### 控制配置加载：`setting_sources`
+
+你可以在代码中显式控制加载哪些配置：
+
+```python
+from bu_agent_sdk import Agent
+
+# 默认：加载 user 和 project 两层
+agent = Agent(llm=..., setting_sources=("user", "project"))
+
+# 只加载 project 级配置
+agent = Agent(llm=..., setting_sources=("project",))
+
+# 只加载 user 级配置
+agent = Agent(llm=..., setting_sources=("user",))
+
+# 完全不加载配置文件（向后兼容模式）
+agent = Agent(llm=..., setting_sources=None)
+```
+
+**注意**：`setting_sources` 同时控制 `settings.json` 和 `AGENTS.md` 的加载范围。
+
 ## 快速上手：Claude Code 风格（系统工具 + 显式 done + Session）
 
 下面这个最小示例具备：
@@ -266,6 +388,51 @@ timeout: 60
 
 你是一个研究员，输出需要结构化、可复用。
 ```
+
+### Subagent 模型配置
+
+Subagent 支持两种方式指定使用的 LLM 模型：
+
+#### 1. 使用档位 (level)
+
+推荐使用档位来控制模型性能和成本：
+
+```yaml
+---
+name: quick-helper
+description: 快速助手
+level: LOW      # 使用低档位（快速、便宜）
+---
+```
+
+支持的档位：
+- `LOW`: 快速模型（如 haiku）
+- `MID`: 标准模型（如 sonnet）
+- `HIGH`: 高性能模型（如 opus）
+
+#### 2. 使用别名 (model)
+
+也可以使用别名直接指定：
+
+```yaml
+---
+name: expert
+description: 专家
+model: opus     # 使用opus模型
+---
+```
+
+支持的别名：
+- `sonnet`: 映射到MID档位
+- `opus`: 映射到HIGH档位
+- `haiku`: 映射到LOW档位
+- `inherit`: 继承父agent（等同于不指定）
+
+#### 3. 默认行为
+
+如果不指定 `model` 或 `level`，subagent 将继承父 agent 的模型。
+
+**注意**: 不支持直接指定完整的模型名称（如 `model: gpt-4o`），仅支持上述别名。
 
 启动后（只要项目里发现了 subagents），主 Agent 会自动注入 `Task` 工具，模型即可调用：
 

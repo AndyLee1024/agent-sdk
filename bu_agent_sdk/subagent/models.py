@@ -75,6 +75,14 @@ class AgentDefinition:
                 model = model.strip()
                 if not model or model.lower() == "inherit":
                     model = None
+                elif model.lower() not in ("sonnet", "opus", "haiku"):
+                    # 警告：不支持的model值
+                    logging.warning(
+                        f"Subagent '{frontmatter.get('name')}': "
+                        f"不支持的model值 '{model}'。仅支持：sonnet/opus/haiku/inherit。"
+                        f"该值将被忽略。"
+                    )
+                    model = None  # 忽略无效值
             init_kwargs["model"] = model
 
         if "level" in frontmatter:

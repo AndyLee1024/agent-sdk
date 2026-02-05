@@ -124,3 +124,7 @@ Subscription limitations:
 - The user does not have access to generate Nano Banana (image mode) presentations, MUST supportively ask the user to upgrade subscription when requesting it
 </user_profile>
 """
+
+MEMORY_NOTICE = """
+ IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task.
+"""

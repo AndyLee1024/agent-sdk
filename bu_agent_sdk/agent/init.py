@@ -86,10 +86,43 @@ def agent_post_init(agent: "Agent") -> None:
     # Generate session_id (uuid by default)
     agent._session_id = agent.session_id or str(uuid.uuid4())
 
+    # ====== Settings 配置加载 ======
+    from bu_agent_sdk.agent.settings import discover_agents_md, discover_user_agents_md, resolve_settings
+
+    settings = resolve_settings(
+        sources=agent.setting_sources,
+        project_root=agent.project_root,
+    )
+
+    # AGENTS.md 自动发现 → 注入 memory（用户未手动设置 memory 时）
+    # 优先级：project > user（project 有则忽略 user）
+    if agent.setting_sources and agent.memory is None:
+        agents_md_files: list[Path] = []
+        source_used: str | None = None
+
+        # 尝试 project 级 AGENTS.md
+        if "project" in agent.setting_sources:
+            agents_md_files = discover_agents_md(agent.project_root)
+            if agents_md_files:
+                source_used = "project"
+
+        # project 未找到时，fallback 到 user 级
+        if not agents_md_files and "user" in agent.setting_sources:
+            agents_md_files = discover_user_agents_md()
+            if agents_md_files:
+                source_used = "user"
+
+        # 找到任何文件就注入 memory
+        if agents_md_files and source_used:
+            from bu_agent_sdk.context.memory import MemoryConfig
+
+            agent.memory = MemoryConfig(files=agents_md_files)
+            logger.info(f"自动发现 {source_used} AGENTS.md，注入 memory: {agents_md_files}")
+
     # Resolve LLM levels (LOW/MID/HIGH)
     from bu_agent_sdk.agent.llm_levels import resolve_llm_levels
 
-    agent.llm_levels = resolve_llm_levels(explicit=agent.llm_levels)  # type: ignore[assignment]
+    agent.llm_levels = resolve_llm_levels(explicit=agent.llm_levels, settings=settings)  # type: ignore[assignment]
 
     # Resolve main LLM:
     # llm= instance > level=档位 > 默认 MID
