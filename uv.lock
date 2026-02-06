@@ -203,7 +203,7 @@ wheels = [
 ]
 
 [[package]]
-name = "bu-agent-sdk"
+name = "comate-agent-sdk"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

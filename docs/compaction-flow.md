@@ -17,7 +17,7 @@
 ## 压缩触发条件
 
 ```python
-# bu_agent_sdk/agent/service.py:679-720
+# comate_agent_sdk/agent/service.py:679-720
 async def _check_and_compact(self, response: ChatInvokeCompletion) -> bool:
     # 1. 更新 token 使用量
     self._compaction_service.update_usage(response.usage)
@@ -93,7 +93,7 @@ Agent.query()
 ### 1. ContextIR 核心结构
 
 ```python
-# bu_agent_sdk/context/ir.py
+# comate_agent_sdk/context/ir.py
 @dataclass
 class ContextIR:
     """上下文中间表示"""
@@ -134,7 +134,7 @@ class ContextItem:
 ### 2. 发送给 LLM 的数据结构
 
 ```python
-# bu_agent_sdk/agent/compaction/service.py:173-179
+# comate_agent_sdk/agent/compaction/service.py:173-179
 prepared_messages = [
     # 原 conversation 中的消息
     UserMessage("帮我实现一个功能"),
@@ -151,7 +151,7 @@ prepared_messages = [
 ### 3. DEFAULT_SUMMARY_PROMPT
 
 ```python
-# bu_agent_sdk/agent/compaction/models.py:16-45
+# comate_agent_sdk/agent/compaction/models.py:16-45
 DEFAULT_SUMMARY_PROMPT = """You have been working on the task described above but have not yet completed it. Write a continuation summary that will allow you (or another instance of yourself) to resume work efficiently in a future context window where the conversation history will be replaced with this summary. Your summary should be structured, concise, and actionable. Include:
 
 1. Task Overview
@@ -193,7 +193,7 @@ Wrap your summary in <summary></summary> tags."""
 按类型优先级从低到高逐个压缩：
 
 ```python
-# bu_agent_sdk/context/compaction.py:131-167
+# comate_agent_sdk/context/compaction.py:131-167
 for item_type, _priority in sorted_types:
     rule = self.rules.get(item_type.value)
 
@@ -230,7 +230,7 @@ for item_type, _priority in sorted_types:
 当选择性压缩不足时触发：
 
 ```python
-# bu_agent_sdk/context/compaction.py:194-232
+# comate_agent_sdk/context/compaction.py:194-232
 async def _fallback_full_summary(self, context: ContextIR) -> bool:
     # 1. 提取 conversation 中的底层消息
     conversation_messages = context.conversation_messages
@@ -251,7 +251,7 @@ async def _fallback_full_summary(self, context: ContextIR) -> bool:
 ### 阶段 3: 上下文更新
 
 ```python
-# bu_agent_sdk/context/ir.py:503-513
+# comate_agent_sdk/context/ir.py:503-513
 def replace_conversation(self, items: list[ContextItem]) -> None:
     """替换整个 conversation 段"""
     self.conversation.items = list(items)
@@ -266,7 +266,7 @@ def replace_conversation(self, items: list[ContextItem]) -> None:
 ### 阶段 4: 下次 LLM 调用自动生效
 
 ```python
-# bu_agent_sdk/agent/service.py:543
+# comate_agent_sdk/agent/service.py:543
 messages = self._context.lower()  # 基于修改后的 IR 生成新 messages
 ```
 
@@ -320,14 +320,14 @@ ContextIR
 
 | 功能 | 文件 | 行号 |
 |------|------|------|
-| 压缩检查入口 | `bu_agent_sdk/agent/service.py` | 679-720 |
-| auto_compact 调用 | `bu_agent_sdk/context/ir.py` | 449-477 |
-| 选择性压缩策略 | `bu_agent_sdk/context/compaction.py` | 103-192 |
-| 全量摘要回退 | `bu_agent_sdk/context/compaction.py` | 194-232 |
-| CompactionService | `bu_agent_sdk/agent/compaction/service.py` | 135-195 |
-| 默认摘要 prompt | `bu_agent_sdk/agent/compaction/models.py` | 16-45 |
-| 默认压缩规则 | `bu_agent_sdk/context/compaction.py` | 46-72 |
-| replace_conversation | `bu_agent_sdk/context/ir.py` | 503-513 |
+| 压缩检查入口 | `comate_agent_sdk/agent/service.py` | 679-720 |
+| auto_compact 调用 | `comate_agent_sdk/context/ir.py` | 449-477 |
+| 选择性压缩策略 | `comate_agent_sdk/context/compaction.py` | 103-192 |
+| 全量摘要回退 | `comate_agent_sdk/context/compaction.py` | 194-232 |
+| CompactionService | `comate_agent_sdk/agent/compaction/service.py` | 135-195 |
+| 默认摘要 prompt | `comate_agent_sdk/agent/compaction/models.py` | 16-45 |
+| 默认压缩规则 | `comate_agent_sdk/context/compaction.py` | 46-72 |
+| replace_conversation | `comate_agent_sdk/context/ir.py` | 503-513 |
 
 ---
 

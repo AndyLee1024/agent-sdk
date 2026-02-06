@@ -7,20 +7,20 @@
 ## 完成的步骤
 
 ### ✅ Step 1: 数据结构扩展
-- **文件**: `bu_agent_sdk/context/items.py`
+- **文件**: `comate_agent_sdk/context/items.py`
 - **修改**: ContextItem 新增 `offload_path` 和 `offloaded` 字段
 
 ### ✅ Step 2: 核心模块
-- **文件**: `bu_agent_sdk/context/offload.py`
+- **文件**: `comate_agent_sdk/context/offload.py`
   - 实现 `OffloadPolicy` 配置类
-- **文件**: `bu_agent_sdk/context/fs.py`
+- **文件**: `comate_agent_sdk/context/fs.py`
   - 实现 `ContextFileSystem` 核心类
   - 实现 `OffloadedMeta` 元数据类
   - 实现文件系统操作（offload, load, get_placeholder）
   - 实现索引管理
 
 ### ✅ Step 3: Compaction 集成
-- **文件**: `bu_agent_sdk/context/compaction.py`
+- **文件**: `comate_agent_sdk/context/compaction.py`
 - **修改**:
   - SelectiveCompactionPolicy 新增 `fs` 和 `offload_policy` 字段
   - 实现 `_should_offload()` 判断方法
@@ -28,7 +28,7 @@
   - 跳过已 destroyed 的 items（避免与 ephemeral 重复）
 
 ### ✅ Step 4: Ephemeral 协作
-- **文件**: `bu_agent_sdk/agent/service.py`
+- **文件**: `comate_agent_sdk/agent/service.py`
 - **修改**:
   - 移除 `_destroy_ephemeral_messages` 中的直接文件写入逻辑
   - 替换为调用 ContextFileSystem.offload()
@@ -36,14 +36,14 @@
 
 ### ✅ Step 5: Serializer 修改
 - **文件**:
-  - `bu_agent_sdk/llm/messages.py`: ToolMessage 新增字段
-  - `bu_agent_sdk/llm/anthropic/serializer.py`
-  - `bu_agent_sdk/llm/openai/serializer.py`
-  - `bu_agent_sdk/llm/google/serializer.py`
+  - `comate_agent_sdk/llm/messages.py`: ToolMessage 新增字段
+  - `comate_agent_sdk/llm/anthropic/serializer.py`
+  - `comate_agent_sdk/llm/openai/serializer.py`
+  - `comate_agent_sdk/llm/google/serializer.py`
 - **修改**: destroyed 时检查 offload_path，显示完整路径
 
 ### ✅ Step 6: AgentService 集成
-- **文件**: `bu_agent_sdk/agent/service.py`
+- **文件**: `comate_agent_sdk/agent/service.py`
 - **修改**:
   - 新增配置字段：`offload_enabled`, `offload_token_threshold`, `offload_root_path`, `ephemeral_keep_recent`
   - 新增内部字段：`_context_fs`, `_session_id`
@@ -52,7 +52,7 @@
   - 在 `_check_and_compact` 中创建 OffloadPolicy 并传递给压缩策略
 
 ### ✅ Step 7: 导出新组件
-- **文件**: `bu_agent_sdk/context/__init__.py`
+- **文件**: `comate_agent_sdk/context/__init__.py`
 - **修改**: 导出 `ContextFileSystem`, `OffloadedMeta`, `OffloadPolicy`
 
 ## 测试结果

@@ -1,4 +1,4 @@
-# bu-agent-sdk
+# comate-agent-sdk
 
 一个用于构建 Agent（工具调用 + for-loop）的 Python SDK。它强调“行动空间完整 + 显式退出 + 上下文工程”，同时尽量保持 API 简洁、可维护、可扩展。
 
@@ -20,7 +20,7 @@
 ### 作为依赖接入（推荐）
 
 ```bash
-uv add bu-agent-sdk
+uv add comate-agent-sdk
 ```
 
 ### 在本仓库开发
@@ -41,12 +41,12 @@ OPENAI_API_KEY=...
 如果你要使用内置 `WebFetch`（系统工具），它会调用 `llm_levels["LOW"]`，推荐你显式配置三档模型，避免默认落到 Anthropic：
 
 ```bash
-BU_AGENT_SDK_LLM_LOW="openai:gpt-4o-mini"
-BU_AGENT_SDK_LLM_MID="openai:gpt-4o"
-BU_AGENT_SDK_LLM_HIGH="openai:gpt-4o"
-BU_AGENT_SDK_LLM_LOW_BASE_URL="http://192.168.100.1:4141/v1"
-BU_AGENT_SDK_LLM_MID_BASE_URL="http://192.168.100.1:4142/v1"
-BU_AGENT_SDK_LLM_HIGH_BASE_URL="http://192.168.100.1:4143/v1"
+COMATE_AGENT_SDK_LLM_LOW="openai:gpt-4o-mini"
+COMATE_AGENT_SDK_LLM_MID="openai:gpt-4o"
+COMATE_AGENT_SDK_LLM_HIGH="openai:gpt-4o"
+COMATE_AGENT_SDK_LLM_LOW_BASE_URL="http://192.168.100.1:4141/v1"
+COMATE_AGENT_SDK_LLM_MID_BASE_URL="http://192.168.100.1:4142/v1"
+COMATE_AGENT_SDK_LLM_HIGH_BASE_URL="http://192.168.100.1:4143/v1"
 ```
 
 ## 配置文件：settings.json 和 AGENTS.md
@@ -154,8 +154,8 @@ SDK 支持通过配置文件管理 LLM 配置和 Agent 指令，分为 **user �
 你可以在代码中显式控制加载哪些配置：
 
 ```python
-from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import ComateAgentOptions
 
 # 默认：加载 user 和 project 两层
 agent = Agent(llm=..., options=ComateAgentOptions(setting_sources=("user", "project")))
@@ -260,8 +260,8 @@ SDK 支持通过 MCP（Model Context Protocol）接入外部工具生态。MCP t
 你也可以直接在代码里传 `mcp_servers`（会覆盖默认文件发现逻辑）：
 
 ```python
-from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import ComateAgentOptions
 
 agent = Agent(
     llm=...,
@@ -277,9 +277,9 @@ agent = Agent(
 或者传一个配置文件路径：
 
 ```python
-from bu_agent_sdk import Agent
+from comate_agent_sdk import Agent
 
-from bu_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import ComateAgentOptions
 
 agent = Agent(llm=..., options=ComateAgentOptions(mcp_servers="/abs/path/to/.mcp.json", tools=[...]))
 ```
@@ -299,9 +299,9 @@ agent = Agent(llm=..., options=ComateAgentOptions(mcp_servers="/abs/path/to/.mcp
 import asyncio
 import logging
 
-from bu_agent_sdk import Agent, create_sdk_mcp_server, mcp_tool
-from bu_agent_sdk.agent import ComateAgentOptions
-from bu_agent_sdk.llm import ChatOpenAI
+from comate_agent_sdk import Agent, create_sdk_mcp_server, mcp_tool
+from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.llm import ChatOpenAI
 
 logging.basicConfig(level=logging.INFO)
 
@@ -357,7 +357,7 @@ uv run python your_script.py
 
 ### 系统工具依赖（按工具）
 
-> 说明：Python 包依赖会由 `uv sync` / `uv add bu-agent-sdk` 自动安装；外部命令依赖需要你在系统层安装。
+> 说明：Python 包依赖会由 `uv sync` / `uv add comate-agent-sdk` 自动安装；外部命令依赖需要你在系统层安装。
 
 | 工具 | 依赖 | 缺失时行为 | 备注 |
 |---|---|---|---|
@@ -376,10 +376,10 @@ uv run python your_script.py
 import asyncio
 import logging
 
-from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import ComateAgentOptions, SessionInitEvent, StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
-from bu_agent_sdk.llm import ChatOpenAI
-from bu_agent_sdk.tools import get_default_registry
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import ComateAgentOptions, SessionInitEvent, StopEvent, TextEvent, ToolCallEvent, ToolResultEvent
+from comate_agent_sdk.llm import ChatOpenAI
+from comate_agent_sdk.tools import get_default_registry
 
 logging.basicConfig(level=logging.INFO)
 
@@ -452,7 +452,7 @@ uv run python your_script.py
 ```python
 from typing import Annotated
 
-from bu_agent_sdk import Depends, tool
+from comate_agent_sdk import Depends, tool
 
 
 def get_db() -> "Database":
@@ -509,7 +509,7 @@ session.clear_history()
 ### 1) 自动压缩（Compaction）
 
 ```python
-from bu_agent_sdk.agent import ComateAgentOptions, CompactionConfig
+from comate_agent_sdk.agent import ComateAgentOptions, CompactionConfig
 
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
@@ -529,7 +529,7 @@ agent = Agent(
 常用配置：
 
 ```python
-from bu_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import ComateAgentOptions
 
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
@@ -545,7 +545,7 @@ agent = Agent(
 ### 3) Ephemeral（工具输出只保留最近 N 条）
 
 ```python
-from bu_agent_sdk import tool
+from comate_agent_sdk import tool
 
 
 @tool("读取大文件（只保留最近 2 次输出）", ephemeral=2)
@@ -695,24 +695,24 @@ summary = await agent.get_usage()
 ### 计算成本（需要拉取定价并缓存）
 
 - 代码层：`Agent(options=ComateAgentOptions(include_cost=True, ...))`
-- 或环境变量：`bu_agent_sdk_CALCULATE_COST=true`
+- 或环境变量：`comate_agent_sdk_CALCULATE_COST=true`
 
-定价数据会缓存到 `XDG_CACHE_HOME`（默认 `~/.cache/bu_agent_sdk/token_cost/`）。
+定价数据会缓存到 `XDG_CACHE_HOME`（默认 `~/.cache/comate_agent_sdk/token_cost/`）。
 
 ## 示例代码
 
 仓库内已有更完整示例：
 
-- `bu_agent_sdk/examples/claude_code.py`：Claude Code 风格（沙盒文件系统 + 依赖注入）
-- `bu_agent_sdk/examples/chat_session_repl.py`：Session REPL
-- `bu_agent_sdk/examples/chat_session_repl_fork.py`：Session 分叉 REPL
-- `bu_agent_sdk/examples/subagent_example.py`：Subagent 示例
-- `bu_agent_sdk/examples/dependency_injection.py`：依赖注入示例
+- `comate_agent_sdk/examples/claude_code.py`：Claude Code 风格（沙盒文件系统 + 依赖注入）
+- `comate_agent_sdk/examples/chat_session_repl.py`：Session REPL
+- `comate_agent_sdk/examples/chat_session_repl_fork.py`：Session 分叉 REPL
+- `comate_agent_sdk/examples/subagent_example.py`：Subagent 示例
+- `comate_agent_sdk/examples/dependency_injection.py`：依赖注入示例
 
 运行（示例）：
 
 ```bash
-uv run python bu_agent_sdk/examples/claude_code.py
+uv run python comate_agent_sdk/examples/claude_code.py
 ```
 
 ## 许可证

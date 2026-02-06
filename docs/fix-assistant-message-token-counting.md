@@ -14,7 +14,7 @@
 
 ### Bug 详情
 
-**位置：** `bu_agent_sdk/context/ir.py:282-283`
+**位置：** `comate_agent_sdk/context/ir.py:282-283`
 
 **问题代码：**
 ```python
@@ -48,7 +48,7 @@ token_count = self.token_counter.count(content_text)
 
 ### 核心修改
 
-**文件：** `bu_agent_sdk/context/ir.py`
+**文件：** `comate_agent_sdk/context/ir.py`
 
 **修改内容：** 在 `add_message()` 方法中添加对 AssistantMessage 的特殊处理
 
@@ -95,7 +95,7 @@ token_count = self.token_counter.count(content_text)
 
 ### 单元测试
 
-创建了完整的测试套件：`bu_agent_sdk/context/tests/test_assistant_message_tokens.py`
+创建了完整的测试套件：`comate_agent_sdk/context/tests/test_assistant_message_tokens.py`
 
 **测试用例：**
 1. ✅ 只有文本的 AssistantMessage
@@ -108,17 +108,17 @@ token_count = self.token_counter.count(content_text)
 **测试结果：** 全部通过 ✅
 
 ```
-bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_multiple_tool_calls PASSED
-bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_only_text_counts_text_tokens PASSED
-bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_only_tool_calls_counts_tool_call_tokens PASSED
-bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_text_and_tool_calls_counts_both PASSED
-bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_budget_status_includes_assistant_message_tokens PASSED
-bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_messages_category_appears_in_context_info PASSED
+comate_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_multiple_tool_calls PASSED
+comate_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_only_text_counts_text_tokens PASSED
+comate_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_only_tool_calls_counts_tool_call_tokens PASSED
+comate_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_assistant_message_with_text_and_tool_calls_counts_both PASSED
+comate_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_budget_status_includes_assistant_message_tokens PASSED
+comate_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessageTokenCounting::test_messages_category_appears_in_context_info PASSED
 ```
 
 ### 验证脚本
 
-创建了实际测试脚本：`bu_agent_sdk/examples/verify_token_fix.py`
+创建了实际测试脚本：`comate_agent_sdk/examples/verify_token_fix.py`
 
 **验证结果：**
 ```
@@ -138,8 +138,8 @@ bu_agent_sdk/context/tests/test_assistant_message_tokens.py::TestAssistantMessag
 
 运行了所有现有测试，确保没有破坏现有功能：
 
-- ✅ `bu_agent_sdk/context/tests/` - 6 个测试通过
-- ✅ `bu_agent_sdk/agent/tests/` - 8 个测试通过
+- ✅ `comate_agent_sdk/context/tests/` - 6 个测试通过
+- ✅ `comate_agent_sdk/agent/tests/` - 8 个测试通过
 
 ## 修复效果
 
@@ -223,17 +223,17 @@ token_count = self.token_counter.count(content_text)
 ## 相关文件
 
 ### 核心修改
-- `bu_agent_sdk/context/ir.py` - 修复 token 统计逻辑
+- `comate_agent_sdk/context/ir.py` - 修复 token 统计逻辑
 
 ### 测试文件
-- `bu_agent_sdk/context/tests/test_assistant_message_tokens.py` - 单元测试
-- `bu_agent_sdk/examples/verify_token_fix.py` - 验证脚本
+- `comate_agent_sdk/context/tests/test_assistant_message_tokens.py` - 单元测试
+- `comate_agent_sdk/examples/verify_token_fix.py` - 验证脚本
 
 ### 相关代码
-- `bu_agent_sdk/llm/messages.py` - AssistantMessage/ToolCall 定义
-- `bu_agent_sdk/context/budget.py` - TokenCounter
-- `bu_agent_sdk/context/formatter.py` - /context 格式化输出
-- `bu_agent_sdk/tokens/service.py` - /usage 统计
+- `comate_agent_sdk/llm/messages.py` - AssistantMessage/ToolCall 定义
+- `comate_agent_sdk/context/budget.py` - TokenCounter
+- `comate_agent_sdk/context/formatter.py` - /context 格式化输出
+- `comate_agent_sdk/tokens/service.py` - /usage 统计
 
 ## 结论
 

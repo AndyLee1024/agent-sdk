@@ -3,14 +3,14 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "bu-agent-sdk"
+name = "comate-agent-sdk"
 version = "0.0.1"
 description = "An agent is just a for-loop. The simplest possible agent framework."
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
-    { name = "Browser Use", email = "hello@browser-use.com" }
+    { name = "Andy", email = "andy.dev@aliyun.com" }
 ]
 keywords = ["agent", "llm", "ai", "tool-calling", "anthropic", "openai", "google"]
 classifiers = [
@@ -49,16 +49,16 @@ observability = ["lmnr>=0.4.0"]
 context = ["tiktoken>=0.5.0"]
 
 [project.urls]
-Homepage = "https://github.com/browser-use/bu-agent-sdk"
-Documentation = "https://github.com/browser-use/bu-agent-sdk#readme"
-Repository = "https://github.com/browser-use/bu-agent-sdk"
+Homepage = "https://github.com/AndyLee1024/agent-sdk"
+Documentation = "https://github.com/AndyLee1024/agent-sdk#readme"
+Repository = "https://github.com/AndyLee1024/agent-sdk"
 
 [tool.hatch.build.targets.wheel]
-packages = ["bu_agent_sdk"]
+packages = ["comate_agent_sdk"]
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "/bu_agent_sdk",
+    "/comate_agent_sdk",
     "/examples",
     "/README.md",
     "/LICENSE",

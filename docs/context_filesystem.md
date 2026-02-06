@@ -8,10 +8,10 @@ Context FileSystem 实现了将大型上下文内容卸载到文件系统的功�
 
 ### 核心组件
 
-- **ContextFileSystem** (`bu_agent_sdk/context/fs.py`): 负责文件系统操作
-- **OffloadPolicy** (`bu_agent_sdk/context/offload.py`): 配置卸载策略
-- **ContextItem扩展** (`bu_agent_sdk/context/items.py`): 新增 `offloaded`, `offload_path` 字段
-- **ToolMessage扩展** (`bu_agent_sdk/llm/messages.py`): 新增 `offloaded`, `offload_path` 字段
+- **ContextFileSystem** (`comate_agent_sdk/context/fs.py`): 负责文件系统操作
+- **OffloadPolicy** (`comate_agent_sdk/context/offload.py`): 配置卸载策略
+- **ContextItem扩展** (`comate_agent_sdk/context/items.py`): 新增 `offloaded`, `offload_path` 字段
+- **ToolMessage扩展** (`comate_agent_sdk/llm/messages.py`): 新增 `offloaded`, `offload_path` 字段
 
 ### 协作关系
 
@@ -28,9 +28,9 @@ Ephemeral 机制 ──────► Context FileSystem
 ### 1. Agent 配置
 
 ```python
-from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import ComateAgentOptions
-from bu_agent_sdk.llm import ChatAnthropic
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.llm import ChatAnthropic
 
 agent = Agent(
     llm=ChatAnthropic(),
@@ -51,7 +51,7 @@ agent = Agent(
 ### 2. Ephemeral 工具定义
 
 ```python
-from bu_agent_sdk.tools import tool
+from comate_agent_sdk.tools import tool
 
 @tool("读取大文件", ephemeral=3)  # 保留最近 3 个输出
 async def read_large_file(path: str) -> str:
@@ -177,10 +177,10 @@ SelectiveCompactionPolicy.compact()
 ## 示例：完整工作流
 
 ```python
-from bu_agent_sdk import Agent
-from bu_agent_sdk.agent import ComateAgentOptions
-from bu_agent_sdk.llm import ChatAnthropic
-from bu_agent_sdk.tools import tool
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.llm import ChatAnthropic
+from comate_agent_sdk.tools import tool
 
 @tool("读取文件", ephemeral=2)
 async def read_file(path: str) -> str:
@@ -220,7 +220,7 @@ for item in agent._context.conversation.items:
 ```bash
 # 基本功能测试
 uv run python -c "
-from bu_agent_sdk.context import ContextFileSystem, OffloadPolicy
+from comate_agent_sdk.context import ContextFileSystem, OffloadPolicy
 print('✓ Import successful')
 "
 
