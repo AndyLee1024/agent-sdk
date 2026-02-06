@@ -604,12 +604,24 @@ class Agent:
             self._apply_mcp_tools_to_agent(mcp_tools)
 
             # 3) 注入 ContextIR header（只注入概览；schema 存 metadata）
-            overview = manager.build_overview_text()
-            meta = manager.build_metadata()
-            try:
-                self._context.set_mcp_tools(overview, metadata=meta)
-            except Exception as e:
-                logger.warning(f"注入 MCP tools 到 ContextIR 失败：{e}")
+            if mcp_tools:
+                overview = manager.build_overview_text()
+                meta = manager.build_metadata()
+                try:
+                    self._context.set_mcp_tools(overview, metadata=meta)
+                except Exception as e:
+                    logger.warning(f"注入 MCP tools 到 ContextIR 失败：{e}")
+            else:
+                # 没有 MCP 工具时，确保清除旧的 header
+                try:
+                    self._context.remove_mcp_tools()
+                except Exception:
+                    pass
+                if servers:
+                    logger.warning(
+                        f"配置了 {len(servers)} 个 MCP server，但未加载到任何工具。"
+                        "请检查 server 连接状态。"
+                    )
 
             # 4) 若 tools allowlist 模式且有 pending 名称，尝试补全
             if self._tools_allowlist_mode and self._mcp_pending_tool_names:
@@ -639,6 +651,26 @@ class Agent:
 
             # 5) 重建 tool_map（用于执行阶段查找）
             self._tool_map = {t.name: t for t in self.tools if isinstance(t, Tool)}  # type: ignore[arg-type]
+
+            # 验证 tools 与 _tool_map 一致性
+            tool_names_from_list = {t.name for t in self.tools if isinstance(t, Tool)}  # type: ignore[arg-type]
+            tool_names_from_map = set(self._tool_map.keys())
+            if tool_names_from_list != tool_names_from_map:
+                logger.error(
+                    f"工具一致性检查失败！tools={len(tool_names_from_list)}, "
+                    f"_tool_map={len(tool_names_from_map)}, "
+                    f"差异={tool_names_from_list ^ tool_names_from_map}"
+                )
+
+            # 记录 MCP 工具加载结果
+            mcp_tool_names = [
+                t.name
+                for t in self.tools  # type: ignore[arg-type]
+                if isinstance(t, Tool) and getattr(t, "_comate_agent_sdk_mcp_tool", False)
+            ]
+            logger.info(f"MCP 工具加载完成：共 {len(mcp_tool_names)} 个工具")
+            if mcp_tool_names:
+                logger.debug(f"MCP 工具列表: {mcp_tool_names}")
 
             self._mcp_manager = manager
             self._mcp_loaded = True
@@ -675,6 +707,13 @@ class Agent:
             if not (isinstance(t, Tool) and getattr(t, "_comate_agent_sdk_mcp_tool", False) is True)
         ]
 
+        logger.debug(
+            f"_apply_mcp_tools_to_agent: "
+            f"base_tools={len(base_tools)}, "
+            f"mcp_tools={len(mcp_tools)}, "
+            f"allowlist_mode={self._tools_allowlist_mode}"
+        )
+
         if self._tools_allowlist_mode:
             # allowlist：不自动加全量 MCP tools，只在 pending 或用户后续显式解析时添加
             self.tools[:] = base_tools  # type: ignore[index]
@@ -686,4 +725,7 @@ class Agent:
         for t in mcp_tools:
             if t.name not in existing_names:
                 merged.append(t)
+
+        logger.debug(f"合并后工具数量: {len(merged)}")
         self.tools[:] = merged  # type: ignore[index]
+        logger.debug(f"赋值后 self.tools 数量: {len(self.tools)}")

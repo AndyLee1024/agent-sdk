@@ -282,6 +282,10 @@ class McpManager:
         init_done = self._init_done
         self._exit_stack = AsyncExitStack()
 
+        # 跟踪 server 加载状态
+        success_servers: list[str] = []
+        failed_servers: list[tuple[str, str]] = []
+
         try:
             for alias, cfg in self._servers.items():
                 try:
@@ -306,14 +310,23 @@ class McpManager:
                         )
                         self._tool_info_by_mapped[mapped] = info
 
+                    success_servers.append(alias)
                     logger.info(f"已加载 MCP server={alias} tools={len(tool_list)}")
                 except Exception as e:
+                    failed_servers.append((alias, str(e)))
                     logger.warning(f"MCP server 连接/加载失败，已跳过：{alias}：{e}")
 
             self._tools = [
                 self._build_tool(mapped, info)
                 for mapped, info in self._tool_info_by_mapped.items()
             ]
+
+            # 检查配置了 server 但没有加载到工具的情况
+            if self._servers and not self._tools:
+                logger.warning(
+                    f"MCP 配置了 {len(self._servers)} 个 server，但没有加载到任何工具。"
+                    f"成功: {success_servers}, 失败: {failed_servers}"
+                )
 
             if init_done is not None and not init_done.done():
                 init_done.set_result(None)

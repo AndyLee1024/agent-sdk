@@ -33,10 +33,22 @@ async def execute_tool_call(agent: "Agent", tool_call: ToolCall) -> ToolMessage:
     tool = agent._tool_map.get(tool_name)
 
     if tool is None:
+        # 收集诊断信息
+        available_tools = list(agent._tool_map.keys())
+        mcp_tools_available = [t for t in available_tools if t.startswith("mcp__")]
+
+        error_msg = f"Error: Unknown tool '{tool_name}'."
+        if tool_name.startswith("mcp__"):
+            if mcp_tools_available:
+                error_msg += f" Available MCP tools: {mcp_tools_available}"
+            else:
+                error_msg += " No MCP tools are currently loaded. Check MCP server connection."
+
+        logger.warning(f"工具执行失败: {error_msg}")
         return ToolMessage(
             tool_call_id=tool_call.id,
             tool_name=tool_name,
-            content=f"Error: Unknown tool '{tool_name}'",
+            content=error_msg,
             is_error=True,
         )
 

@@ -446,15 +446,62 @@ class ChatSession:
         self._offload_root = self._storage_root / "offload"
         self._context_jsonl = self._storage_root / "context.jsonl"
 
+        # 深拷贝可变类型参数，避免与原 agent 共享引用
+        # dataclass.replace() 只做浅拷贝，所有可变对象（list/dict/set）都会被共享
+        # 这会导致新 agent 的修改影响原 agent，引发各种问题
+
+        # 1. tools (list) - 新 agent 会添加 MCP/Skill 工具
+        tools_copy = (
+            list(self._template_agent.options.tools)
+            if self._template_agent.options.tools is not None
+            else None
+        )
+
+        # 2. tool_registry (object) - 新 agent 会 register/unregister 工具
+        # 需要创建独立的 registry，并拷贝原 registry 的所有工具
+        tool_registry_copy = None
+        if self._template_agent.options.tool_registry is not None:
+            from comate_agent_sdk.tools import ToolRegistry
+
+            tool_registry_copy = ToolRegistry()
+            # 拷贝原 registry 的所有工具
+            try:
+                for tool in self._template_agent.options.tool_registry.all():  # type: ignore[attr-defined]
+                    if tool.name not in tool_registry_copy:
+                        tool_registry_copy.register(tool)
+            except Exception:
+                # 如果拷贝失败，使用新的空 registry
+                tool_registry_copy = ToolRegistry()
+
+        # 3. agents (list) - 可能在 init 中被修改（merged）
+        agents_copy = (
+            list(self._template_agent.options.agents)
+            if self._template_agent.options.agents is not None
+            else None
+        )
+
+        # 4. llm_retryable_status_codes (set) - 虽然通常不修改，但为了一致性也拷贝
+        status_codes_copy = set(self._template_agent.options.llm_retryable_status_codes)
+
         session_options = replace(
             self._template_agent.options,
             session_id=self.session_id,
             offload_root_path=str(self._offload_root),
+            tools=tools_copy,
+            tool_registry=tool_registry_copy,
+            agents=agents_copy,
+            llm_retryable_status_codes=status_codes_copy,
         )
         self._agent = replace(
             self._template_agent,
             options=session_options,
         )
+
+        # 手动继承原 agent 的 _tools_allowlist_mode 状态
+        # 因为 dataclass.replace() 会重新执行 __post_init__，导致该状态被重新计算
+        # 但我们需要保持与原 agent 一致的行为模式
+        if hasattr(self._template_agent, "_tools_allowlist_mode"):
+            self._agent._tools_allowlist_mode = self._template_agent._tools_allowlist_mode
 
         self._closed = False
         self._turn_number = 0
