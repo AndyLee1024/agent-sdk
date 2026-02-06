@@ -446,10 +446,14 @@ class ChatSession:
         self._offload_root = self._storage_root / "offload"
         self._context_jsonl = self._storage_root / "context.jsonl"
 
-        self._agent = replace(
-            self._template_agent,
+        session_options = replace(
+            self._template_agent.options,
             session_id=self.session_id,
             offload_root_path=str(self._offload_root),
+        )
+        self._agent = replace(
+            self._template_agent,
+            options=session_options,
         )
 
         self._closed = False

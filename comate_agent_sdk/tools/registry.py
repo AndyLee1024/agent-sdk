@@ -6,6 +6,8 @@ import logging
 
 from comate_agent_sdk.tools.decorator import Tool
 
+logger = logging.getLogger(__name__)
+
 
 class ToolRegistry:
     """全局工具注册表
@@ -27,11 +29,11 @@ class ToolRegistry:
             ValueError: 如果工具名称已存在
         """
         if tool.name in self._tools:
-            logging.warning(
+            logger.warning(
                 f"Tool '{tool.name}' already registered, overwriting with new definition"
             )
         self._tools[tool.name] = tool
-        logging.debug(f"Registered tool: {tool.name}")
+        logger.debug(f"Registered tool: {tool.name}")
 
     def get(self, name: str) -> Tool:
         """根据名称获取工具
@@ -63,7 +65,7 @@ class ToolRegistry:
             if name in self._tools:
                 tools.append(self._tools[name])
             else:
-                logging.warning(f"Tool '{name}' not found in registry, skipping")
+                logger.warning(f"Tool '{name}' not found in registry, skipping")
         return tools
 
     def all(self) -> list[Tool]:
@@ -85,13 +87,13 @@ class ToolRegistry:
     def clear(self) -> None:
         """清空注册表"""
         self._tools.clear()
-        logging.debug("Tool registry cleared")
+        logger.debug("Tool registry cleared")
 
     def unregister(self, name: str) -> Tool | None:
         """移除一个工具（若不存在则返回 None）。"""
         tool = self._tools.pop(name, None)
         if tool is not None:
-            logging.debug(f"Unregistered tool: {name}")
+            logger.debug(f"Unregistered tool: {name}")
         return tool
 
     def __len__(self) -> int:

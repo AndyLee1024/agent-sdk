@@ -67,9 +67,21 @@ def _build_model(
 
     api_key 优先级：provider 标准 env var 已设时传 None（让 SDK 自动读），否则使用传入值。
     """
-    # 若 provider 的标准 env var 已设置，优先让 SDK 自动读取，忽略 settings 传入的 api_key
+    # 检查 API key 配置
     env_var_name = _PROVIDER_ENV_VARS.get(provider)
-    effective_api_key = None if (env_var_name and os.getenv(env_var_name)) else api_key
+    env_api_key = os.getenv(env_var_name) if env_var_name else None
+
+    if not env_api_key and not api_key:
+        logger.warning(
+            f"⚠️  {provider.upper()} API key 未配置（level={level}）！\n"
+            f"  解决方式：\n"
+            f"  1. 设置环境变量：export {env_var_name}=your-api-key\n"
+            f"  2. 或在 .agent/settings.json 中添加：\n"
+            f"     \"llm_levels_api_key\": {{\"{level}\": \"your-api-key\"}}"
+        )
+
+    # 若 provider 的标准 env var 已设置，优先让 SDK 自动读取，忽略 settings 传入的 api_key
+    effective_api_key = None if env_api_key else api_key
 
     if provider == "openai":
         from comate_agent_sdk.llm.openai.chat import ChatOpenAI

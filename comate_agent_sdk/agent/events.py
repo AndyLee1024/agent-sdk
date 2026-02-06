@@ -269,6 +269,23 @@ class UserQuestionEvent:
 		return f'❓ Question: {preview} ({count} question{"s" if count > 1 else ""})'
 
 
+@dataclass
+class PreCompactEvent:
+	"""Emitted before context compaction is performed."""
+
+	current_tokens: int
+	"""Current token count before compaction."""
+
+	threshold: int
+	"""The threshold that triggered compaction."""
+
+	trigger: Literal['check', 'precheck']
+	"""Which trigger initiated the compaction: 'check' for post-LLM, 'precheck' for post-tool."""
+
+	def __str__(self) -> str:
+		return f'📦 Pre-compact: {self.current_tokens} tokens (threshold: {self.threshold}, trigger: {self.trigger})'
+
+
 # Union type for all events
 AgentEvent = (
 	SessionInitEvent
@@ -285,4 +302,5 @@ AgentEvent = (
 	| SubagentStopEvent
 	| HiddenUserMessageEvent
 	| UserQuestionEvent
+	| PreCompactEvent
 )

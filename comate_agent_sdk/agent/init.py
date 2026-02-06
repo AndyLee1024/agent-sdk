@@ -60,7 +60,8 @@ def agent_post_init(agent: "Agent") -> None:
         local_registry = ToolRegistry()
         # seed：拷贝 built-in tools（避免后续动态注入污染全局）
         for t in builtin.all():
-            local_registry.register(t)
+            if t.name not in local_registry:
+                local_registry.register(t)
         agent.tool_registry = local_registry
         logger.debug(f"Initialized agent-local registry with {len(local_registry)} built-in tool(s)")
 
@@ -81,10 +82,12 @@ def agent_post_init(agent: "Agent") -> None:
         # 先注册 Tool 实例，保证后续 str 可解析到这些工具
         for item in agent.tools:
             if isinstance(item, Tool):
-                try:
-                    agent.tool_registry.register(item)  # type: ignore[union-attr]
-                except Exception:
-                    logger.debug(f"注册工具失败（忽略覆盖/重复）：{item.name}", exc_info=True)
+                # 检查是否已经注册，避免重复注册警告
+                if item.name not in agent.tool_registry:  # type: ignore[operator]
+                    try:
+                        agent.tool_registry.register(item)  # type: ignore[union-attr]
+                    except Exception:
+                        logger.debug(f"注册工具失败（忽略覆盖/重复）：{item.name}", exc_info=True)
 
         for item in agent.tools:
             if isinstance(item, Tool):

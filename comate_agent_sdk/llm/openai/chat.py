@@ -147,11 +147,6 @@ class ChatOpenAI(BaseChatModel):
                 AsyncOpenAI: An instance of the AsyncOpenAI client.
         """
 
-        os.environ["LANGFUSE_SECRET_KEY"] = "sk-lf-eb718398-0e12-4af2-8aee-cd2d5b516e6d"
-        os.environ["LANGFUSE_PUBLIC_KEY"] = "pk-lf-7c2116ad-fd79-4d84-8e44-bfaf7f591012"
-        os.environ["LANGFUSE_BASE_URL"] = "https://us.cloud.langfuse.com"
-
-
         if self._client is not None:
             return self._client
         client_params = self._get_client_params()

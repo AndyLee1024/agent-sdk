@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from contextlib import AsyncExitStack
@@ -25,6 +26,8 @@ logger = logging.getLogger("comate_agent_sdk.mcp.manager")
 
 _MCP_TOOL_MARKER_ATTR = "_comate_agent_sdk_mcp_tool"
 _MCP_TOOL_MARKER_VALUE = True
+_START_TIMEOUT_S = 10.0
+_SHUTDOWN_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,10 @@ class McpManager:
         self._sessions: dict[str, ClientSession] = {}
         self._tool_info_by_mapped: dict[str, McpToolInfo] = {}
         self._tools: list[Tool] = []
+        self._lifecycle_task: asyncio.Task[None] | None = None
+        self._shutdown_event: asyncio.Event = asyncio.Event()
+        self._init_done: asyncio.Future[None] | None = None
+        self._lifecycle_lock: asyncio.Lock = asyncio.Lock()
 
     @property
     def tools(self) -> list[Tool]:
@@ -69,52 +76,63 @@ class McpManager:
         return list(self._tool_info_by_mapped.values())
 
     async def start(self) -> None:
-        if self._exit_stack is not None:
-            return
-
-        self._exit_stack = AsyncExitStack()
-
-        for alias, cfg in self._servers.items():
-            try:
-                session = await self._exit_stack.enter_async_context(
-                    self._connect(alias, cfg)
+        async with self._lifecycle_lock:
+            if self._lifecycle_task is not None and not self._lifecycle_task.done():
+                init_done = self._init_done
+                if init_done is None:
+                    init_done = asyncio.get_running_loop().create_future()
+                    self._init_done = init_done
+            else:
+                # 若存在已结束的 task，清理引用后按冷启动处理。
+                self._lifecycle_task = None
+                self._sessions.clear()
+                self._tool_info_by_mapped.clear()
+                self._tools = []
+                self._shutdown_event = asyncio.Event()
+                init_done = asyncio.get_running_loop().create_future()
+                self._init_done = init_done
+                self._lifecycle_task = asyncio.create_task(
+                    self._run_lifecycle(),
+                    name=f"mcp_lifecycle_{id(self)}",
                 )
-                self._sessions[alias] = session
 
-                tool_list = await self._list_all_tools(session)
-                for t in tool_list:
-                    mapped = self._map_tool_name(alias, t.name)
-                    desc = (t.description or "").strip()
-                    schema = self._normalize_input_schema(t.inputSchema)
-
-                    info = McpToolInfo(
-                        server_alias=alias,
-                        server_type=self._server_type(cfg),
-                        remote_name=t.name,
-                        mapped_name=mapped,
-                        description=desc,
-                        input_schema=schema,
-                    )
-                    self._tool_info_by_mapped[mapped] = info
-
-                logger.info(
-                    f"已加载 MCP server={alias} tools={len(tool_list)}"
-                )
-            except Exception as e:
-                logger.warning(f"MCP server 连接/加载失败，已跳过：{alias}：{e}")
-
-        self._tools = [self._build_tool(mapped, info) for mapped, info in self._tool_info_by_mapped.items()]
+        try:
+            await asyncio.wait_for(asyncio.shield(init_done), timeout=_START_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.error(f"MCP manager 初始化超时（{_START_TIMEOUT_S:.1f}s）")
+            await self.aclose()
+            raise
+        except Exception:
+            await self.aclose()
+            raise
 
     async def aclose(self) -> None:
-        if self._exit_stack is None:
-            return
+        async with self._lifecycle_lock:
+            lifecycle_task = self._lifecycle_task
+            if lifecycle_task is None:
+                return
+            self._shutdown_event.set()
+
         try:
-            await self._exit_stack.aclose()
+            await asyncio.wait_for(lifecycle_task, timeout=_SHUTDOWN_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(f"MCP lifecycle task 清理超时（{_SHUTDOWN_TIMEOUT_S:.1f}s），强制取消")
+            lifecycle_task.cancel()
+            try:
+                await lifecycle_task
+            except asyncio.CancelledError:
+                pass
+        except Exception as e:
+            logger.error(f"MCP lifecycle task 异常: {e}", exc_info=True)
         finally:
-            self._exit_stack = None
-            self._sessions.clear()
-            self._tool_info_by_mapped.clear()
-            self._tools = []
+            async with self._lifecycle_lock:
+                if self._lifecycle_task is lifecycle_task:
+                    self._lifecycle_task = None
+                self._init_done = None
+                self._exit_stack = None
+                self._sessions.clear()
+                self._tool_info_by_mapped.clear()
+                self._tools = []
 
     async def call_tool(self, mapped_name: str, arguments: dict[str, Any]) -> str | list[ContentPartTextParam | ContentPartImageParam]:
         info = self._tool_info_by_mapped.get(mapped_name)
@@ -259,6 +277,71 @@ class McpManager:
                 texts.append(str(item))
         return "\n".join(texts).strip()
 
+    async def _run_lifecycle(self) -> None:
+        """生命周期管理 task：确保 exit stack 在同一 task 中创建和清理。"""
+        init_done = self._init_done
+        self._exit_stack = AsyncExitStack()
+
+        try:
+            for alias, cfg in self._servers.items():
+                try:
+                    session = await self._exit_stack.enter_async_context(
+                        self._connect(alias, cfg)
+                    )
+                    self._sessions[alias] = session
+
+                    tool_list = await self._list_all_tools(session)
+                    for t in tool_list:
+                        mapped = self._map_tool_name(alias, t.name)
+                        desc = (t.description or "").strip()
+                        schema = self._normalize_input_schema(t.inputSchema)
+
+                        info = McpToolInfo(
+                            server_alias=alias,
+                            server_type=self._server_type(cfg),
+                            remote_name=t.name,
+                            mapped_name=mapped,
+                            description=desc,
+                            input_schema=schema,
+                        )
+                        self._tool_info_by_mapped[mapped] = info
+
+                    logger.info(f"已加载 MCP server={alias} tools={len(tool_list)}")
+                except Exception as e:
+                    logger.warning(f"MCP server 连接/加载失败，已跳过：{alias}：{e}")
+
+            self._tools = [
+                self._build_tool(mapped, info)
+                for mapped, info in self._tool_info_by_mapped.items()
+            ]
+
+            if init_done is not None and not init_done.done():
+                init_done.set_result(None)
+
+            await self._shutdown_event.wait()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"MCP lifecycle task 异常: {e}", exc_info=True)
+            if init_done is not None and not init_done.done():
+                init_done.set_exception(e)
+            raise
+        finally:
+            if self._exit_stack is not None:
+                try:
+                    await self._exit_stack.aclose()
+                except Exception as e:
+                    logger.error(f"清理 MCP exit_stack 失败: {e}", exc_info=True)
+                finally:
+                    self._exit_stack = None
+
+            self._sessions.clear()
+            self._tool_info_by_mapped.clear()
+            self._tools = []
+
+            if init_done is not None and not init_done.done():
+                init_done.set_result(None)
+
     @asynccontextmanager
     async def _connect(self, alias: str, cfg: McpServerConfig):
         server_type = self._server_type(cfg)
@@ -318,6 +401,8 @@ class McpManager:
             http_client: httpx.AsyncClient | None = None
             try:
                 if headers:
+                    if self._exit_stack is None:
+                        raise RuntimeError("MCP exit stack 未初始化")
                     http_client = httpx.AsyncClient(headers=headers, timeout=self._connect_timeout_s)
                     await self._exit_stack.enter_async_context(http_client)  # type: ignore[union-attr]
                 async with streamable_http_client(url, http_client=http_client) as (

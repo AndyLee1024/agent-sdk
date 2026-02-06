@@ -11,6 +11,7 @@ from comate_agent_sdk.agent.events import (
     AgentEvent,
     SessionInitEvent,
     StopEvent,
+    PreCompactEvent,
     SubagentStartEvent,
     SubagentStopEvent,
     TextEvent,
@@ -46,6 +47,7 @@ __all__ = [
     "ToolCallEvent",
     "ToolResultEvent",
     "UserQuestionEvent",
+    "PreCompactEvent",
     # Compaction
     "CompactionConfig",
     "CompactionResult",

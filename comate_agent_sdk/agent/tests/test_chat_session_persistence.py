@@ -3,7 +3,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import ComateAgentOptions
 from comate_agent_sdk.agent.chat_session import (
+    ChatSession,
     _ConversationState,
     _build_conversation_event,
     _events_jsonl_append,
@@ -13,7 +16,53 @@ from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage, UserMessage
 
 
+class _FakeChatModel:
+    def __init__(self) -> None:
+        self.model = "fake:model"
+
+    @property
+    def provider(self) -> str:
+        return "fake"
+
+    @property
+    def name(self) -> str:
+        return self.model
+
+    async def ainvoke(self, messages, tools=None, tool_choice=None, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("This test should not call the LLM")
+
+
 class TestChatSessionPersistence(unittest.TestCase):
+    def test_chat_session_constructs_with_session_options_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                options=ComateAgentOptions(
+                    tools=[],
+                    agents=[],
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+
+            self.assertIsNone(agent.session_id)
+            self.assertIsNone(agent.offload_root_path)
+
+            session = ChatSession(
+                agent,
+                session_id="s1",
+                storage_root=root / "session",
+            )
+
+            self.assertEqual(session.session_id, "s1")
+            self.assertEqual(session._agent.session_id, "s1")
+            self.assertEqual(session._agent.offload_root_path, str(root / "session" / "offload"))
+
+            # 模板 agent 不应被 ChatSession 构造污染
+            self.assertIsNone(agent.session_id)
+            self.assertIsNone(agent.offload_root_path)
+
     def test_delta_append_and_replay_basic(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

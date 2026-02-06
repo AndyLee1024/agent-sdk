@@ -157,17 +157,30 @@ def resolve_settings(
 
     # 合并：project 完全覆盖 user
     if project_settings is None:
-        return user_settings  # 可能也是 None
+        result = user_settings  # 可能也是 None
+    elif user_settings is None:
+        result = project_settings
+    else:
+        # 两者都有：project 字段非 None 时完全覆盖 user 对应字段
+        result = SettingsConfig(
+            llm_levels=project_settings.llm_levels if project_settings.llm_levels is not None else user_settings.llm_levels,
+            llm_levels_base_url=project_settings.llm_levels_base_url if project_settings.llm_levels_base_url is not None else user_settings.llm_levels_base_url,
+            llm_levels_api_key=project_settings.llm_levels_api_key if project_settings.llm_levels_api_key is not None else user_settings.llm_levels_api_key,
+        )
 
-    if user_settings is None:
-        return project_settings
+    # 输出配置加载日志
+    if result is not None:
+        logger.info("✅ settings.json 已加载")
+        if result.llm_levels:
+            logger.info(f"  - llm_levels: {list(result.llm_levels.keys())}")
+        if result.llm_levels_base_url:
+            logger.info(f"  - llm_levels_base_url: 已配置 {len(result.llm_levels_base_url)} 个档位")
+        if result.llm_levels_api_key:
+            logger.info(f"  - llm_levels_api_key: 已配置 {len(result.llm_levels_api_key)} 个档位")
+        else:
+            logger.debug("  ℹ️  llm_levels_api_key 未配置，将使用环境变量")
 
-    # 两者都有：project 字段非 None 时完全覆盖 user 对应字段
-    return SettingsConfig(
-        llm_levels=project_settings.llm_levels if project_settings.llm_levels is not None else user_settings.llm_levels,
-        llm_levels_base_url=project_settings.llm_levels_base_url if project_settings.llm_levels_base_url is not None else user_settings.llm_levels_base_url,
-        llm_levels_api_key=project_settings.llm_levels_api_key if project_settings.llm_levels_api_key is not None else user_settings.llm_levels_api_key,
-    )
+    return result
 
 
 def discover_agents_md(project_root: Path | None) -> list[Path]:

@@ -53,25 +53,37 @@ Keep the summary brief but informative."""
     return f"[Max iterations reached]\n\n{summary}"
 
 
-async def check_and_compact(agent: "Agent", response: ChatInvokeCompletion) -> bool:
-    """检查 token 使用并在需要时压缩。"""
+async def check_and_compact(agent: "Agent", response: ChatInvokeCompletion) -> tuple[bool, "PreCompactEvent | None"]:
+    """检查 token 使用并在需要时压缩。
+
+    Returns:
+        tuple[bool, PreCompactEvent | None]: (是否执行了压缩, 压缩前事件或None)
+    """
     if agent._compaction_service is None:
-        return False
+        return False, None
 
     # Update token usage tracking
     agent._compaction_service.update_usage(response.usage)
 
     # 检查是否需要压缩
     if not await agent._compaction_service.should_compact(agent.llm.model):
-        return False
+        return False, None
 
     # 获取压缩阈值
     threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
 
     # 使用 token usage 中的实际 total_tokens
     from comate_agent_sdk.agent.compaction.models import TokenUsage
+    from comate_agent_sdk.agent.events import PreCompactEvent
 
     actual_tokens = TokenUsage.from_usage(response.usage).total_tokens
+
+    # 创建 PreCompactEvent
+    event = PreCompactEvent(
+        current_tokens=actual_tokens,
+        threshold=threshold,
+        trigger='check',
+    )
 
     # 创建/复用 OffloadPolicy
     offload_policy = None
@@ -92,10 +104,76 @@ async def check_and_compact(agent: "Agent", response: ChatInvokeCompletion) -> b
         level=agent._effective_level,
     )
 
-    return await agent._context.auto_compact(
+    compacted = await agent._context.auto_compact(
         policy=policy,
         current_total_tokens=actual_tokens,
     )
+
+    return compacted, event
+
+
+async def precheck_and_compact(agent: "Agent") -> tuple[bool, "PreCompactEvent | None"]:
+    """基于 IR 估算值预检查并压缩。
+
+    在工具结果添加后调用,防止下一次 invoke_llm 超限。
+    使用 ContextIR.total_tokens 估算当前上下文大小。
+
+    Returns:
+        tuple[bool, PreCompactEvent | None]: (是否执行了压缩, 压缩前事件或None)
+    """
+    if agent._compaction_service is None:
+        return False, None
+
+    if not agent._compaction_service.config.enabled:
+        return False, None
+
+    # 使用 IR 估算的 total_tokens
+    estimated_tokens = agent._context.total_tokens
+
+    # 获取压缩阈值
+    threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
+
+    # 如果估算值未超阈值,无需压缩
+    if estimated_tokens < threshold:
+        return False, None
+
+    logger.info(
+        f"预检查触发压缩: IR 估算 {estimated_tokens} tokens >= 阈值 {threshold}"
+    )
+
+    # 创建 PreCompactEvent
+    from comate_agent_sdk.agent.events import PreCompactEvent
+
+    event = PreCompactEvent(
+        current_tokens=estimated_tokens,
+        threshold=threshold,
+        trigger='precheck',
+    )
+
+    # 复用现有的压缩策略创建逻辑
+    offload_policy = None
+    if agent.offload_enabled and agent._context_fs:
+        offload_policy = agent.offload_policy or OffloadPolicy(
+            enabled=True,
+            token_threshold=agent.offload_token_threshold,
+        )
+
+    policy = SelectiveCompactionPolicy(
+        threshold=threshold,
+        llm=agent.llm,
+        fallback_to_full_summary=True,
+        fs=agent._context_fs,
+        offload_policy=offload_policy,
+        token_cost=agent._token_cost,
+        level=agent._effective_level,
+    )
+
+    compacted = await agent._context.auto_compact(
+        policy=policy,
+        current_total_tokens=estimated_tokens,
+    )
+
+    return compacted, event
 
 
 async def query(agent: "Agent", message: str) -> str:
@@ -126,7 +204,9 @@ async def query(agent: "Agent", message: str) -> str:
 
         # If no tool calls, check if should finish
         if not response.has_tool_calls:
-            await check_and_compact(agent, response)
+            compacted, pre_compact_event = await check_and_compact(agent, response)
+            if pre_compact_event:
+                logger.info(f"Pre-compact event: {pre_compact_event}")
             return response.content or ""
 
         # Execute tool calls (Task calls can run in parallel when contiguous)
@@ -176,11 +256,21 @@ async def query(agent: "Agent", message: str) -> str:
                     # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
                     if agent._context.has_pending_skill_items:
                         agent._context.flush_pending_skill_items()
+
+                # 新增:并行任务完成后预检查
+                compacted, pre_compact_event = await precheck_and_compact(agent)
+                if pre_compact_event:
+                    logger.info(f"Pre-compact event: {pre_compact_event}")
                 continue
 
             # Default: serial execution
             tool_result = await execute_tool_call(agent, tool_call)
             agent._context.add_message(tool_result)
+
+            # 新增:预检查压缩
+            compacted, pre_compact_event = await precheck_and_compact(agent)
+            if pre_compact_event:
+                logger.info(f"Pre-compact event: {pre_compact_event}")
 
             # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
             if agent._context.has_pending_skill_items:
@@ -189,7 +279,9 @@ async def query(agent: "Agent", message: str) -> str:
             idx += 1
 
         # Check for compaction after tool execution
-        await check_and_compact(agent, response)
+        compacted, pre_compact_event = await check_and_compact(agent, response)
+        if pre_compact_event:
+            logger.info(f"Pre-compact event: {pre_compact_event}")
 
     # Max iterations reached - generate summary of what was accomplished
     return await generate_max_iterations_summary(agent)

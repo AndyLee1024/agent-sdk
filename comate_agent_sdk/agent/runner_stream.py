@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 from comate_agent_sdk.agent.events import (
     AgentEvent,
+    PreCompactEvent,
     StepCompleteEvent,
     StepStartEvent,
     StopEvent,
@@ -22,7 +23,7 @@ from comate_agent_sdk.agent.events import (
 )
 from comate_agent_sdk.agent.history import destroy_ephemeral_messages
 from comate_agent_sdk.agent.llm import invoke_llm
-from comate_agent_sdk.agent.runner import check_and_compact, generate_max_iterations_summary
+from comate_agent_sdk.agent.runner import check_and_compact, generate_max_iterations_summary, precheck_and_compact
 from comate_agent_sdk.agent.tool_exec import execute_tool_call, extract_screenshot
 from comate_agent_sdk.llm.messages import (
     ContentPartImageParam,
@@ -74,7 +75,9 @@ async def query_stream(
 
         # If no tool calls, finish
         if not response.has_tool_calls:
-            await check_and_compact(agent, response)
+            compacted, pre_compact_event = await check_and_compact(agent, response)
+            if pre_compact_event:
+                yield pre_compact_event
             if response.content:
                 yield TextEvent(content=response.content)
             yield StopEvent(reason="completed")
@@ -209,6 +212,11 @@ async def query_stream(
                     if agent._context.has_pending_skill_items:
                         agent._context.flush_pending_skill_items()
 
+                # 新增:预检查压缩
+                compacted, pre_compact_event = await precheck_and_compact(agent)
+                if pre_compact_event:
+                    yield pre_compact_event
+
                 continue
 
             # Default: serial execution
@@ -235,6 +243,11 @@ async def query_stream(
             step_start_time = time.time()
             tool_result = await execute_tool_call(agent, tool_call)
             agent._context.add_message(tool_result)
+
+            # 新增:预检查压缩
+            compacted, pre_compact_event = await precheck_and_compact(agent)
+            if pre_compact_event:
+                yield pre_compact_event
 
             if agent._context.has_pending_skill_items:
                 agent._context.flush_pending_skill_items()
@@ -270,7 +283,9 @@ async def query_stream(
             idx += 1
 
         # Check for compaction after tool execution
-        await check_and_compact(agent, response)
+        compacted, pre_compact_event = await check_and_compact(agent, response)
+        if pre_compact_event:
+            yield pre_compact_event
 
     # Max iterations reached - generate summary of what was accomplished
     summary = await generate_max_iterations_summary(agent)
