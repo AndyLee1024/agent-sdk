@@ -684,6 +684,41 @@ SDK 会自动发现 Skills 并注入：
 
 - `Skill(skill_name="release")`
 
+## 可观测性：Langfuse 集成
+
+SDK 支持通过 [Langfuse](https://langfuse.com) 进行 LLM 调用的可观测性监控（tracing、usage、latency 等）。
+
+### 启用方式
+
+只需设置以下三个环境变量（**必须全部设置**才会启用）：
+
+```bash
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_BASE_URL=https://cloud.langfuse.com  # 或你的自托管地址
+```
+
+设置后，SDK 会自动启用 Langfuse 追踪：
+
+- **OpenAI**：使用 Langfuse 包装的 OpenAI 客户端
+- **Anthropic**：使用 OpenTelemetry instrumentation
+
+### Anthropic 额外依赖
+
+如果使用 Anthropic 模型并希望启用 Langfuse 追踪，需要额外安装：
+
+```bash
+pip install opentelemetry-instrumentation-anthropic
+# 或
+uv add opentelemetry-instrumentation-anthropic
+```
+
+> **注意**：如果未安装此包但设置了环境变量，SDK 会输出警告日志但不会影响正常运行。
+
+### 不启用时的行为
+
+如果未设置（或未完整设置）上述三个环境变量，SDK 会使用原生的 LLM 客户端，不会有任何额外开销。
+
 ## Token 统计与可选计费
 
 ### 只统计 tokens（默认）

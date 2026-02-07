@@ -19,7 +19,6 @@ from comate_agent_sdk.llm.exceptions import ModelProviderError, ModelRateLimitEr
 from comate_agent_sdk.llm.messages import BaseMessage, Function, ToolCall
 from comate_agent_sdk.llm.openai.serializer import OpenAIMessageSerializer
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
-from langfuse.openai import openai as oai
 
 
 
@@ -139,9 +138,22 @@ class ChatOpenAI(BaseChatModel):
 
         return client_params
 
+    def _is_langfuse_configured(self) -> bool:
+        """Check if all required Langfuse environment variables are set."""
+        required_vars = [
+            "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_BASE_URL",
+        ]
+        return all(os.getenv(var) for var in required_vars)
+
     def get_client(self) -> AsyncOpenAI:
         """
         Returns an AsyncOpenAI client (cached).
+
+        If Langfuse environment variables (LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY,
+        LANGFUSE_BASE_URL) are all set, returns a Langfuse-wrapped client for
+        observability. Otherwise, returns the native OpenAI client.
 
         Returns:
                 AsyncOpenAI: An instance of the AsyncOpenAI client.
@@ -150,7 +162,17 @@ class ChatOpenAI(BaseChatModel):
         if self._client is not None:
             return self._client
         client_params = self._get_client_params()
-        self._client = oai.AsyncOpenAI(**client_params)
+
+        if self._is_langfuse_configured():
+            # Lazy import to avoid Langfuse initialization when not configured
+            from langfuse.openai import openai as oai
+
+            logger.debug("Langfuse environment variables detected, using Langfuse-wrapped OpenAI client")
+            self._client = oai.AsyncOpenAI(**client_params)
+        else:
+            logger.debug("Langfuse not configured, using native OpenAI client")
+            self._client = AsyncOpenAI(**client_params)
+
         return self._client
 
     @property

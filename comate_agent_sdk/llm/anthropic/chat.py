@@ -119,15 +119,56 @@ class ChatAnthropic(BaseChatModel):
 
         return client_params
 
+    _langfuse_instrumented: bool = field(default=False, repr=False, compare=False)
+
+    def _is_langfuse_configured(self) -> bool:
+        """Check if all required Langfuse environment variables are set."""
+        required_vars = [
+            "LANGFUSE_SECRET_KEY",
+            "LANGFUSE_PUBLIC_KEY",
+            "LANGFUSE_BASE_URL",
+        ]
+        return all(os.getenv(var) for var in required_vars)
+
+    def _ensure_langfuse_instrumentation(self) -> None:
+        """Initialize Langfuse OpenTelemetry instrumentation for Anthropic if configured."""
+        if self._langfuse_instrumented:
+            return
+
+        if self._is_langfuse_configured():
+            try:
+                from opentelemetry.instrumentation.anthropic import AnthropicInstrumentor
+
+                # Only instrument if not already instrumented
+                if not AnthropicInstrumentor().is_instrumented_by_opentelemetry:
+                    AnthropicInstrumentor().instrument()
+                    logger.debug("Langfuse OpenTelemetry instrumentation enabled for Anthropic")
+                self._langfuse_instrumented = True
+            except ImportError:
+                logger.warning(
+                    "Langfuse environment variables detected but opentelemetry-instrumentation-anthropic "
+                    "is not installed. Install it with: pip install opentelemetry-instrumentation-anthropic"
+                )
+        else:
+            logger.debug("Langfuse not configured, using native Anthropic client without instrumentation")
+
     def get_client(self) -> AsyncAnthropic:
         """
         Returns an AsyncAnthropic client (cached).
+
+        If Langfuse environment variables (LANGFUSE_SECRET_KEY, LANGFUSE_PUBLIC_KEY,
+        LANGFUSE_BASE_URL) are all set, enables OpenTelemetry instrumentation for
+        observability.
 
         Returns:
                 AsyncAnthropic: An instance of the AsyncAnthropic client.
         """
         if self._client is not None:
             return self._client
+
+        # Enable Langfuse instrumentation if configured
+        self._ensure_langfuse_instrumentation()
+
         client_params = self._get_client_params()
         self._client = AsyncAnthropic(**client_params)
         return self._client
