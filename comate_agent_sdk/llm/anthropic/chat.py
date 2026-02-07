@@ -42,7 +42,7 @@ class ChatAnthropic(BaseChatModel):
 
     # Model configuration
     model: str | ModelParam
-    max_tokens: int = 8192
+    max_tokens: int = 16384
     temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None

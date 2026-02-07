@@ -203,76 +203,6 @@ wheels = [
 ]
 
 [[package]]
-name = "comate-agent-sdk"
-version = "0.0.1"
-source = { editable = "." }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "anthropic" },
-    { name = "anyio" },
-    { name = "curl-cffi" },
-    { name = "dotenv" },
-    { name = "google-genai" },
-    { name = "httpx" },
-    { name = "langfuse" },
-    { name = "markdownify" },
-    { name = "mcp" },
-    { name = "openai" },
-    { name = "pydantic" },
-    { name = "pyyaml" },
-    { name = "tiktoken" },
-]
-
-[package.optional-dependencies]
-anthropic = [
-    { name = "anthropic" },
-]
-context = [
-    { name = "tiktoken" },
-]
-google = [
-    { name = "google-genai" },
-]
-observability = [
-    { name = "lmnr" },
-]
-openai = [
-    { name = "openai" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "aiohttp", specifier = ">=3.9.0" },
-    { name = "anthropic", specifier = ">=0.40.0" },
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40.0" },
-    { name = "anyio", specifier = ">=4.12.1" },
-    { name = "curl-cffi", specifier = "==0.13.0" },
-    { name = "dotenv", specifier = ">=0.9.9" },
-    { name = "google-genai", specifier = ">=1.0.0" },
-    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.0.0" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "langfuse", specifier = ">=3.12.1" },
-    { name = "lmnr", marker = "extra == 'observability'", specifier = ">=0.4.0" },
-    { name = "markdownify", specifier = ">=1.2.2" },
-    { name = "mcp", specifier = ">=1.26.0" },
-    { name = "openai", specifier = ">=1.50.0" },
-    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.50.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "tiktoken", marker = "extra == 'context'", specifier = ">=0.5.0" },
-]
-provides-extras = ["anthropic", "openai", "google", "observability", "context"]
-
-[package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=9.0.2" }]
-
-[[package]]
 name = "certifi"
 version = "2026.1.4"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -444,6 +374,78 @@ sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d8/53/6f443c9a4a8358
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335 },
 ]
+
+[[package]]
+name = "comate-agent-sdk"
+version = "0.0.1"
+source = { editable = "." }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "anthropic" },
+    { name = "anyio" },
+    { name = "curl-cffi" },
+    { name = "dotenv" },
+    { name = "google-genai" },
+    { name = "httpx" },
+    { name = "langfuse" },
+    { name = "markdownify" },
+    { name = "mcp" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "pyyaml" },
+    { name = "questionary" },
+    { name = "tiktoken" },
+]
+
+[package.optional-dependencies]
+anthropic = [
+    { name = "anthropic" },
+]
+context = [
+    { name = "tiktoken" },
+]
+google = [
+    { name = "google-genai" },
+]
+observability = [
+    { name = "lmnr" },
+]
+openai = [
+    { name = "openai" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9.0" },
+    { name = "anthropic", specifier = ">=0.40.0" },
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40.0" },
+    { name = "anyio", specifier = ">=4.12.1" },
+    { name = "curl-cffi", specifier = "==0.13.0" },
+    { name = "dotenv", specifier = ">=0.9.9" },
+    { name = "google-genai", specifier = ">=1.0.0" },
+    { name = "google-genai", marker = "extra == 'google'", specifier = ">=1.0.0" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "langfuse", specifier = ">=3.12.1" },
+    { name = "lmnr", marker = "extra == 'observability'", specifier = ">=0.4.0" },
+    { name = "markdownify", specifier = ">=1.2.2" },
+    { name = "mcp", specifier = ">=1.26.0" },
+    { name = "openai", specifier = ">=1.50.0" },
+    { name = "openai", marker = "extra == 'openai'", specifier = ">=1.50.0" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "questionary", specifier = ">=2.1.1" },
+    { name = "tiktoken", specifier = ">=0.12.0" },
+    { name = "tiktoken", marker = "extra == 'context'", specifier = ">=0.5.0" },
+]
+provides-extras = ["anthropic", "openai", "google", "observability", "context"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=9.0.2" }]
 
 [[package]]
 name = "cryptography"
@@ -1389,6 +1391,18 @@ wheels = [
 ]
 
 [[package]]
+name = "prompt-toolkit"
+version = "3.0.52"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "wcwidth" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/a1/96/06e01a7b38dce6fe1db213e061a4602dd6032a8a97ef6c1a862537732421/prompt_toolkit-3.0.52.tar.gz", hash = "sha256:28cde192929c8e7321de85de1ddbe736f1375148b02f2e17edd840042b1be855", size = 434198 }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/84/03/0d3ce49e2505ae70cf43bc5bb3033955d2fc9f932163e84dc0779cc47f48/prompt_toolkit-3.0.52-py3-none-any.whl", hash = "sha256:9aac639a3bbd33284347de5ad8d68ecc044b91a762dc39b7c21095fcd6a19955", size = 391431 },
+]
+
+[[package]]
 name = "propcache"
 version = "0.4.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
@@ -1779,6 +1793,18 @@ wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/da/92/1446574745d74df0c92e6aa4a7b0b3130706a4142b2d1a5869f2eaa423c6/pyyaml-6.0.3-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:16249ee61e95f858e83976573de0f5b2893b3677ba71c9dd36b9cf8be9ac6d65", size = 829923 },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f0/7a/1c7270340330e575b92f397352af856a8c06f230aa3e76f86b39d01b416a/pyyaml-6.0.3-cp314-cp314t-win_amd64.whl", hash = "sha256:4ad1906908f2f5ae4e5a8ddfce73c320c2a1429ec52eafd27138b7f1cbe341c9", size = 174062 },
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f1/12/de94a39c2ef588c7e6455cfbe7343d3b2dc9d6b6b2f40c4c6565744c873d/pyyaml-6.0.3-cp314-cp314t-win_arm64.whl", hash = "sha256:ebc55a14a21cb14062aa4162f906cd962b28e2e9ea38f9b4391244cd8de4ae0b", size = 149341 },
+]
+
+[[package]]
+name = "questionary"
+version = "2.1.1"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+dependencies = [
+    { name = "prompt-toolkit" },
+]
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/f6/45/eafb0bba0f9988f6a2520f9ca2df2c82ddfa8d67c95d6625452e97b204a5/questionary-2.1.1.tar.gz", hash = "sha256:3d7e980292bb0107abaa79c68dd3eee3c561b83a0f89ae482860b181c8bd412d", size = 25845 }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3c/26/1062c7ec1b053db9e499b4d2d5bc231743201b74051c973dadeac80a8f43/questionary-2.1.1-py3-none-any.whl", hash = "sha256:a51af13f345f1cdea62347589fbb6df3b290306ab8930713bfae4d475a7d4a59", size = 36753 },
 ]
 
 [[package]]
@@ -2203,6 +2229,15 @@ dependencies = [
 sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/c3/d1/8f3c683c9561a4e6689dd3b1d345c815f10f86acd044ee1fb9a4dcd0b8c5/uvicorn-0.40.0.tar.gz", hash = "sha256:839676675e87e73694518b5574fd0f24c9d97b46bea16df7b8c05ea1a51071ea", size = 81761 }
 wheels = [
     { url = "https://pypi.tuna.tsinghua.edu.cn/packages/3d/d8/2083a1daa7439a66f3a48589a57d576aa117726762618f6bb09fe3798796/uvicorn-0.40.0-py3-none-any.whl", hash = "sha256:c6c8f55bc8bf13eb6fa9ff87ad62308bbbc33d0b67f84293151efe87e0d5f2ee", size = 68502 },
+]
+
+[[package]]
+name = "wcwidth"
+version = "0.6.0"
+source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/35/a2/8e3becb46433538a38726c948d3399905a4c7cabd0df578ede5dc51f0ec2/wcwidth-0.6.0.tar.gz", hash = "sha256:cdc4e4262d6ef9a1a57e018384cbeb1208d8abbc64176027e2c2455c81313159", size = 159684 }
+wheels = [
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/68/5a/199c59e0a824a3db2b89c5d2dade7ab5f9624dbf6448dc291b46d5ec94d3/wcwidth-0.6.0-py3-none-any.whl", hash = "sha256:1a3a1e510b553315f8e146c54764f4fb6264ffad731b3d78088cdb1478ffbdad", size = 94189 },
 ]
 
 [[package]]

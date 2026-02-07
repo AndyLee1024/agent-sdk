@@ -75,7 +75,7 @@ class ChatGoogle(BaseChatModel):
     thinking_budget: int | None = (
         None  # for gemini-2.5 flash and flash-lite models, default will be set to 0
     )
-    max_output_tokens: int | None = 8096
+    max_output_tokens: int | None = 16384
     config: types.GenerateContentConfigDict | None = None
     include_system_in_user: bool = False
     max_retries: int = 5  # Number of retries for retryable errors

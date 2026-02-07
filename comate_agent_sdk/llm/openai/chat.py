@@ -91,7 +91,7 @@ class ChatOpenAI(BaseChatModel):
     default_query: Mapping[str, object] | None = None
     http_client: httpx.AsyncClient | None = None
     _strict_response_validation: bool = False
-    max_completion_tokens: int | None = 4096
+    max_completion_tokens: int | None = 16384
     reasoning_models: list[ChatModel | str] | None = field(
         default_factory=lambda: [
             "o4-mini",
