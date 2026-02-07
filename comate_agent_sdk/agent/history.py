@@ -9,10 +9,10 @@ from comate_agent_sdk.tools.decorator import Tool
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.agent.core import Agent
+    from comate_agent_sdk.agent.core import AgentRuntime
 
 
-def clear_history(agent: "Agent") -> None:
+def clear_history(agent: "AgentRuntime") -> None:
     """清空 message history 与 token usage，并重建 ContextIR header。"""
     agent._context.clear()
     agent._token_cost.clear_history()
@@ -53,7 +53,7 @@ def clear_history(agent: "Agent") -> None:
         agent._setup_memory()
 
 
-def load_history(agent: "Agent", messages: list[BaseMessage]) -> None:
+def load_history(agent: "AgentRuntime", messages: list[BaseMessage]) -> None:
     """加载 message history（保留 header），用于恢复对话。"""
     # 清空现有 conversation（保留 header）
     agent._context.conversation.items.clear()
@@ -64,7 +64,7 @@ def load_history(agent: "Agent", messages: list[BaseMessage]) -> None:
         agent._context.add_message(msg)
 
 
-def destroy_ephemeral_messages(agent: "Agent") -> None:
+def destroy_ephemeral_messages(agent: "AgentRuntime") -> None:
     """销毁旧的 ephemeral tool 输出（保留每个 tool 最近 N 条）。"""
     # 落盘阈值/开关（按类型）
     policy = getattr(agent, "offload_policy", None)

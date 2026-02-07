@@ -15,7 +15,7 @@ from typing import Annotated
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import (
-    ComateAgentOptions,
+    AgentConfig,
     StopEvent,
     TextEvent,
     ToolCallEvent,
@@ -93,13 +93,14 @@ async def count_by_role(
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    agent = Agent(
+    template = Agent(
         llm=ChatOpenAI(model="gpt-5.2"),
-        options=ComateAgentOptions(
+        config=AgentConfig(
             tools=[get_user, list_users, count_by_role],
             system_prompt="You are a helpful assistant that can query user information from a database.",
         ),
     )
+    agent = template.create_runtime()
 
     # Ask about users with streaming
     async for event in agent.query_stream(

@@ -21,7 +21,7 @@ from typing import Annotated
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import (
-    ComateAgentOptions,
+    AgentConfig,
     StopEvent,
     TextEvent,
     ThinkingEvent,
@@ -325,7 +325,7 @@ async def main():
     # Create agent with dependency override for the sandbox context
     agent = Agent(
         llm=ChatAnthropic(model="gemini-3-pro-low", base_url="http://127.0.0.1:8045/", api_key="sk-b3e2affa66e5466c9952c8e768e7ba8f"),
-        options=ComateAgentOptions(
+        config=AgentConfig(
             tools=ALL_TOOLS,
             system_prompt=f"You are a coding assistant. Working directory: {ctx.working_dir}。 你总是需要使用中文回复用户",
             dependency_overrides={get_sandbox_context: lambda: ctx},

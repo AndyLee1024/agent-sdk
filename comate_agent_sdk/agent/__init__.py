@@ -25,13 +25,15 @@ from comate_agent_sdk.agent.chat_session import (
     ChatSessionClosedError,
     ChatSessionError,
 )
-from comate_agent_sdk.agent.options import ComateAgentOptions
-from comate_agent_sdk.agent.service import Agent
+from comate_agent_sdk.agent.options import AgentConfig
+from comate_agent_sdk.agent.service import Agent, AgentRuntime, AgentTemplate
 from comate_agent_sdk.agent.prompts import MEMORY_NOTICE
 
 __all__ = [
     "Agent",
-    "ComateAgentOptions",
+    "AgentTemplate",
+    "AgentRuntime",
+    "AgentConfig",
     # Chat session
     "ChatSession",
     "ChatSessionError",
@@ -53,6 +55,6 @@ __all__ = [
     "CompactionResult",
     "CompactionService",
 
-    ## prompts
+    # prompts
     "MEMORY_NOTICE",
 ]

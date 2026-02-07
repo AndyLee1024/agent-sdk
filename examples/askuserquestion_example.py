@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from comate_agent_sdk.agent import Agent, ComateAgentOptions
+from comate_agent_sdk.agent import Agent, AgentConfig
 from comate_agent_sdk.agent.events import UserQuestionEvent, StopEvent, TextEvent
 
 # 配置日志

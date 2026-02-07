@@ -124,7 +124,7 @@ Use Read tool to view details.
 ```python
 agent = Agent(
     llm=ChatAnthropic(),
-    options=ComateAgentOptions(
+    config=AgentConfig(
         tools=[...],
         offload_enabled=True,              # 启用卸载
         offload_token_threshold=2000,      # Token 阈值

@@ -17,7 +17,7 @@
 
 ```python
 # Agent：适合单次查询或简单多轮对话
-agent = Agent(llm=ChatOpenAI(model="gpt-4o"), options=ComateAgentOptions(tools=[...]))
+agent = Agent(llm=ChatOpenAI(model="gpt-4o"), config=AgentConfig(tools=[...]))
 result = await agent.query("帮我查询天气")
 
 # ChatSession：适合需要持久化、恢复、分叉的场景
@@ -38,7 +38,7 @@ async for event in session.query_stream("帮我查询天气"):
 
 ```python
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions, ChatSession
+from comate_agent_sdk.agent import AgentConfig, ChatSession
 from comate_agent_sdk.llm import ChatOpenAI
 from comate_agent_sdk.tools import tool
 
@@ -50,7 +50,7 @@ async def get_time() -> str:
 # 创建 Agent
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
-    options=ComateAgentOptions(tools=[get_time]),
+    config=AgentConfig(tools=[get_time]),
 )
 
 # 创建 ChatSession
@@ -406,7 +406,7 @@ print(f"对话轮次: {len(info.conversation_items)}")
 ```python
 import asyncio
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions, ChatSession
+from comate_agent_sdk.agent import AgentConfig, ChatSession
 from comate_agent_sdk.llm import ChatOpenAI
 from comate_agent_sdk.tools import tool
 
@@ -417,7 +417,7 @@ async def get_user_info(user_id: str) -> str:
 
 agent = Agent(
     llm=ChatOpenAI(model="gpt-4o"),
-    options=ComateAgentOptions(tools=[get_user_info]),
+    config=AgentConfig(tools=[get_user_info]),
 )
 
 async def chatbot(user_id: str, message: str):

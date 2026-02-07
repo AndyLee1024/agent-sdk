@@ -4,7 +4,7 @@ import time
 import unittest
 from pathlib import Path
 
-from comate_agent_sdk.agent import Agent, ComateAgentOptions
+from comate_agent_sdk.agent import Agent, AgentConfig
 from comate_agent_sdk.agent.events import SubagentStartEvent, SubagentStopEvent, ToolResultEvent
 from comate_agent_sdk.llm.messages import Function, ToolCall
 from comate_agent_sdk.llm.views import ChatInvokeCompletion
@@ -82,16 +82,17 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        agent = Agent(
+        template = Agent(
             llm=llm,  # type: ignore[arg-type]
-            options=ComateAgentOptions(
-                tools=[Task],
-                agents=[],
+            config=AgentConfig(
+                tools=(Task,),
+                agents=(),
                 offload_enabled=False,
                 task_parallel_enabled=True,
                 task_parallel_max_concurrency=4,
             ),
         )
+        agent = template.create_runtime()
 
         events = []
         async for event in agent.query_stream("hi"):
@@ -166,16 +167,17 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
             ]
         )
 
-        agent = Agent(
+        template = Agent(
             llm=llm,  # type: ignore[arg-type]
-            options=ComateAgentOptions(
-                tools=[Task],
-                agents=[],
+            config=AgentConfig(
+                tools=(Task,),
+                agents=(),
                 offload_enabled=False,
                 task_parallel_enabled=True,
                 task_parallel_max_concurrency=4,
             ),
         )
+        agent = template.create_runtime()
 
         _ = await agent.query("hi")
 
@@ -197,13 +199,14 @@ class TestParallelTaskEvents(unittest.IsolatedAsyncioTestCase):
 
         project_root = Path(__file__).resolve().parents[3]
         with self.assertRaises(ValueError) as ctx:
-            _ = Agent(
+            template = Agent(
                 llm=llm,  # type: ignore[arg-type]
-                options=ComateAgentOptions(
-                    tools=[Task],
+                config=AgentConfig(
+                    tools=(Task,),
                     project_root=project_root,
                     offload_enabled=False,
                 ),
             )
+            _ = template.create_runtime()
 
         self.assertIn("Task", str(ctx.exception))

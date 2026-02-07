@@ -8,7 +8,7 @@
 import logging
 
 from comate_agent_sdk.agent.service import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 
 
 logger = logging.getLogger(__name__)
@@ -19,11 +19,12 @@ def test_tool_strategy_generation():
     logger.info("=== 测试 1: 验证 tool_strategy 生成 ===")
 
     # 创建 Agent（使用默认系统工具）
-    agent = Agent(
-        options=ComateAgentOptions(
+    template = Agent(
+        config=AgentConfig(
             system_prompt="Test agent for tool strategy",
         ),
     )
+    agent = template.create_runtime()
 
     # 验证 ContextIR 中是否有 TOOL_STRATEGY
     from comate_agent_sdk.context.items import ItemType
@@ -53,12 +54,13 @@ def test_custom_tools_no_usage_rules():
     async def custom_tool(query: str) -> str:
         return f"Result: {query}"
 
-    agent = Agent(
-        options=ComateAgentOptions(
+    template = Agent(
+        config=AgentConfig(
             system_prompt="Agent with custom tool",
             tools=[custom_tool],
         ),
     )
+    agent = template.create_runtime()
 
     from comate_agent_sdk.context.items import ItemType
 
@@ -72,11 +74,12 @@ def test_system_message_order():
     """测试 system message 拼接顺序"""
     logger.info("=== 测试 3: 验证 system message 拼接顺序 ===")
 
-    agent = Agent(
-        options=ComateAgentOptions(
+    template = Agent(
+        config=AgentConfig(
             system_prompt="TEST_SYSTEM_PROMPT",
         ),
     )
+    agent = template.create_runtime()
 
     # 手动添加 memory 用于测试顺序
     agent._context.set_memory("TEST_MEMORY")

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.agent.chat_session import (
     ChatSession,
     _ConversationState,
@@ -38,16 +38,16 @@ class TestChatSessionPersistence(unittest.TestCase):
             root = Path(td)
             agent = Agent(
                 llm=_FakeChatModel(),  # type: ignore[arg-type]
-                options=ComateAgentOptions(
-                    tools=[],
-                    agents=[],
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
                     offload_enabled=False,
                     setting_sources=None,
                 ),
             )
 
-            self.assertIsNone(agent.session_id)
-            self.assertIsNone(agent.offload_root_path)
+            self.assertIsNone(agent.config.session_id)
+            self.assertIsNone(agent.config.offload_root_path)
 
             session = ChatSession(
                 agent,
@@ -60,8 +60,8 @@ class TestChatSessionPersistence(unittest.TestCase):
             self.assertEqual(session._agent.offload_root_path, str(root / "session" / "offload"))
 
             # 模板 agent 不应被 ChatSession 构造污染
-            self.assertIsNone(agent.session_id)
-            self.assertIsNone(agent.offload_root_path)
+            self.assertIsNone(agent.config.session_id)
+            self.assertIsNone(agent.config.offload_root_path)
 
     def test_delta_append_and_replay_basic(self) -> None:
         with tempfile.TemporaryDirectory() as td:

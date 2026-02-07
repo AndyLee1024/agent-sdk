@@ -73,7 +73,7 @@ event_bus.emit(ContextEvent(
 
 ```python
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 
 # 自定义事件处理函数
 def my_event_handler(event):
@@ -84,7 +84,7 @@ def my_event_handler(event):
         print(f"✅ 添加条目: {event.item_type} - {event.detail}")
 
 # 创建 Agent
-agent = Agent(options=ComateAgentOptions())
+agent = Agent(config=AgentConfig())
 
 # 订阅事件
 agent._context.event_bus.subscribe(my_event_handler)
@@ -296,7 +296,7 @@ import logging
 import os
 from datetime import datetime
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 
 # 1. 配置日志
 logging.basicConfig(
@@ -334,7 +334,7 @@ class AgentMonitor:
 
 # 3. 创建 Agent 并注册监控器
 monitor = AgentMonitor()
-agent = Agent(options=ComateAgentOptions())
+agent = Agent(config=AgentConfig())
 agent._context.event_bus.subscribe(monitor.handle_event)
 
 # 4. 使用 Agent...

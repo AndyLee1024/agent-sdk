@@ -17,10 +17,10 @@ from comate_agent_sdk.observability import Laminar
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.agent.core import Agent
+    from comate_agent_sdk.agent.core import AgentRuntime
 
 
-async def execute_tool_call(agent: "Agent", tool_call: ToolCall) -> ToolMessage:
+async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolMessage:
     """执行单个 tool call，返回 ToolMessage。"""
     tool_name = tool_call.function.name
 

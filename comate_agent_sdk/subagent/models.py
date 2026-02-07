@@ -13,7 +13,7 @@ from comate_agent_sdk.agent.llm_levels import LLMLevel
 from comate_agent_sdk.tokens.views import UsageSummary
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class AgentDefinition:
     """Subagent 定义"""
 

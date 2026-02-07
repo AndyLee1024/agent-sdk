@@ -2,7 +2,7 @@ import subprocess
 from pathlib import Path
 
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.context import EnvOptions
 
 
@@ -46,17 +46,18 @@ def test_agent_injects_env_snapshot_from_project_root(tmp_path: Path) -> None:
     repo.mkdir()
     _init_repo(repo)
 
-    agent = Agent(
+    template = Agent(
         llm=_FakeChatModel(),  # type: ignore[arg-type]
-        options=ComateAgentOptions(
-            tools=[],
-            agents=[],
+        config=AgentConfig(
+            tools=(),
+            agents=(),
             offload_enabled=False,
             project_root=repo,
             setting_sources=None,
             env_options=EnvOptions(system_env=True, git_env=True),
         ),
     )
+    agent = template.create_runtime()
 
     system_msg = agent.messages[0]
     header = system_msg.text

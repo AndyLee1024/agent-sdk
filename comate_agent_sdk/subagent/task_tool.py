@@ -4,7 +4,6 @@ Task 工具 - 用于启动 Subagent 的统一入口
 
 import asyncio
 import logging
-from dataclasses import is_dataclass, replace
 
 from comate_agent_sdk.llm.base import BaseChatModel
 from comate_agent_sdk.llm.anthropic.chat import ChatAnthropic
@@ -86,8 +85,7 @@ def create_task_tool(
             description: A short (3-5 word) description of the task
         """
         # 延迟导入避免循环依赖
-        from comate_agent_sdk.agent.service import Agent
-        from comate_agent_sdk.agent.options import ComateAgentOptions
+        from comate_agent_sdk.agent import AgentConfig, AgentTemplate
 
         if subagent_type not in agent_map:
             available = ", ".join(agent_map.keys())
@@ -116,40 +114,46 @@ def create_task_tool(
             f"{[t.name for t in tools]}"
         )
 
-        # 创建 Subagent（继承父级依赖覆盖）
-        subagent = Agent(
+        # 创建 SubagentTemplate（继承父级依赖覆盖），并构建独占 Runtime
+        subagent_template = AgentTemplate(
             name=agent_def.name,
             llm=llm,
-            options=ComateAgentOptions(
-                tools=tools,
+            config=AgentConfig(
+                tools=tuple(tools),
                 system_prompt=agent_def.prompt,
                 max_iterations=agent_def.max_iterations,
                 compaction=agent_def.compaction,
                 dependency_overrides=parent_dependency_overrides,  # 继承父级
                 llm_levels=parent_llm_levels,  # 继承三档池
+                agents=(),  # 禁止 subagent 自动发现（不支持嵌套）
             ),
-            _parent_token_cost=parent_token_cost,  # 共享 TokenCost
-            _is_subagent=True,  # 禁止嵌套
+        )
+        subagent_runtime = subagent_template.create_runtime(
+            parent_token_cost=parent_token_cost,
+            is_subagent=True,
+            name=agent_def.name,
         )
 
         # Subagent Skills 筛选（如果 AgentDefinition.skills 不为空）
-        if agent_def.skills is not None and subagent.skills:
+        if agent_def.skills is not None and subagent_runtime.skills:
             allowed_skill_names = set(agent_def.skills)
-            subagent.skills = [s for s in subagent.skills if s.name in allowed_skill_names]
+            subagent_runtime.skills = [
+                s for s in subagent_runtime.skills if s.name in allowed_skill_names
+            ]
             # 重新创建 Skill 工具（更新工具描述）
-            subagent._rebuild_skill_tool()
+            subagent_runtime._rebuild_skill_tool()
             logger.info(
-                f"Filtered subagent '{subagent_type}' skills to: {[s.name for s in subagent.skills]}"
+                f"Filtered subagent '{subagent_type}' skills to: {[s.name for s in subagent_runtime.skills]}"
             )
 
         # 执行（带超时）
         try:
             if agent_def.timeout:
                 result = await asyncio.wait_for(
-                    subagent.query(prompt), timeout=agent_def.timeout
+                    subagent_runtime.query(prompt), timeout=agent_def.timeout
                 )
             else:
-                result = await subagent.query(prompt)
+                result = await subagent_runtime.query(prompt)
 
             logger.info(f"Subagent '{subagent_type}' completed successfully")
             return result

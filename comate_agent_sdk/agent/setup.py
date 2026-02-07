@@ -9,10 +9,10 @@ from comate_agent_sdk.llm.messages import ToolCall, ToolMessage, UserMessage
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.agent.core import Agent
+    from comate_agent_sdk.agent.core import AgentRuntime
 
 
-def setup_tool_strategy(agent: "Agent") -> None:
+def setup_tool_strategy(agent: "AgentRuntime") -> None:
     """设置工具策略提示（写入 ContextIR header）。"""
     from comate_agent_sdk.agent.tool_strategy import generate_tool_strategy
 
@@ -21,14 +21,14 @@ def setup_tool_strategy(agent: "Agent") -> None:
         agent._context.set_tool_strategy(tool_strategy)
 
 
-def setup_agent_loop(agent: "Agent") -> None:
+def setup_agent_loop(agent: "AgentRuntime") -> None:
     """设置 Agent 循环控制指令（写入 ContextIR header）。"""
     from comate_agent_sdk.agent.prompts import AGENT_LOOP_PROMPT
 
     agent._context.set_agent_loop(AGENT_LOOP_PROMPT, cache=False)
 
 
-def setup_subagents(agent: "Agent") -> None:
+def setup_subagents(agent: "AgentRuntime") -> None:
     """设置 Subagent 支持
 
     1. 生成 Subagent 策略提示并写入 ContextIR header
@@ -86,7 +86,7 @@ def setup_subagents(agent: "Agent") -> None:
         f"Initialized {len(agent.agents)} subagents: {[a.name for a in agent.agents]}"
     )
 
-def setup_memory(agent: "Agent") -> None:
+def setup_memory(agent: "AgentRuntime") -> None:
     """设置 Memory 静态背景知识。"""
     from comate_agent_sdk.context.memory import MemoryConfig, load_memory_content
 
@@ -113,24 +113,10 @@ def setup_memory(agent: "Agent") -> None:
     logger.info(f"Memory 已加载: {token_count} tokens 来自 {len(agent.memory.files)} 个文件")
 
 
-def setup_skills(agent: "Agent") -> None:
-    """设置 Skill 支持（发现 + prompt 注入 + Skill tool 创建）。"""
-    from comate_agent_sdk.skill import create_skill_tool, discover_skills
+def setup_skills(agent: "AgentRuntime") -> None:
+    """设置 Skill 支持（基于模板已解析结果进行 prompt 注入 + Skill tool 创建）。"""
+    from comate_agent_sdk.skill import create_skill_tool
     from comate_agent_sdk.skill.prompts import generate_skill_prompt
-
-    # 自动发现 skills
-    discovered = discover_skills(project_root=agent.project_root)
-    user_skills = agent.skills or []
-
-    if discovered or user_skills:
-        # 合并（代码传入的覆盖自动发现的同名 skill）
-        user_skill_names = {s.name for s in user_skills}
-        merged = [s for s in discovered if s.name not in user_skill_names]
-        merged.extend(user_skills)
-        agent.skills = merged if merged else None
-
-        if discovered:
-            logger.info(f"Auto-discovered {len(discovered)} skill(s)")
 
     if not agent.skills:
         return
@@ -152,7 +138,7 @@ def setup_skills(agent: "Agent") -> None:
     logger.info(f"Initialized {len(agent.skills)} skill(s): {[s.name for s in agent.skills]}")
 
 
-async def execute_skill_call(agent: "Agent", tool_call: ToolCall) -> ToolMessage:
+async def execute_skill_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolMessage:
     """执行 Skill 调用（特殊处理）。"""
     args = json.loads(tool_call.function.arguments)
     skill_name = args.get("skill_name")
@@ -190,7 +176,7 @@ async def execute_skill_call(agent: "Agent", tool_call: ToolCall) -> ToolMessage
     )
 
 
-def rebuild_skill_tool(agent: "Agent") -> None:
+def rebuild_skill_tool(agent: "AgentRuntime") -> None:
     """重建 Skill 工具（用于 Subagent Skills 筛选后更新工具描述）。"""
     from comate_agent_sdk.skill import create_skill_tool, generate_skill_prompt
 
@@ -218,6 +204,6 @@ def rebuild_skill_tool(agent: "Agent") -> None:
         logger.debug("Removed Skill tool (no skills remaining)")
 
 
-def remove_skill_strategy(agent: "Agent") -> None:
+def remove_skill_strategy(agent: "AgentRuntime") -> None:
     """辅助函数：仅移除 skill_strategy（用于调试/外部调用）。"""
     agent._context.remove_skill_strategy()

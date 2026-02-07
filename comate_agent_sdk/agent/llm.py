@@ -11,10 +11,10 @@ from comate_agent_sdk.llm.views import ChatInvokeCompletion
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.agent.core import Agent
+    from comate_agent_sdk.agent.core import AgentRuntime
 
 
-async def invoke_llm(agent: "Agent") -> ChatInvokeCompletion:
+async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
     """调用 LLM（包含 retry + exponential backoff）。"""
     last_error: Exception | None = None
 

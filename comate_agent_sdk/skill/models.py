@@ -7,7 +7,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class SkillDefinition:
     """Skill 定义（兼容 Claude Code SKILL.md 格式）"""
 
@@ -98,15 +98,23 @@ class SkillDefinition:
         content = skill_md.read_text(encoding="utf-8")
         skill = cls.from_markdown(content, dir_name=skill_dir.name, base_dir=skill_dir)
 
-        # 发现资源目录
-        if (skill_dir / "scripts").exists():
-            skill.scripts_dir = skill_dir / "scripts"
-        if (skill_dir / "references").exists():
-            skill.references_dir = skill_dir / "references"
-        if (skill_dir / "assets").exists():
-            skill.assets_dir = skill_dir / "assets"
+        scripts_dir = skill_dir / "scripts" if (skill_dir / "scripts").exists() else None
+        references_dir = skill_dir / "references" if (skill_dir / "references").exists() else None
+        assets_dir = skill_dir / "assets" if (skill_dir / "assets").exists() else None
 
-        return skill
+        return cls(
+            name=skill.name,
+            description=skill.description,
+            prompt=skill.prompt,
+            model=skill.model,
+            argument_hint=skill.argument_hint,
+            disable_model_invocation=skill.disable_model_invocation,
+            user_invocable=skill.user_invocable,
+            base_dir=skill.base_dir,
+            scripts_dir=scripts_dir,
+            references_dir=references_dir,
+            assets_dir=assets_dir,
+        )
 
     def get_prompt(self) -> str:
         """获取完整 prompt（替换变量）"""

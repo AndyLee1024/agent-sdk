@@ -20,7 +20,7 @@ import os
 from pathlib import Path
 
 from comate_agent_sdk import Agent, AgentDefinition
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.llm import ChatOpenAI
 from comate_agent_sdk.tools import ToolRegistry, tool 
 
@@ -105,13 +105,14 @@ async def main():
 
     # 4. 创建主 Agent
     logger.info("创建主 Agent...")
-    agent = Agent(
+    template = Agent(
         llm=ChatOpenAI(model="gpt-5-mini", api_key="sk-KXdioVlee9i7DpUNBZtKM4FCXDqUCONdJGgpeTQfGFmJrRwD",base_url="http://454443.xyz:3022/v1"),
-        options=ComateAgentOptions(
+        config=AgentConfig(
             agents=[researcher, writer],
             system_prompt="你是一个项目经理，可以协调研究员和作家来完成任务。",
         ),
     )
+    agent = template.create_runtime()
 
     # 5. 测试场景 1: 串行调用（先研究后写作）
     logger.info("\n===== 场景 1: 串行调用 =====")
@@ -147,9 +148,10 @@ async def main_with_auto_discovery():
 
     # 不需要显式调用 discover_subagents！
     # Agent 初始化时会自动发现
-    agent = Agent(
+    template = Agent(
         llm=ChatOpenAI(model="gpt-5-mini", api_key="sk-test"),
     )
+    agent = template.create_runtime()
 
     if agent.agents:
         logger.info(f"✓ 自动发现 {len(agent.agents)} 个 Subagent:")
@@ -183,12 +185,13 @@ async def main_with_hybrid_mode():
     )
 
     # Agent 会自动发现 + 代码传入的 subagent
-    agent = Agent(
+    template = Agent(
         llm=ChatOpenAI(model="gpt-5-mini", api_key="sk-test"),
-        options=ComateAgentOptions(
+        config=AgentConfig(
             agents=[custom_agent],  # 传入额外的 subagent
         ),
     )
+    agent = template.create_runtime()
 
     logger.info(f"总共加载 {len(agent.agents) if agent.agents else 0} 个 Subagent:")
     if agent.agents:

@@ -1,7 +1,7 @@
 import json
 
 from comate_agent_sdk import Agent, create_sdk_mcp_server, mcp_tool
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.llm.messages import Function, ToolCall, ToolMessage
 from comate_agent_sdk.llm.views import ChatInvokeCompletion
 
@@ -47,16 +47,17 @@ def test_sdk_mcp_tools_loaded_and_injected_into_system_prompt() -> None:
     calc = create_sdk_mcp_server(name="calculator", tools=[add])
 
     llm = _FakeChatModel()
-    agent = Agent(
+    template = Agent(
         llm=llm,  # type: ignore[arg-type]
-        options=ComateAgentOptions(
+        config=AgentConfig(
             mcp_servers={"calc": calc},
-            tools=["mcp__calc__add"],
-            agents=[],
+            tools=("mcp__calc__add",),
+            agents=(),
             offload_enabled=False,
             setting_sources=None,
         ),
     )
+    agent = template.create_runtime()
 
     result = __import__("asyncio").run(agent.query("x"))
     assert result == "done"
@@ -78,16 +79,17 @@ def test_sdk_mcp_tool_call_executes_and_writes_tool_message() -> None:
 
     calc = create_sdk_mcp_server(name="calculator", tools=[add])
 
-    agent = Agent(
+    template = Agent(
         llm=_FakeChatModel(),  # type: ignore[arg-type]
-        options=ComateAgentOptions(
+        config=AgentConfig(
             mcp_servers={"calc": calc},
-            tools=["mcp__calc__add"],
-            agents=[],
+            tools=("mcp__calc__add",),
+            agents=(),
             offload_enabled=False,
             setting_sources=None,
         ),
     )
+    agent = template.create_runtime()
 
     __import__("asyncio").run(agent.query("x"))
 

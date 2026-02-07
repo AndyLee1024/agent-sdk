@@ -12,7 +12,7 @@ import readline  # noqa: F401 - 启用更好的终端行编辑功能
 from pathlib import Path
 
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.agent.events import (
     SessionInitEvent,
     StepCompleteEvent,
@@ -126,7 +126,7 @@ async def main() -> None:
 
     # Create a new agent (tools=None 会自动加载 SDK 内置 system tools)
     # include_cost=True 启用成本追踪
-    agent = Agent(options=ComateAgentOptions(include_cost=True))
+    agent = Agent(config=AgentConfig(include_cost=True))
     
     # Create a new session (will be initialized on first message)
     session = agent.chat()

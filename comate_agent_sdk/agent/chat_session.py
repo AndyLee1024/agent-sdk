@@ -6,11 +6,11 @@ import logging
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Iterable, Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 from comate_agent_sdk.agent.events import AgentEvent, SessionInitEvent, StopEvent
-from comate_agent_sdk.agent.service import Agent
+from comate_agent_sdk.agent.service import AgentTemplate, AgentRuntime
 from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.tokens.views import UsageSummary
 from comate_agent_sdk.llm.messages import (
@@ -434,74 +434,35 @@ def _rewrite_session_id_in_jsonl(path: Path, *, session_id: str) -> None:
 class ChatSession:
     def __init__(
         self,
-        agent: Agent,
+        template: AgentTemplate,
         *,
+        runtime: AgentRuntime | None = None,
         session_id: str | None = None,
         storage_root: Path | None = None,
         message_source: MessageSource | None = None,
     ):
-        self._template_agent = agent
-        self.session_id = session_id or str(uuid.uuid4())
+        resolved_session_id = session_id or (runtime.session_id if runtime is not None else None)
+        self.session_id = resolved_session_id or str(uuid.uuid4())
         self._storage_root = storage_root or _default_session_root(self.session_id)
         self._offload_root = self._storage_root / "offload"
         self._context_jsonl = self._storage_root / "context.jsonl"
 
-        # 深拷贝可变类型参数，避免与原 agent 共享引用
-        # dataclass.replace() 只做浅拷贝，所有可变对象（list/dict/set）都会被共享
-        # 这会导致新 agent 的修改影响原 agent，引发各种问题
-
-        # 1. tools (list) - 新 agent 会添加 MCP/Skill 工具
-        tools_copy = (
-            list(self._template_agent.options.tools)
-            if self._template_agent.options.tools is not None
-            else None
-        )
-
-        # 2. tool_registry (object) - 新 agent 会 register/unregister 工具
-        # 需要创建独立的 registry，并拷贝原 registry 的所有工具
-        tool_registry_copy = None
-        if self._template_agent.options.tool_registry is not None:
-            from comate_agent_sdk.tools import ToolRegistry
-
-            tool_registry_copy = ToolRegistry()
-            # 拷贝原 registry 的所有工具
-            try:
-                for tool in self._template_agent.options.tool_registry.all():  # type: ignore[attr-defined]
-                    if tool.name not in tool_registry_copy:
-                        tool_registry_copy.register(tool)
-            except Exception:
-                # 如果拷贝失败，使用新的空 registry
-                tool_registry_copy = ToolRegistry()
-
-        # 3. agents (list) - 可能在 init 中被修改（merged）
-        agents_copy = (
-            list(self._template_agent.options.agents)
-            if self._template_agent.options.agents is not None
-            else None
-        )
-
-        # 4. llm_retryable_status_codes (set) - 虽然通常不修改，但为了一致性也拷贝
-        status_codes_copy = set(self._template_agent.options.llm_retryable_status_codes)
-
-        session_options = replace(
-            self._template_agent.options,
-            session_id=self.session_id,
-            offload_root_path=str(self._offload_root),
-            tools=tools_copy,
-            tool_registry=tool_registry_copy,
-            agents=agents_copy,
-            llm_retryable_status_codes=status_codes_copy,
-        )
-        self._agent = replace(
-            self._template_agent,
-            options=session_options,
-        )
-
-        # 手动继承原 agent 的 _tools_allowlist_mode 状态
-        # 因为 dataclass.replace() 会重新执行 __post_init__，导致该状态被重新计算
-        # 但我们需要保持与原 agent 一致的行为模式
-        if hasattr(self._template_agent, "_tools_allowlist_mode"):
-            self._agent._tools_allowlist_mode = self._template_agent._tools_allowlist_mode
+        self._template = template
+        # Backward-compatible alias for existing call sites/tests.
+        self._template_agent = template
+        if runtime is None:
+            self._runtime = template.create_runtime(
+                session_id=self.session_id,
+                offload_root_path=str(self._offload_root),
+            )
+        else:
+            if runtime.session_id != self.session_id:
+                raise ChatSessionError(
+                    f"runtime.session_id={runtime.session_id} does not match session_id={self.session_id}"
+                )
+            self._runtime = runtime
+        # Backward-compatible alias for existing call sites/tests.
+        self._agent = self._runtime
 
         self._closed = False
         self._turn_number = 0
@@ -514,14 +475,19 @@ class ChatSession:
     @classmethod
     def resume(
         cls,
-        agent: Agent,
+        template: AgentTemplate,
         *,
         session_id: str,
         storage_root: Path | None = None,
         message_source: MessageSource | None = None,
     ) -> "ChatSession":
+        runtime = template.create_runtime(
+            session_id=session_id,
+            offload_root_path=str((storage_root or _default_session_root(session_id)) / "offload"),
+        )
         session = cls(
-            agent,
+            template,
+            runtime=runtime,
             session_id=session_id,
             storage_root=storage_root,
             message_source=message_source,
@@ -594,7 +560,7 @@ class ChatSession:
                 logger.warning(f"Failed to rewrite offload index session_id: {e}")
 
         return ChatSession.resume(
-            self._template_agent,
+            self._template,
             session_id=new_session_id,
             storage_root=dst,
             message_source=message_source,

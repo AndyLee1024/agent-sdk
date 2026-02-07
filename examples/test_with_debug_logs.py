@@ -18,7 +18,7 @@ logging.getLogger("mcp.client").setLevel(logging.WARNING)
 logging.getLogger("langfuse").setLevel(logging.ERROR)
 
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions, ToolResultEvent, ToolCallEvent, ChatSession, TextEvent, StopEvent
+from comate_agent_sdk.agent import AgentConfig, ToolResultEvent, ToolCallEvent, ChatSession, TextEvent, StopEvent
 
 async def main():
     print("\n" + "="*80)
@@ -26,7 +26,7 @@ async def main():
     print("="*80 + "\n")
 
     agent = Agent(
-        options=ComateAgentOptions(
+        config=AgentConfig(
             mcp_servers={
                 "exa_search": {
                     "type": "http",

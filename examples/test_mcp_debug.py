@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 
 # 设置详细日志
 logging.basicConfig(
@@ -19,7 +19,7 @@ async def main():
     print("=" * 80)
 
     agent = Agent(
-        options=ComateAgentOptions(
+        config=AgentConfig(
             mcp_servers={
                 "exa_search": {
                     "type": "http",

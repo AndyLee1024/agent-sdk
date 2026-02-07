@@ -1,5 +1,5 @@
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions, ToolResultEvent, PreCompactEvent, ThinkingEvent,SessionInitEvent, ChatSession, TextEvent, StopEvent, ToolCallEvent
+from comate_agent_sdk.agent import AgentConfig, ToolResultEvent, PreCompactEvent, ThinkingEvent,SessionInitEvent, ChatSession, TextEvent, StopEvent, ToolCallEvent
 from comate_agent_sdk.llm import ChatOpenAI
 from comate_agent_sdk.tools import tool
 import asyncio
@@ -9,7 +9,7 @@ async def add(a: int, b: int) -> int:
     return a + b
 
 agent = Agent(
-    options=ComateAgentOptions(
+    config=AgentConfig(
         mcp_servers={
             "exa_search": {
                  "type": "http",

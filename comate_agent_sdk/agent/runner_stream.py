@@ -36,11 +36,11 @@ from comate_agent_sdk.llm.messages import (
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.agent.core import Agent
+    from comate_agent_sdk.agent.core import AgentRuntime
 
 
 async def query_stream(
-    agent: "Agent", message: str | list[ContentPartTextParam | ContentPartImageParam]
+    agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]
 ) -> AsyncIterator[AgentEvent]:
     """流式执行：发送消息并逐步产出事件。"""
     # Add the user message to context (supports both string and multi-modal content)

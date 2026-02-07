@@ -1,25 +1,15 @@
 """
 A framework for building agentic applications with LLMs.
-
-Example:
-    from comate_agent_sdk import Agent
-    from comate_agent_sdk.agent import ComateAgentOptions
-    from comate_agent_sdk.llm import ChatOpenAI
-    from comate_agent_sdk.tools import tool
-
-    @tool("Add two numbers")
-    async def add(a: int, b: int) -> int:
-        return a + b
-
-    agent = Agent(
-        llm=ChatOpenAI(model="gpt-4o"),
-        options=ComateAgentOptions(tools=[add]),
-    )
-
-    result = await agent.query("What is 2 + 3?")
 """
 
-from comate_agent_sdk.agent import Agent, ChatSession, SessionInitEvent
+from comate_agent_sdk.agent import (
+    Agent,
+    AgentConfig,
+    AgentRuntime,
+    AgentTemplate,
+    ChatSession,
+    SessionInitEvent,
+)
 from comate_agent_sdk.context import MemoryConfig
 from comate_agent_sdk.observability import Laminar, observe, observe_debug
 from comate_agent_sdk.tools import Depends, tool
@@ -40,6 +30,9 @@ from comate_agent_sdk.mcp import create_sdk_mcp_server, mcp_tool
 
 __all__ = [
     "Agent",
+    "AgentTemplate",
+    "AgentRuntime",
+    "AgentConfig",
     "ChatSession",
     "SessionInitEvent",
     "Laminar",

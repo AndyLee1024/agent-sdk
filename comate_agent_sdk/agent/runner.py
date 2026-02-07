@@ -15,10 +15,10 @@ from comate_agent_sdk.llm.views import ChatInvokeCompletion
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.agent.core import Agent
+    from comate_agent_sdk.agent.core import AgentRuntime
 
 
-async def generate_max_iterations_summary(agent: "Agent") -> str:
+async def generate_max_iterations_summary(agent: "AgentRuntime") -> str:
     """max_iterations 达到上限时，使用 LLM 生成简短总结。"""
     summary_prompt = """The task has reached the maximum number of steps allowed.
 Please provide a concise summary of:
@@ -53,7 +53,7 @@ Keep the summary brief but informative."""
     return f"[Max iterations reached]\n\n{summary}"
 
 
-async def check_and_compact(agent: "Agent", response: ChatInvokeCompletion) -> tuple[bool, "PreCompactEvent | None"]:
+async def check_and_compact(agent: "AgentRuntime", response: ChatInvokeCompletion) -> tuple[bool, "PreCompactEvent | None"]:
     """检查 token 使用并在需要时压缩。
 
     Returns:
@@ -112,7 +112,7 @@ async def check_and_compact(agent: "Agent", response: ChatInvokeCompletion) -> t
     return compacted, event
 
 
-async def precheck_and_compact(agent: "Agent") -> tuple[bool, "PreCompactEvent | None"]:
+async def precheck_and_compact(agent: "AgentRuntime") -> tuple[bool, "PreCompactEvent | None"]:
     """基于 IR 估算值预检查并压缩。
 
     在工具结果添加后调用,防止下一次 invoke_llm 超限。
@@ -176,7 +176,7 @@ async def precheck_and_compact(agent: "Agent") -> tuple[bool, "PreCompactEvent |
     return compacted, event
 
 
-async def query(agent: "Agent", message: str) -> str:
+async def query(agent: "AgentRuntime", message: str) -> str:
     """非流式执行：发送消息并返回最终文本。"""
     # Add the user message to context
     agent._context.add_message(UserMessage(content=message))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -87,10 +88,9 @@ def resolve_mcp_servers(
     if isinstance(mcp_servers, (str, Path)):
         return load_mcp_servers_from_path(Path(mcp_servers))
 
-    if isinstance(mcp_servers, dict):
+    if isinstance(mcp_servers, Mapping):
         # 显式 {} 表示禁用/不配置任何 server
-        return mcp_servers
+        return {str(alias): cfg for alias, cfg in mcp_servers.items()}  # type: ignore[dict-item]
 
     logger.warning(f"不支持的 mcp_servers 类型：{type(mcp_servers).__name__}")
     return {}
-

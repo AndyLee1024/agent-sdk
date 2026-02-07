@@ -29,12 +29,12 @@ Ephemeral 机制 ──────► Context FileSystem
 
 ```python
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.llm import ChatAnthropic
 
 agent = Agent(
     llm=ChatAnthropic(),
-    options=ComateAgentOptions(
+    config=AgentConfig(
         tools=[...],
 
         # Context FileSystem 配置
@@ -178,7 +178,7 @@ SelectiveCompactionPolicy.compact()
 
 ```python
 from comate_agent_sdk import Agent
-from comate_agent_sdk.agent import ComateAgentOptions
+from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.llm import ChatAnthropic
 from comate_agent_sdk.tools import tool
 
@@ -188,7 +188,7 @@ async def read_file(path: str) -> str:
 
 agent = Agent(
     llm=ChatAnthropic(),
-    options=ComateAgentOptions(
+    config=AgentConfig(
         tools=[read_file],
         offload_enabled=True,
         offload_token_threshold=1000,
