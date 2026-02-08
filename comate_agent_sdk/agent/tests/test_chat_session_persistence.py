@@ -1,6 +1,8 @@
+import asyncio
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from comate_agent_sdk import Agent
@@ -11,9 +13,12 @@ from comate_agent_sdk.agent.chat_session import (
     _build_conversation_event,
     _events_jsonl_append,
     _replay_conversation_events,
+    _replay_session_events,
 )
 from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage, UserMessage
+from comate_agent_sdk.llm.views import ChatInvokeUsage
+from comate_agent_sdk.tokens.views import TokenUsageEntry
 
 
 class _FakeChatModel:
@@ -33,6 +38,29 @@ class _FakeChatModel:
 
 
 class TestChatSessionPersistence(unittest.TestCase):
+    @staticmethod
+    def _make_usage_entry(
+        *,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        level: str = "MID",
+    ) -> TokenUsageEntry:
+        return TokenUsageEntry(
+            model=model,
+            timestamp=datetime.now(),
+            usage=ChatInvokeUsage(
+                prompt_tokens=prompt_tokens,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+            level=level,
+            source="agent",
+        )
+
     def test_chat_session_constructs_with_session_options_clone(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -279,6 +307,178 @@ class TestChatSessionPersistence(unittest.TestCase):
             turn, replayed = _replay_conversation_events(path=path, offload_root=offload_root)
             self.assertEqual(turn, 2)
             self.assertEqual([i.id for i in replayed], ["b", "a"])
+
+    def test_replay_session_events_includes_usage_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            offload_root = root / "offload"
+            path = root / "context.jsonl"
+
+            usage_entry = self._make_usage_entry(
+                model="m1",
+                prompt_tokens=12,
+                completion_tokens=8,
+            )
+            _events_jsonl_append(
+                path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 1,
+                    "op": "usage_delta",
+                    "usage": {
+                        "adds": [usage_entry.model_dump(mode="json")]
+                    },
+                },
+            )
+
+            turn, replayed_items, replayed_usage = _replay_session_events(
+                path=path,
+                offload_root=offload_root,
+            )
+            self.assertEqual(turn, 1)
+            self.assertEqual(replayed_items, [])
+            self.assertEqual(len(replayed_usage), 1)
+            self.assertEqual(replayed_usage[0].model, "m1")
+            self.assertEqual(replayed_usage[0].usage.total_tokens, 20)
+
+    def test_replay_session_events_usage_reset_clears_history(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            offload_root = root / "offload"
+            path = root / "context.jsonl"
+
+            entry_a = self._make_usage_entry(
+                model="m1",
+                prompt_tokens=10,
+                completion_tokens=5,
+            )
+            entry_b = self._make_usage_entry(
+                model="m2",
+                prompt_tokens=6,
+                completion_tokens=4,
+            )
+            entry_c = self._make_usage_entry(
+                model="m3",
+                prompt_tokens=3,
+                completion_tokens=2,
+            )
+
+            _events_jsonl_append(
+                path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 1,
+                    "op": "usage_delta",
+                    "usage": {
+                        "adds": [
+                            entry_a.model_dump(mode="json"),
+                            entry_b.model_dump(mode="json"),
+                        ]
+                    },
+                },
+            )
+            _events_jsonl_append(
+                path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 2,
+                    "op": "usage_reset",
+                    "usage": {"entries": []},
+                },
+            )
+            _events_jsonl_append(
+                path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 3,
+                    "op": "usage_delta",
+                    "usage": {"adds": [entry_c.model_dump(mode="json")]},
+                },
+            )
+
+            turn, _, replayed_usage = _replay_session_events(path=path, offload_root=offload_root)
+            self.assertEqual(turn, 3)
+            self.assertEqual(len(replayed_usage), 1)
+            self.assertEqual(replayed_usage[0].model, "m3")
+            self.assertEqual(replayed_usage[0].usage.total_tokens, 5)
+
+    def test_chat_session_resume_restores_usage_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            path = session_root / "context.jsonl"
+            usage_entry = self._make_usage_entry(
+                model="m1",
+                prompt_tokens=11,
+                completion_tokens=9,
+            )
+            _events_jsonl_append(
+                path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 1,
+                    "op": "usage_delta",
+                    "usage": {
+                        "adds": [usage_entry.model_dump(mode="json")]
+                    },
+                },
+            )
+
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+            session = ChatSession.resume(
+                agent,
+                session_id="s1",
+                storage_root=session_root,
+            )
+
+            usage = asyncio.run(session.get_usage())
+            self.assertEqual(usage.entry_count, 1)
+            self.assertEqual(usage.total_prompt_tokens, 11)
+            self.assertEqual(usage.total_completion_tokens, 9)
+            self.assertEqual(usage.total_tokens, 20)
+
+    def test_clear_history_writes_usage_reset_event(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+
+            session = ChatSession(
+                agent,
+                session_id="s1",
+                storage_root=session_root,
+            )
+            session.clear_history()
+
+            lines = [
+                json.loads(line)
+                for line in (session_root / "context.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual([line["op"] for line in lines], ["conversation_reset", "usage_reset"])
+            self.assertEqual(lines[0]["turn_number"], 1)
+            self.assertEqual(lines[1]["turn_number"], 1)
 
 
 if __name__ == "__main__":

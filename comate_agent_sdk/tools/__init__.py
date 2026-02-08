@@ -27,9 +27,13 @@ Example:
     registry = get_default_registry()
 """
 
+import logging
+
 from comate_agent_sdk.tools.decorator import Tool, ToolContent, tool
 from comate_agent_sdk.tools.depends import DependencyOverrides, Depends
 from comate_agent_sdk.tools.registry import ToolRegistry
+
+logger = logging.getLogger(__name__)
 
 # ====== SDK 内置默认 Registry ======
 _default_registry = ToolRegistry()
@@ -39,10 +43,9 @@ try:
     from comate_agent_sdk.system_tools import register_system_tools
 
     register_system_tools(_default_registry)
-except Exception:
+except Exception as e:
     # 避免 import 时阻塞 SDK 基本可用性
-    # 详细错误通过 logger 记录在 system_tools 内部
-    pass
+    logger.warning(f"初始化默认系统工具失败：{e}", exc_info=True)
 
 
 def get_default_registry() -> ToolRegistry:
@@ -96,8 +99,8 @@ def reset_default_registry() -> None:
         from comate_agent_sdk.system_tools import register_system_tools
 
         register_system_tools(_default_registry)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"重置默认系统工具失败：{e}", exc_info=True)
 
 
 __all__ = [

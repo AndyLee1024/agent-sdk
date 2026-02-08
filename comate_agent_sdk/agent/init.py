@@ -58,9 +58,8 @@ def build_template(template: "AgentTemplate") -> None:
 
     # ===== Subagent 解析（内置 + 发现 + 用户级 merge） =====
     # 语义：
-    # - 内置 subagent 始终加载，不受 cfg.agents 控制
-    # - agents is None：允许自动发现（+ 内置）
-    # - agents == ()：显式禁用用户/发现级，但内置照常注入
+    # - agents is None：默认行为，加载内置 + 自动发现 + 用户显式配置
+    # - agents == ()：显式禁用 subagent（包括内置）
     # - agents 非空 tuple：内置 + 自动发现 + merge（同名以显式配置优先）
     # - 用户/发现的 agent 名称不能与内置重名（抛 ValueError）
     from comate_agent_sdk.subagent.builtin import get_builtin_agents, get_builtin_agent_names
@@ -70,9 +69,8 @@ def build_template(template: "AgentTemplate") -> None:
 
     resolved_agents: tuple | None
     if cfg.agents == ():
-        # 显式禁用用户级 subagent，但内置的始终存在
-        # 无内置时保持空 tuple 语义（完全禁用 subagent 系统）
-        resolved_agents = tuple(builtin_agents)
+        # 显式禁用 subagent（包括内置）
+        resolved_agents = ()
     else:
         from comate_agent_sdk.subagent import discover_subagents
 
@@ -300,9 +298,9 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         if user_task_tools:
             raise ValueError(
                 "检测到用户提供了同名工具 'Task'。"
-                "'Task' 为 subagent 调度保留名（除非显式禁用 subagent：agents=[]）。"
+                "'Task' 为 subagent 调度保留名（除非显式禁用 subagent：agents=[]/()）。"
                 "解决方式：1) 将你的工具改名（不要叫 'Task'）；"
-                "2) 显式禁用 subagent（例如 agents=[]）。"
+                "2) 显式禁用 subagent（例如 agents=[]/()）。"
             )
 
     if runtime._is_subagent and runtime.agents:

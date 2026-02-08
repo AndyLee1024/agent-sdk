@@ -30,7 +30,6 @@ from comate_agent_sdk.system_tools.description import (
     LS_USAGE_RULES,
     TODO_USAGE_RULES,
     WEBFETCH_USAGE_RULES,
-    ASKUSERQUESTION_USAGE_RULES,
 )
 
 logger = logging.getLogger(__name__)
@@ -63,6 +62,18 @@ def _ensure_abs_path(file_path: str) -> Path:
     if not p.is_absolute():
         raise ValueError(f"file_path 必须是绝对路径：{file_path}")
     return p
+
+
+def _resolve_read_path(file_path: str, project_root: Path) -> Path:
+    """Resolve read path.
+
+    - absolute path: use as-is
+    - relative path: resolve against project_root
+    """
+    p = Path(file_path)
+    if p.is_absolute():
+        return p.resolve()
+    return (project_root / p).resolve()
 
 
 def _resolve_search_path(path: str | None, project_root: Path) -> Path:
@@ -178,7 +189,7 @@ async def Read(
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     try:
-        path = _ensure_abs_path(file_path)
+        path = _resolve_read_path(file_path, ctx.project_root)
         if not path.exists():
             return {"content": f"Error: File not found: {file_path}", "total_lines": 0, "lines_returned": 0}
         if path.is_dir():
@@ -966,15 +977,13 @@ class _Question(BaseModel):
 
 class _AskUserQuestionInput(BaseModel):
     questions: list[_Question] = Field(min_length=1, max_length=4, description="Questions to ask the user (1-4 questions)")
-
     model_config = {"extra": "forbid"}
 
 
 @tool(
-    "Ask the user questions during execution to gather input and clarify requirements.",
-    name="AskUserQuestion",
-    usage_rules=ASKUSERQUESTION_USAGE_RULES,
-)
+"Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- Users will always be able to select \"Other\" to provide custom text input\n- Use multiSelect: true to allow multiple answers to be selected for a question\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n\nPlan mode note: In plan mode, use this tool to clarify requirements or choose between approaches BEFORE finalizing your plan. Do NOT use this tool to ask \"Is my plan ready?\" or \"Should I proceed?\" - use ExitPlanMode for plan approval.\n",
+    name="AskUserQuestion"
+    )
 async def AskUserQuestion(
     params: _AskUserQuestionInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]

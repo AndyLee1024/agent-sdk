@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+from typing import Any
+
+from rich.console import Console
+from rich.live import Live
+from rich.text import Text
+
+from comate_agent_sdk.agent.events import (
+    PreCompactEvent,
+    SessionInitEvent,
+    StopEvent,
+    TextEvent,
+    ThinkingEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserQuestionEvent,
+)
+
+from terminal_agent.assistant_render import AssistantStreamRenderer
+from terminal_agent.todo_view import TodoDiffView
+from terminal_agent.tool_view import ToolEventView
+
+_THINKING_GLYPHS: tuple[str, ...] = ("◐", "◓", "◑", "◒")
+
+
+def _truncate(content: str, max_len: int = 300) -> str:
+    if len(content) <= max_len:
+        return content
+    return f"{content[:max_len]}..."
+
+
+class EventRenderer:
+    """Convert SDK stream events into structured terminal UI output."""
+
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._assistant = AssistantStreamRenderer(console)
+        self._tools = ToolEventView(console)
+        self._todo = TodoDiffView(console)
+        self._thinking_live: Live | None = None
+        self._thinking_frame = 0
+
+    def start_turn(self) -> None:
+        self._assistant.start_turn()
+        self._stop_thinking()
+
+    def _update_thinking(self, content: str) -> None:
+        if self._thinking_live is None:
+            self._thinking_live = Live(
+                Text(""),
+                console=self._console,
+                transient=True,
+                refresh_per_second=12,
+            )
+            self._thinking_live.start()
+        glyph = _THINKING_GLYPHS[self._thinking_frame % len(_THINKING_GLYPHS)]
+        self._thinking_frame += 1
+        self._thinking_live.update(
+            Text.assemble(
+                (f"{glyph} ", "dim"),
+                (_truncate(content, 120), "dim italic"),
+            )
+        )
+
+    def _stop_thinking(self) -> None:
+        if self._thinking_live is None:
+            return
+        self._thinking_live.stop()
+        self._thinking_live = None
+
+    def handle_event(self, event: Any) -> tuple[bool, list[dict[str, Any]] | None]:
+        if not isinstance(event, ThinkingEvent):
+            self._stop_thinking()
+
+        match event:
+            case SessionInitEvent(session_id=_):
+                pass
+            case ThinkingEvent(content=thinking):
+                self._update_thinking(thinking)
+            case PreCompactEvent(current_tokens=_, threshold=_, trigger=_):
+                pass
+            case ToolCallEvent(tool=tool_name, args=arguments, tool_call_id=tool_call_id):
+                args_dict = arguments if isinstance(arguments, dict) else {"_raw": str(arguments)}
+                self._tools.render_call(tool_name, args_dict, tool_call_id)
+                self._todo.maybe_render_update(tool_name, args_dict)
+            case ToolResultEvent(tool=tool_name, result=result, tool_call_id=tool_call_id, is_error=is_error):
+                self._tools.render_result(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call_id,
+                    result=result,
+                    is_error=is_error,
+                )
+            case UserQuestionEvent(questions=questions, tool_call_id=_):
+                self._assistant.finalize_markdown()
+                return (True, questions)
+            case TextEvent(content=text):
+                self._assistant.append_text(text)
+            case StopEvent(reason=reason):
+                if reason == "waiting_for_input":
+                    self._assistant.finalize_markdown()
+                    return (True, None)
+                self._assistant.finalize_markdown()
+        return (False, None)

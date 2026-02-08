@@ -12,7 +12,7 @@ from pathlib import Path
 from comate_agent_sdk.agent.events import AgentEvent, SessionInitEvent, StopEvent
 from comate_agent_sdk.agent.service import AgentTemplate, AgentRuntime
 from comate_agent_sdk.context.items import ContextItem, ItemType
-from comate_agent_sdk.tokens.views import UsageSummary
+from comate_agent_sdk.tokens.views import TokenUsageEntry, UsageSummary
 from comate_agent_sdk.llm.messages import (
     AssistantMessage,
     BaseMessage,
@@ -308,12 +308,58 @@ def _build_conversation_event(
     }
 
 
-def _replay_conversation_events(*, path: Path, offload_root: Path) -> tuple[int, list[ContextItem]]:
+def _token_usage_entry_to_dict(*, entry: TokenUsageEntry) -> dict:
+    return entry.model_dump(mode="json")
+
+
+def _token_usage_entry_dict_to_entry(*, data: dict) -> TokenUsageEntry:
+    return TokenUsageEntry.model_validate(data)
+
+
+def _build_usage_event(
+    *,
+    session_id: str,
+    turn_number: int,
+    added_entries: list[TokenUsageEntry],
+) -> dict | None:
+    if not added_entries:
+        return None
+
+    return {
+        "schema_version": PERSISTENCE_SCHEMA_VERSION,
+        "session_id": session_id,
+        "turn_number": turn_number,
+        "op": "usage_delta",
+        "usage": {
+            "adds": [
+                _token_usage_entry_to_dict(entry=entry)
+                for entry in added_entries
+            ]
+        },
+    }
+
+
+def _slice_usage_delta(
+    usage_history: list[TokenUsageEntry],
+    *,
+    before_count: int,
+) -> list[TokenUsageEntry]:
+    if before_count < 0 or before_count > len(usage_history):
+        return list(usage_history)
+    return list(usage_history[before_count:])
+
+
+def _replay_session_events(
+    *,
+    path: Path,
+    offload_root: Path,
+) -> tuple[int, list[ContextItem], list[TokenUsageEntry]]:
     if not path.exists():
-        return 0, []
+        return 0, [], []
 
     items_by_id: dict[str, ContextItem] = {}
     order: list[str] = []
+    usage_entries: list[TokenUsageEntry] = []
     last_turn = 0
 
     with path.open("r", encoding="utf-8") as f:
@@ -334,6 +380,18 @@ def _replay_conversation_events(*, path: Path, offload_root: Path) -> tuple[int,
                 last_turn = turn_number
 
             op = data.get("op")
+            if op == "usage_reset":
+                usage_entries = []
+                continue
+            if op == "usage_delta":
+                usage = data.get("usage") or {}
+                for entry_data in usage.get("adds", []) or []:
+                    try:
+                        usage_entries.append(_token_usage_entry_dict_to_entry(data=entry_data))
+                    except Exception as e:
+                        logger.warning(f"Failed to replay usage entry: {e}", exc_info=True)
+                continue
+
             convo = data.get("conversation") or {}
 
             if op == "conversation_reset":
@@ -400,7 +458,12 @@ def _replay_conversation_events(*, path: Path, offload_root: Path) -> tuple[int,
         if item is not None:
             items.append(item)
 
-    return last_turn, items
+    return last_turn, items, usage_entries
+
+
+def _replay_conversation_events(*, path: Path, offload_root: Path) -> tuple[int, list[ContextItem]]:
+    turn_number, items, _ = _replay_session_events(path=path, offload_root=offload_root)
+    return turn_number, items
 
 
 def _events_jsonl_append(path: Path, event: dict) -> None:
@@ -493,7 +556,7 @@ class ChatSession:
             message_source=message_source,
         )
 
-        turn_number, items = _replay_conversation_events(
+        turn_number, items, usage_entries = _replay_session_events(
             path=session._context_jsonl,
             offload_root=session._offload_root,
         )
@@ -502,6 +565,7 @@ class ChatSession:
             session._agent._context.conversation.items = items
         else:
             logger.info(f"No persisted conversation found for session_id={session_id}, starting empty")
+        session._agent._token_cost.usage_history = usage_entries
 
         session._agent._context.set_turn_number(session._turn_number)
 
@@ -597,6 +661,7 @@ class ChatSession:
         2. 重置 token 使用统计
         3. 重建 context header（system prompt、subagent、skill、memory）
         4. 在持久化 JSONL 文件中写入 conversation_reset 事件
+        5. 在持久化 JSONL 文件中写入 usage_reset 事件
 
         Raises:
             ChatSessionClosedError: 如果 session 已关闭
@@ -624,6 +689,16 @@ class ChatSession:
             },
         }
         _events_jsonl_append(self._context_jsonl, reset_event)
+        usage_reset_event = {
+            "schema_version": PERSISTENCE_SCHEMA_VERSION,
+            "session_id": self.session_id,
+            "turn_number": self._turn_number,
+            "op": "usage_reset",
+            "usage": {
+                "entries": []
+            },
+        }
+        _events_jsonl_append(self._context_jsonl, usage_reset_event)
 
     async def send(self, message: ChatMessage) -> None:
         if self._closed:
@@ -654,6 +729,7 @@ class ChatSession:
 
         self._turn_number += 1
         before = _ConversationState.capture(self._agent._context.conversation.items)
+        before_usage_count = len(self._agent._token_cost.usage_history)
         try:
             async for event in self._agent.query_stream(message):  # type: ignore[arg-type]
                 yield event
@@ -666,6 +742,16 @@ class ChatSession:
                 offload_root=self._offload_root,
             )
             _events_jsonl_append(self._context_jsonl, evt)
+            usage_evt = _build_usage_event(
+                session_id=self.session_id,
+                turn_number=self._turn_number,
+                added_entries=_slice_usage_delta(
+                    self._agent._token_cost.usage_history,
+                    before_count=before_usage_count,
+                ),
+            )
+            if usage_evt is not None:
+                _events_jsonl_append(self._context_jsonl, usage_evt)
 
     async def events(self) -> AsyncIterator[AgentEvent]:
         if self._events_started:
@@ -679,6 +765,7 @@ class ChatSession:
         async for message in self._message_iter():
             self._turn_number += 1
             before = _ConversationState.capture(self._agent._context.conversation.items)
+            before_usage_count = len(self._agent._token_cost.usage_history)
             try:
                 async for event in self._agent.query_stream(message):  # type: ignore[arg-type]
                     yield event
@@ -693,6 +780,16 @@ class ChatSession:
                     offload_root=self._offload_root,
                 )
                 _events_jsonl_append(self._context_jsonl, evt)
+                usage_evt = _build_usage_event(
+                    session_id=self.session_id,
+                    turn_number=self._turn_number,
+                    added_entries=_slice_usage_delta(
+                        self._agent._token_cost.usage_history,
+                        before_count=before_usage_count,
+                    ),
+                )
+                if usage_evt is not None:
+                    _events_jsonl_append(self._context_jsonl, usage_evt)
 
     async def _message_iter(self) -> AsyncIterator[ChatMessage]:
         if self._message_source is not None:

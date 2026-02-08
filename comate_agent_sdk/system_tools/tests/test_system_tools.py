@@ -19,6 +19,7 @@ from comate_agent_sdk.system_tools.tools import (
     WebFetch,
     Write,
 )
+from comate_agent_sdk.tools import get_default_registry
 from comate_agent_sdk.tools.system_context import bind_system_tool_context
 from comate_agent_sdk.tokens import TokenCost
 
@@ -26,6 +27,10 @@ from comate_agent_sdk.tokens import TokenCost
 class TestSystemTools(unittest.TestCase):
     def setUp(self) -> None:
         system_tools_module._WEBFETCH_CACHE.clear()
+
+    def test_default_registry_contains_core_system_tools(self) -> None:
+        names = set(get_default_registry().names())
+        self.assertTrue({"Read", "Grep", "Bash", "Glob"}.issubset(names))
 
     def test_read_offset_is_zero_based_and_default_limit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -43,6 +48,18 @@ class TestSystemTools(unittest.TestCase):
                 self.assertIn("\t" + "l2", out1["content"])
                 self.assertNotIn("\t" + "l1", out1["content"])
                 self.assertEqual(out1["lines_returned"], 1)
+
+    def test_read_accepts_relative_path_resolved_from_project_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            nested = root / "skill" / "SKILL.md"
+            nested.parent.mkdir(parents=True, exist_ok=True)
+            nested.write_text("# skill\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(Read, file_path="skill/SKILL.md")
+                self.assertEqual(out["total_lines"], 1)
+                self.assertIn("\t# skill", out["content"])
 
     def test_write_creates_parent_dirs_and_overwrites(self) -> None:
         with tempfile.TemporaryDirectory() as td:

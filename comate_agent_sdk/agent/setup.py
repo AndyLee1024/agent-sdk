@@ -51,7 +51,7 @@ def setup_subagents(agent: "AgentRuntime") -> None:
             "启用 subagent 时检测到用户提供了同名工具 'Task'。"
             "'Task' 为 subagent 调度保留名，SDK 会注入系统 Task 工具，禁止静默替换。"
             "解决方式：1) 将你的工具改名（不要叫 'Task'）；"
-            "2) 显式禁用 subagent（例如 agents=[]）；"
+            "2) 显式禁用 subagent（例如 agents=[]/()）；"
             "3) 或移除/调整 .agent/subagents 下的定义。"
         )
 
