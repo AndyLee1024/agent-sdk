@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,6 +18,7 @@ logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.core import AgentRuntime, AgentTemplate
+    from comate_agent_sdk.llm.base import BaseChatModel
 
 
 def _setup_env_info(runtime: "AgentRuntime") -> None:
@@ -54,29 +56,53 @@ def build_template(template: "AgentTemplate") -> None:
 
     cfg = template.config
 
-    # ===== Subagent 自动发现和 Merge（模板期一次性） =====
+    # ===== Subagent 解析（内置 + 发现 + 用户级 merge） =====
     # 语义：
-    # - agents is None：允许自动发现
-    # - agents == ()：显式禁用自动发现
-    # - agents 非空 tuple：自动发现并 merge（同名以显式配置优先）
+    # - 内置 subagent 始终加载，不受 cfg.agents 控制
+    # - agents is None：允许自动发现（+ 内置）
+    # - agents == ()：显式禁用用户/发现级，但内置照常注入
+    # - agents 非空 tuple：内置 + 自动发现 + merge（同名以显式配置优先）
+    # - 用户/发现的 agent 名称不能与内置重名（抛 ValueError）
+    from comate_agent_sdk.subagent.builtin import get_builtin_agents, get_builtin_agent_names
+
+    builtin_agents = get_builtin_agents()
+    builtin_names = get_builtin_agent_names()
+
     resolved_agents: tuple | None
     if cfg.agents == ():
-        resolved_agents = ()
+        # 显式禁用用户级 subagent，但内置的始终存在
+        # 无内置时保持空 tuple 语义（完全禁用 subagent 系统）
+        resolved_agents = tuple(builtin_agents)
     else:
         from comate_agent_sdk.subagent import discover_subagents
 
         discovered = discover_subagents(project_root=cfg.project_root)
         user_agents = list(cfg.agents or ())
 
-        if discovered or user_agents:
-            user_names = {a.name for a in user_agents}
-            merged = [a for a in discovered if a.name not in user_names]
-            merged.extend(user_agents)
-            resolved_agents = tuple(merged)
-            if discovered:
-                logger.info(f"Auto-discovered {len(discovered)} subagent(s)")
-        else:
-            resolved_agents = None
+        # 同名冲突检测：用户/发现的 agent 不能与内置重名
+        for a in discovered + user_agents:
+            if a.name in builtin_names:
+                raise ValueError(
+                    f"Subagent '{a.name}' 与系统内置 subagent 同名，不允许覆盖。"
+                    f"请将你的 subagent 改名。"
+                    f"系统内置 subagent: {sorted(builtin_names)}"
+                )
+
+        # merge: discovered + user（同名以 user 优先）
+        agent_map: dict[str, AgentDefinition] = {}
+        for a in discovered:
+            agent_map[a.name] = a
+        for a in user_agents:
+            agent_map[a.name] = a
+
+        # 内置 + 用户级合并
+        all_agents = list(builtin_agents) + list(agent_map.values())
+        resolved_agents = tuple(all_agents) if all_agents else None
+
+        if builtin_agents:
+            logger.info(f"Loaded {len(builtin_agents)} builtin subagent(s)")
+        if discovered:
+            logger.info(f"Auto-discovered {len(discovered)} subagent(s)")
 
     # ===== Skill 自动发现和 Merge（模板期一次性） =====
     from comate_agent_sdk.skill import discover_skills
@@ -138,6 +164,69 @@ def build_template(template: "AgentTemplate") -> None:
     object.__setattr__(template, "_resolved_settings", settings)
     object.__setattr__(template, "_resolved_llm_levels", resolved_llm_levels)
     object.__setattr__(template, "_resolved_llm", resolved_llm)
+
+
+_LLM_INTERNAL_RUNTIME_FIELDS = {
+    "_client",
+    "_langfuse_instrumented",
+    "_cached_content_name",
+    "_cached_content_key",
+}
+
+
+def _clone_llm_with_model(llm: "BaseChatModel", model_name: str) -> "BaseChatModel":
+    """Clone an LLM instance while overriding its model field.
+
+    This intentionally avoids dataclasses.replace to prevent carrying
+    internal runtime caches (e.g., _client) into the cloned instance.
+    """
+    if not is_dataclass(llm):
+        raise TypeError(
+            f"LLM {type(llm).__name__} 不是 dataclass，无法安全克隆 model"
+        )
+
+    kwargs: dict[str, object] = {}
+    for f in fields(llm):
+        if not f.init or f.name == "model":
+            continue
+        if f.name in _LLM_INTERNAL_RUNTIME_FIELDS:
+            continue
+        kwargs[f.name] = getattr(llm, f.name)
+
+    return llm.__class__(model=model_name, **kwargs)
+
+
+def _resolve_compaction_llm(
+    runtime: "AgentRuntime",
+    compaction_config: CompactionConfig,
+) -> "BaseChatModel":
+    """Resolve the LLM used for compaction.
+
+    Priority:
+    1) MID level model (default)
+    2) Override model name via compaction.model
+    3) Fallback to runtime.llm on clone failure
+    """
+    if runtime.llm is None:
+        raise ValueError("runtime.llm 未初始化，无法解析压缩模型")
+
+    compaction_llm = runtime.llm
+
+    if runtime.llm_levels is not None and "MID" in runtime.llm_levels:
+        compaction_llm = runtime.llm_levels["MID"]
+        logger.info(f"压缩默认使用 MID 模型: {compaction_llm.model}")
+    else:
+        logger.warning("未找到 MID 档位模型，压缩回退到主 LLM")
+
+    if compaction_config.model:
+        try:
+            compaction_llm = _clone_llm_with_model(compaction_llm, compaction_config.model)
+            logger.info(f"压缩使用覆盖模型: {compaction_config.model}")
+        except Exception as e:
+            logger.warning(f"创建压缩覆盖模型失败，回退到主 LLM: {e}")
+            compaction_llm = runtime.llm
+
+    return compaction_llm
 
 
 def init_runtime_from_template(runtime: "AgentRuntime") -> None:
@@ -259,9 +348,10 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     runtime._context = ContextIR()
 
     compaction_config = runtime.compaction if runtime.compaction is not None else CompactionConfig()
+    compaction_llm = _resolve_compaction_llm(runtime, compaction_config)
     runtime._compaction_service = CompactionService(
         config=compaction_config,
-        llm=runtime.llm,
+        llm=compaction_llm,
         token_cost=runtime._token_cost,
     )
 

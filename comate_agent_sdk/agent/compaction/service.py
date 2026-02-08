@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
+from html import escape as xml_escape
 from typing import TYPE_CHECKING
 
 from comate_agent_sdk.agent.compaction.models import (
@@ -20,6 +21,8 @@ from comate_agent_sdk.agent.compaction.models import (
 from comate_agent_sdk.llm.messages import (
     AssistantMessage,
     BaseMessage,
+    SystemMessage,
+    ToolMessage,
     UserMessage,
 )
 
@@ -142,8 +145,8 @@ class CompactionService:
         """Perform compaction on the message history.
 
         This method:
-        1. Prepares the messages for summarization (removing pending tool calls)
-        2. Appends the summary prompt as a user message
+        1. Serializes conversation messages into XML-like plain text
+        2. Builds an isolated summarization call (system + user message)
         3. Calls the LLM to generate a summary
         4. Extracts the summary and returns it
 
@@ -171,14 +174,14 @@ class CompactionService:
             f"{threshold}. Performing compaction."
         )
 
-        # Prepare messages for summarization
-        prepared_messages = self._prepare_messages_for_summary(messages)
-
-        # Add the summary prompt
-        prepared_messages.append(UserMessage(content=self.config.summary_prompt))
+        serialized = self._serialize_messages_to_text(messages)
+        summary_messages: list[BaseMessage] = [
+            SystemMessage(content=self.config.summary_system_prompt),
+            UserMessage(content=serialized),
+        ]
 
         # Generate the summary
-        response = await model.ainvoke(messages=prepared_messages)
+        response = await model.ainvoke(messages=summary_messages)
 
         if response.usage and self.token_cost is not None:
             self.token_cost.add_usage(
@@ -192,16 +195,59 @@ class CompactionService:
 
         # Extract summary from tags if present
         extracted_summary = self._extract_summary(summary_text)
+        normalized_summary = extracted_summary.strip()
+        stop_reason = getattr(response, "stop_reason", None)
+        failure_reason: str | None = None
+        failure_detail: str | None = None
+        compacted = True
+        raw_content_length = len(response.content) if response.content is not None else 0
+        completion_tokens = response.usage.completion_tokens if response.usage else 0
+        has_summary_tags = bool(re.search(r"<summary>.*?</summary>", summary_text, re.DOTALL))
+        empty_tag_body = bool(re.search(r"<summary>\s*</summary>", summary_text, re.DOTALL))
+        blank_content = bool(response.content is not None and not summary_text.strip())
+
+        if not normalized_summary:
+            compacted = False
+            if response.content is None:
+                failure_reason = "content_none"
+            elif stop_reason == "max_tokens":
+                failure_reason = "max_tokens_no_content"
+            elif empty_tag_body:
+                failure_reason = "empty_tag_body"
+            elif getattr(response, "thinking", None) and blank_content:
+                failure_reason = "thinking_only_no_content"
+            elif blank_content:
+                failure_reason = "blank_content"
+            else:
+                failure_reason = "empty_summary"
+            failure_detail = (
+                "diag("
+                f"raw_content_len={raw_content_length},"
+                f"completion_tokens={completion_tokens},"
+                f"has_summary_tags={has_summary_tags},"
+                f"empty_tag_body={empty_tag_body}"
+                ")"
+            )
 
         new_tokens = response.usage.completion_tokens if response.usage else 0
 
-        log.info(f"Compaction complete. New token usage: {new_tokens}")
+        if compacted:
+            log.info(f"Compaction complete. New token usage: {new_tokens}")
+        else:
+            log.warning(
+                "Compaction summary is empty; summary replacement skipped. "
+                f"reason={failure_reason}, stop_reason={stop_reason}, {failure_detail}"
+            )
 
         return CompactionResult(
-            compacted=True,
+            compacted=compacted,
             original_tokens=original_tokens,
             new_tokens=new_tokens,
-            summary=extracted_summary,
+            summary=normalized_summary or None,
+            failure_reason=failure_reason,
+            failure_detail=failure_detail,
+            stop_reason=stop_reason,
+            raw_content_length=raw_content_length,
         )
 
     async def check_and_compact(
@@ -231,6 +277,8 @@ class CompactionService:
             return messages, CompactionResult(compacted=False)
 
         result = await self.compact(messages, llm)
+        if not result.compacted or not result.summary:
+            return messages, result
 
         # Replace entire history with summary as a user message
         # This matches the Anthropic SDK behavior
@@ -251,45 +299,59 @@ class CompactionService:
         """
         return [UserMessage(content=summary)]
 
-    def _prepare_messages_for_summary(
-        self,
-        messages: list[BaseMessage],
-    ) -> list[BaseMessage]:
-        """Prepare messages for summarization.
+    def _serialize_messages_to_text(self, messages: list[BaseMessage]) -> str:
+        """Serialize conversation messages into XML-like plain text."""
+        lines = ["<conversation>"]
 
-        This removes tool_calls from the last assistant message to avoid
-        API errors (tool_use requires tool_result which we won't have).
+        for message in messages:
+            if isinstance(message, UserMessage):
+                lines.append('  <message role="user">')
+                self._append_escaped_text_lines(lines, message.text, indent=4)
+                lines.append("  </message>")
+                continue
 
-        Args:
-                messages: The original message history.
+            if isinstance(message, AssistantMessage):
+                lines.append('  <message role="assistant">')
+                self._append_escaped_text_lines(lines, message.text, indent=4)
+                if message.tool_calls:
+                    lines.append("    <tool_calls>")
+                    for call in message.tool_calls:
+                        call_line = self._render_tool_call_line(call.function.name, call.function.arguments)
+                        lines.append(f"      {xml_escape(call_line, quote=True)}")
+                    lines.append("    </tool_calls>")
+                lines.append("  </message>")
+                continue
 
-        Returns:
-                A cleaned copy of the messages suitable for summarization.
-        """
-        if not messages:
-            return []
+            if isinstance(message, ToolMessage):
+                tool_name = xml_escape(message.tool_name, quote=True)
+                tool_call_id = xml_escape(message.tool_call_id, quote=True)
+                lines.append(
+                    f'  <message role="tool" name="{tool_name}" tool_call_id="{tool_call_id}">'
+                )
+                self._append_escaped_text_lines(lines, message.text, indent=4)
+                lines.append("  </message>")
+                continue
 
-        # Make a copy to avoid modifying the original
-        prepared: list[BaseMessage] = []
+            lines.append('  <message role="unknown">')
+            unknown_text = getattr(message, "text", "")
+            if not isinstance(unknown_text, str) or not unknown_text:
+                raw_content = getattr(message, "content", "")
+                unknown_text = "" if raw_content is None else str(raw_content)
+            self._append_escaped_text_lines(lines, unknown_text, indent=4)
+            lines.append("  </message>")
 
-        for i, msg in enumerate(messages):
-            is_last = i == len(messages) - 1
+        lines.append("</conversation>")
+        return "\n".join(lines)
 
-            if is_last and isinstance(msg, AssistantMessage) and msg.tool_calls:
-                # Remove tool_calls from the last assistant message
-                # Keep the content if there is any text
-                if msg.content:
-                    prepared.append(
-                        AssistantMessage(
-                            content=msg.content,
-                            tool_calls=None,
-                        )
-                    )
-                # If no content, skip this message entirely
-            else:
-                prepared.append(msg)
+    def _append_escaped_text_lines(self, lines: list[str], text: str, *, indent: int) -> None:
+        if not text:
+            return
+        prefix = " " * indent
+        for row in text.splitlines():
+            lines.append(f"{prefix}{xml_escape(row, quote=True)}")
 
-        return prepared
+    def _render_tool_call_line(self, name: str, arguments: str) -> str:
+        return f"- {name}({arguments})"
 
     def _extract_summary(self, text: str) -> str:
         """Extract summary content from <summary></summary> tags.

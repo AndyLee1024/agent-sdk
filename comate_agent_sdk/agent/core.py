@@ -263,6 +263,14 @@ class AgentRuntime:
         self.options.include_cost = value
 
     @property
+    def emit_compaction_meta_events(self) -> bool:
+        return self.options.emit_compaction_meta_events
+
+    @emit_compaction_meta_events.setter
+    def emit_compaction_meta_events(self, value: bool) -> None:
+        self.options.emit_compaction_meta_events = value
+
+    @property
     def dependency_overrides(self) -> dict | None:
         return self.options.dependency_overrides
 
@@ -349,6 +357,22 @@ class AgentRuntime:
     @llm_retryable_status_codes.setter
     def llm_retryable_status_codes(self, value: set[int]) -> None:
         self.options.llm_retryable_status_codes = value
+
+    @property
+    def precheck_buffer_ratio(self) -> float:
+        return self.options.precheck_buffer_ratio
+
+    @precheck_buffer_ratio.setter
+    def precheck_buffer_ratio(self, value: float) -> None:
+        self.options.precheck_buffer_ratio = value
+
+    @property
+    def token_count_timeout_ms(self) -> int:
+        return self.options.token_count_timeout_ms
+
+    @token_count_timeout_ms.setter
+    def token_count_timeout_ms(self, value: int) -> None:
+        self.options.token_count_timeout_ms = value
 
     @property
     def agents(self) -> list | None:
@@ -560,7 +584,8 @@ class AgentRuntime:
     async def _check_and_compact(self, response: "ChatInvokeCompletion") -> bool:
         from comate_agent_sdk.agent.runner import check_and_compact
 
-        return await check_and_compact(self, response)
+        compacted, _, _ = await check_and_compact(self, response)
+        return compacted
 
     async def query(self, message: str) -> str:
         from comate_agent_sdk.agent.runner import query

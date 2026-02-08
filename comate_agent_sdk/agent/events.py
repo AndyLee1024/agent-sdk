@@ -286,6 +286,44 @@ class PreCompactEvent:
 		return f'📦 Pre-compact: {self.current_tokens} tokens (threshold: {self.threshold}, trigger: {self.trigger})'
 
 
+@dataclass
+class CompactionMetaEvent:
+	"""调试用途的压缩元事件（默认关闭）。"""
+
+	phase: Literal['selective_start', 'selective_done', 'summary_start', 'summary_done', 'rollback']
+	"""压缩阶段。"""
+
+	tokens_before: int
+	"""阶段前 token 数。"""
+
+	tokens_after: int
+	"""阶段后 token 数。"""
+
+	tool_blocks_kept: int = 0
+	"""工具块保留数。"""
+
+	tool_blocks_dropped: int = 0
+	"""工具块删除数。"""
+
+	tool_calls_truncated: int = 0
+	"""tool_call.arguments 截断数。"""
+
+	tool_results_truncated: int = 0
+	"""tool_result.content 截断数。"""
+
+	reason: str = ''
+	"""阶段原因说明。"""
+
+	def __str__(self) -> str:
+		return (
+			f'🧩 CompactionMeta phase={self.phase} '
+			f'{self.tokens_before}->{self.tokens_after} '
+			f'kept={self.tool_blocks_kept} dropped={self.tool_blocks_dropped} '
+			f'tc={self.tool_calls_truncated} tr={self.tool_results_truncated} '
+			f'reason={self.reason}'
+		)
+
+
 # Union type for all events
 AgentEvent = (
 	SessionInitEvent
@@ -303,4 +341,5 @@ AgentEvent = (
 	| HiddenUserMessageEvent
 	| UserQuestionEvent
 	| PreCompactEvent
+	| CompactionMetaEvent
 )

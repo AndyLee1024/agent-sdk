@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
+from comate_agent_sdk.system_tools import tools as system_tools_module
 from comate_agent_sdk.system_tools.tools import (
     Bash,
     Edit,
@@ -23,6 +24,9 @@ from comate_agent_sdk.tokens import TokenCost
 
 
 class TestSystemTools(unittest.TestCase):
+    def setUp(self) -> None:
+        system_tools_module._WEBFETCH_CACHE.clear()
+
     def test_read_offset_is_zero_based_and_default_limit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -255,9 +259,53 @@ class TestSystemTools(unittest.TestCase):
                 llm_levels=llm_levels,
             ):
                 with mock.patch.dict("sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}):
-                    out = self._run_raw(WebFetch, url="https://example.com", prompt="Summarize")
+                    out = self._run_raw(WebFetch, url="https://example-404.com", prompt="Summarize")
                     self.assertTrue(out.startswith("Error: HTTP 404"))
                     self.assertEqual(len(token_cost.usage_history), 0)
+
+    def test_webfetch_llm_timeout_returns_timeout_error(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            class HangingLLM:
+                model = "dummy-low"
+
+                @property
+                def provider(self) -> str:
+                    return "dummy"
+
+                @property
+                def name(self) -> str:
+                    return self.model
+
+                async def ainvoke(self, messages, tools=None, tool_choice=None, **kwargs):
+                    import asyncio
+
+                    await asyncio.sleep(999)
+                    return ChatInvokeCompletion(content="should-not-return")
+
+            token_cost = TokenCost(include_cost=False)
+            llm_levels = {"LOW": HangingLLM()}
+
+            def fake_get(url, timeout, impersonate):
+                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>")
+
+            with bind_system_tool_context(
+                project_root=root,
+                session_id="s1",
+                session_root=root / "sessions" / "s1",
+                token_cost=token_cost,
+                llm_levels=llm_levels,
+            ):
+                with mock.patch("comate_agent_sdk.system_tools.tools._WEBFETCH_LLM_TIMEOUT_SECONDS", 0.01):
+                    with mock.patch.dict(
+                        "sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}
+                    ):
+                        with mock.patch.dict("sys.modules", {"markdownify": SimpleNamespace(markdownify=lambda html: "# Hello")}):
+                            out = self._run_raw(WebFetch, url="https://example-timeout.com", prompt="Summarize")
+                            self.assertTrue(out.startswith("Error: WebFetch LLM timeout after"))
+                            self.assertIn("timeout", out.lower())
+                            self.assertEqual(len(token_cost.usage_history), 0)
 
     @staticmethod
     def _run(tool_obj, /, **kwargs):

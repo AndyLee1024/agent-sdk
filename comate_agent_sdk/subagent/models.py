@@ -27,6 +27,7 @@ class AgentDefinition:
     max_iterations: int = 50  # 最大迭代次数
     timeout: float | None = None  # 超时时间（秒）
     compaction: CompactionConfig | None = None  # 上下文压缩配置
+    source: str = "user"  # 来源标记: "builtin" | "discovered" | "user"
 
     @classmethod
     def from_markdown(cls, content: str) -> "AgentDefinition":

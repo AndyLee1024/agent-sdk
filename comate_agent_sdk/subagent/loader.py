@@ -3,6 +3,7 @@ Subagent 自动发现和加载
 """
 
 import logging
+from dataclasses import replace
 from pathlib import Path
 
 from comate_agent_sdk.subagent.models import AgentDefinition
@@ -48,6 +49,7 @@ def discover_subagents(
     for md_file in sorted(target_dir.glob("*.md")):
         try:
             agent = AgentDefinition.from_file(md_file)
+            agent = replace(agent, source="discovered")
             agents.append(agent)
             logging.info(f"Loaded {source} subagent: {agent.name} from {md_file}")
         except Exception as e:

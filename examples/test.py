@@ -1,5 +1,6 @@
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig, ToolResultEvent, PreCompactEvent, ThinkingEvent, SessionInitEvent, ChatSession, TextEvent, StopEvent, ToolCallEvent, UserQuestionEvent
+from comate_agent_sdk.context.items import ItemType
 from comate_agent_sdk.llm import ChatOpenAI
 from comate_agent_sdk.tools import tool
 import asyncio
@@ -51,6 +52,55 @@ def _truncate(text: str, max_len: int = 200) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len] + "..."
+
+
+def _display_history(session: ChatSession) -> None:
+    """Display conversation history when resuming a session."""
+    items = session._agent._context.conversation.items
+    
+    # Filter only user and assistant messages
+    history_items = [
+        item for item in items 
+        if item.item_type in (ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE)
+    ]
+    
+    if not history_items:
+        console.print("[dim]📭 No conversation history found.[/]")
+        return
+    
+    console.print(Panel(
+        f"[bold]Found {len(history_items)} messages in history[/]",
+        title="📜 Conversation History",
+        border_style="yellow"
+    ))
+    
+    for item in history_items:
+        if item.item_type == ItemType.USER_MESSAGE:
+            # User message
+            content = item.content_text or (item.message.content if item.message else "")
+            preview = _truncate(str(content), 500)
+            console.print(f"[bold green]👤 User:[/] {preview}")
+        elif item.item_type == ItemType.ASSISTANT_MESSAGE:
+            # Assistant message
+            content = item.content_text or ""
+            if not content and item.message:
+                # Try to extract text content from message
+                msg_content = item.message.content
+                if isinstance(msg_content, str):
+                    content = msg_content
+                elif isinstance(msg_content, list):
+                    # Extract text parts
+                    text_parts = [p.get("text", "") for p in msg_content if isinstance(p, dict) and p.get("type") == "text"]
+                    content = "".join(text_parts)
+            
+            if content:
+                preview = _truncate(content, 500)
+                console.print(f"[bold blue]🤖 Assistant:[/] {preview}")
+            else:
+                # Might be a tool call only message
+                console.print(f"[bold blue]🤖 Assistant:[/] [dim](tool call)[/]")
+    
+    console.print("[dim]─" * 50 + "[/]\n")
 
 
 
@@ -270,6 +320,8 @@ async def main():
         # 恢复已有会话 (resume)
         console.print(f"[yellow]⏳ Resuming session: {session_id}[/]")
         session = ChatSession.resume(agent, session_id=session_id)
+        # 显示历史对话
+        _display_history(session)
     else:
         # 创建新会话
         session = ChatSession(agent)

@@ -1,26 +1,28 @@
-"""选择性压缩模块
+"""选择性压缩模块。
 
 按类型优先级逐步压缩（tool_result 先压缩，system_prompt 永不压缩），
-而非全量替换。当选择性压缩不足时，回退到 CompactionService 全量摘要。
+并在选择性压缩后始终执行全量摘要。
 """
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from comate_agent_sdk.context.items import DEFAULT_PRIORITIES, ItemType
 
 if TYPE_CHECKING:
-    from comate_agent_sdk.context.ir import ContextIR
-    from comate_agent_sdk.llm.base import BaseChatModel
-    from comate_agent_sdk.context.fs import ContextFileSystem
-    from comate_agent_sdk.context.offload import OffloadPolicy
-    from comate_agent_sdk.tokens import TokenCost
     from comate_agent_sdk.agent.llm_levels import LLMLevel
+    from comate_agent_sdk.context.fs import ContextFileSystem
+    from comate_agent_sdk.context.ir import ContextIR
     from comate_agent_sdk.context.items import ContextItem
+    from comate_agent_sdk.context.offload import OffloadPolicy
+    from comate_agent_sdk.llm.base import BaseChatModel
+    from comate_agent_sdk.tokens import TokenCost
 
 logger = logging.getLogger("comate_agent_sdk.context.compaction")
 
@@ -29,8 +31,6 @@ logger = logging.getLogger("comate_agent_sdk.context.compaction")
 class _ToolCallInfo:
     tool_call_id: str
     tool_name: str
-    arguments: str
-    arguments_token_count: int
 
 
 @dataclass(frozen=True)
@@ -42,8 +42,28 @@ class _ToolInteractionBlock:
     tool_result_items: list["ContextItem"]
 
 
+@dataclass
+class _CompactionStats:
+    tool_blocks_kept: int = 0
+    tool_blocks_dropped: int = 0
+    tool_calls_truncated: int = 0
+    tool_results_truncated: int = 0
+
+
+@dataclass(frozen=True)
+class CompactionMetaRecord:
+    phase: Literal["selective_start", "selective_done", "summary_start", "summary_done", "rollback"]
+    tokens_before: int
+    tokens_after: int
+    tool_blocks_kept: int
+    tool_blocks_dropped: int
+    tool_calls_truncated: int
+    tool_results_truncated: int
+    reason: str
+
+
 class CompactionStrategy(Enum):
-    """压缩策略"""
+    """压缩策略。"""
 
     NONE = "none"            # 不压缩
     DROP = "drop"            # 直接丢弃
@@ -53,61 +73,17 @@ class CompactionStrategy(Enum):
 
 @dataclass
 class TypeCompactionRule:
-    """单个类型的压缩规则
-
-    Attributes:
-        strategy: 压缩策略
-        keep_recent: TRUNCATE 策略保留的最近条目数
-    """
+    """单个类型的压缩规则。"""
 
     strategy: CompactionStrategy = CompactionStrategy.NONE
     keep_recent: int = 5
 
 
-@dataclass
-class ToolTypeCompactionRule:
-    """单个工具类型的压缩规则
-
-    用于差异化处理不同工具的交互块压缩策略。
-
-    Attributes:
-        keep_recent: 保留最近 N 个该工具的交互块
-        priority: 工具压缩优先级（低数值先压缩）
-    """
-
-    keep_recent: int = 3
-    priority: int = 50
-
-
-# 工具类型差异化压缩规则
-# 按工具特性设定不同的保留策略和压缩优先级
-DEFAULT_TOOL_TYPE_RULES: dict[str, ToolTypeCompactionRule] = {
-    # 可重新获取的结果 - 激进压缩
-    "Read": ToolTypeCompactionRule(keep_recent=1, priority=10),
-    "Glob": ToolTypeCompactionRule(keep_recent=1, priority=10),
-    "Grep": ToolTypeCompactionRule(keep_recent=1, priority=10),
-    "WebFetch": ToolTypeCompactionRule(keep_recent=0, priority=5),
-    "WebSearch": ToolTypeCompactionRule(keep_recent=0, priority=5),
-
-    # 代码修改记录 - 保留更久
-    "Edit": ToolTypeCompactionRule(keep_recent=5, priority=60),
-    "Write": ToolTypeCompactionRule(keep_recent=5, priority=60),
-
-    # 命令执行 - 中等保留
-    "Bash": ToolTypeCompactionRule(keep_recent=3, priority=40),
-
-    # 子Agent结果 - 重要研究成果
-    "Task": ToolTypeCompactionRule(keep_recent=5, priority=80),
-}
-
-# 未配置工具的默认规则
-DEFAULT_TOOL_RULE = ToolTypeCompactionRule(keep_recent=3, priority=50)
-
-
 # 默认规则
 DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
     ItemType.TOOL_RESULT.value: TypeCompactionRule(
-        strategy=CompactionStrategy.TRUNCATE, keep_recent=3
+        strategy=CompactionStrategy.TRUNCATE,
+        keep_recent=5,
     ),
     ItemType.SKILL_PROMPT.value: TypeCompactionRule(
         strategy=CompactionStrategy.DROP
@@ -116,10 +92,12 @@ DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
         strategy=CompactionStrategy.DROP
     ),
     ItemType.ASSISTANT_MESSAGE.value: TypeCompactionRule(
-        strategy=CompactionStrategy.TRUNCATE, keep_recent=5
+        strategy=CompactionStrategy.TRUNCATE,
+        keep_recent=5,
     ),
     ItemType.USER_MESSAGE.value: TypeCompactionRule(
-        strategy=CompactionStrategy.TRUNCATE, keep_recent=5
+        strategy=CompactionStrategy.TRUNCATE,
+        keep_recent=5,
     ),
     # 以下类型永不压缩
     ItemType.SYSTEM_PROMPT.value: TypeCompactionRule(
@@ -142,18 +120,7 @@ DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
 
 @dataclass
 class SelectiveCompactionPolicy:
-    """选择性压缩策略
-
-    按 DEFAULT_PRIORITIES 从低到高逐类型压缩，
-    每压缩一种类型后检查是否已降到阈值以下。
-    如果选择性压缩不够，回退到全量摘要。
-
-    Attributes:
-        threshold: token 阈值（超过此值触发压缩）
-        rules: 每类型的压缩规则
-        llm: 用于全量摘要回退的 LLM
-        fallback_to_full_summary: 选择性压缩不够时是否回退全量摘要
-    """
+    """选择性压缩策略。"""
 
     threshold: int = 0
     rules: dict[str, TypeCompactionRule] = field(
@@ -166,200 +133,403 @@ class SelectiveCompactionPolicy:
     token_cost: TokenCost | None = None
     level: LLMLevel | None = None
 
+    tool_blocks_keep_recent: int = 8
+    tool_call_threshold: int = 500
+    tool_result_threshold: int = 600
+    preview_tokens: int = 200
+    dialogue_rounds_keep_min: int = 15
+    summary_retry_attempts: int = 2
+
+    meta_records: list[CompactionMetaRecord] = field(default_factory=list, init=False)
+
     def should_compact(self, total_tokens: int) -> bool:
-        """检查是否需要压缩"""
+        """检查是否需要压缩。"""
         if self.threshold <= 0:
             return False
         return total_tokens >= self.threshold
 
-    async def compact(self, context: ContextIR) -> bool:
-        """执行选择性压缩
-
-        按 DEFAULT_PRIORITIES 从低到高逐类型压缩。
-        每压缩一种类型后检查总 token 数是否降到阈值以下。
-
-        Args:
-            context: ContextIR 实例
-
-        Returns:
-            是否成功将 token 数压缩到阈值以下
-        """
+    async def compact(self, context: "ContextIR") -> bool:
+        """执行选择性压缩 + 全量摘要（事务化）。"""
         if self.threshold <= 0:
             return False
 
+        self.meta_records = []
         initial_tokens = context.total_tokens
+        conversation_snapshot = copy.deepcopy(context.conversation.items)
+        stats = _CompactionStats()
+
         logger.info(
             f"开始选择性压缩: current={initial_tokens}, threshold={self.threshold}"
         )
-
-        # 按优先级排序：低优先级（先压缩）在前
-        sorted_types = sorted(
-            DEFAULT_PRIORITIES.items(),
-            key=lambda x: x[1],
+        self._append_meta(
+            phase="selective_start",
+            tokens_before=initial_tokens,
+            tokens_after=initial_tokens,
+            stats=stats,
+            reason="started",
         )
 
-        compacted_any = False
+        try:
+            sorted_types = sorted(
+                DEFAULT_PRIORITIES.items(),
+                key=lambda x: x[1],
+            )
+            compacted_any = False
+            protected_ids = self._collect_recent_round_protected_ids(context)
 
-        for item_type, _ in sorted_types:
-            rule = self.rules.get(item_type.value)
-            if rule is None or rule.strategy == CompactionStrategy.NONE:
-                continue
+            for item_type, _ in sorted_types:
+                rule = self.rules.get(item_type.value)
+                if rule is None or rule.strategy == CompactionStrategy.NONE:
+                    continue
 
-            # 获取该类型的所有 conversation items
-            items = context.conversation.find_by_type(item_type)
-            if not items:
-                continue
+                items = context.conversation.find_by_type(item_type)
+                if not items:
+                    continue
 
-            tokens_before = context.total_tokens
+                tokens_before = context.total_tokens
 
-            if rule.strategy == CompactionStrategy.DROP:
-                # 直接移除所有该类型的条目
-                removed = context.conversation.remove_by_type(item_type)
-                if removed:
-                    compacted_any = True
-                    logger.info(
-                        f"DROP {item_type.value}: 移除 {len(removed)} 条, "
-                        f"释放 ~{tokens_before - context.total_tokens} tokens"
-                    )
-
-            elif rule.strategy == CompactionStrategy.TRUNCATE:
-                # TOOL_RESULT：按“工具交互块”截断，避免 tool_call/tool_result 结构不一致
-                if item_type == ItemType.TOOL_RESULT:
-                    removed_blocks = await self._truncate_tool_blocks(
-                        context, keep_recent=rule.keep_recent
-                    )
-                    if removed_blocks:
+                if rule.strategy == CompactionStrategy.DROP:
+                    removed = context.conversation.remove_by_type(item_type)
+                    if removed:
                         compacted_any = True
                         logger.info(
-                            f"TRUNCATE tool_blocks: 移除 {removed_blocks} 个块 "
-                            f"(保留最近 {rule.keep_recent}), "
+                            f"DROP {item_type.value}: 移除 {len(removed)} 条, "
                             f"释放 ~{tokens_before - context.total_tokens} tokens"
                         )
-                else:
-                    # 其它类型：保留最近 N 个，删除更早的
-                    if rule.keep_recent > 0 and len(items) <= rule.keep_recent:
-                        continue
 
-                    if rule.keep_recent <= 0:
-                        items_to_remove = items
+                elif rule.strategy == CompactionStrategy.TRUNCATE:
+                    if item_type == ItemType.TOOL_RESULT:
+                        removed_blocks = await self._truncate_tool_blocks(
+                            context=context,
+                            keep_recent=self.tool_blocks_keep_recent,
+                            stats=stats,
+                        )
+                        if removed_blocks > 0:
+                            compacted_any = True
+                            logger.info(
+                                f"TRUNCATE tool_blocks: 移除 {removed_blocks} 个块 "
+                                f"(保留最近 {self.tool_blocks_keep_recent}), "
+                                f"释放 ~{tokens_before - context.total_tokens} tokens"
+                            )
                     else:
-                        items_to_remove = items[:-rule.keep_recent]
+                        candidates = items
+                        if item_type in (ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE):
+                            candidates = [it for it in items if it.id not in protected_ids]
 
-                    for item in items_to_remove:
-                        # 跳过已 destroyed 的（已被 ephemeral 处理）
-                        if item.destroyed:
+                        if not candidates:
                             continue
-                        # 检查是否需要卸载
-                        if self._should_offload(item):
-                            self.fs.offload(item)
-                        context.conversation.remove_by_id(item.id)
 
-                    compacted_any = True
+                        if rule.keep_recent > 0 and len(candidates) <= rule.keep_recent:
+                            continue
+
+                        if rule.keep_recent <= 0:
+                            items_to_remove = candidates
+                        else:
+                            items_to_remove = candidates[:-rule.keep_recent]
+
+                        removed_count = 0
+                        for item in items_to_remove:
+                            if item.destroyed:
+                                continue
+                            if self._should_offload(item):
+                                self.fs.offload(item)
+                            if context.conversation.remove_by_id(item.id) is not None:
+                                removed_count += 1
+
+                        if removed_count > 0:
+                            compacted_any = True
+                            logger.info(
+                                f"TRUNCATE {item_type.value}: 移除 {removed_count} 条 "
+                                f"(保留最近 {rule.keep_recent}, 轮次保底={self.dialogue_rounds_keep_min}), "
+                                f"释放 ~{tokens_before - context.total_tokens} tokens"
+                            )
+
+                current_tokens = context.total_tokens
+                if current_tokens < self.threshold:
                     logger.info(
-                        f"TRUNCATE {item_type.value}: 移除 {len(items_to_remove)} 条 "
-                        f"(保留最近 {rule.keep_recent}), "
-                        f"释放 ~{tokens_before - context.total_tokens} tokens"
+                        f"选择性压缩达到阈值: {initial_tokens} → {current_tokens} tokens "
+                        f"(阈值={self.threshold})"
                     )
+                    break
 
-            # 检查是否已降到阈值以下（提前终止选择性压缩循环）
-            current_tokens = context.total_tokens
-            if current_tokens < self.threshold:
+            selective_tokens = context.total_tokens
+            self._append_meta(
+                phase="selective_done",
+                tokens_before=initial_tokens,
+                tokens_after=selective_tokens,
+                stats=stats,
+                reason="done",
+            )
+
+            if self.fallback_to_full_summary:
                 logger.info(
-                    f"选择性压缩达到阈值: {initial_tokens} → {current_tokens} tokens "
-                    f"(阈值={self.threshold})"
+                    f"选择性压缩完成 ({initial_tokens} → {selective_tokens})，执行 LLM Summary"
                 )
-                break
+                self._append_meta(
+                    phase="summary_start",
+                    tokens_before=selective_tokens,
+                    tokens_after=selective_tokens,
+                    stats=stats,
+                    reason="always_run",
+                )
 
-        # 选择性压缩后，必须执行 LLM Summary
-        # 这是关键变更：无论选择性压缩是否已达阈值，都执行 LLM Summary 进行进一步压缩
-        current_tokens = context.total_tokens
-        if self.fallback_to_full_summary:
-            logger.info(
-                f"选择性压缩完成 ({initial_tokens} → {current_tokens})，执行 LLM Summary"
+                summary_success, summary_reason = await self._fallback_full_summary_with_retry(context)
+                if not summary_success:
+                    raise RuntimeError(f"summary_failed_or_empty:{summary_reason}")
+
+                final_tokens = context.total_tokens
+                self._append_meta(
+                    phase="summary_done",
+                    tokens_before=selective_tokens,
+                    tokens_after=final_tokens,
+                    stats=stats,
+                    reason="success",
+                )
+                return True
+
+            return compacted_any
+
+        except Exception as exc:
+            context.conversation.items = conversation_snapshot
+            rollback_tokens = context.total_tokens
+            self._append_meta(
+                phase="rollback",
+                tokens_before=initial_tokens,
+                tokens_after=rollback_tokens,
+                stats=stats,
+                reason=str(exc),
             )
-            return await self._fallback_full_summary(context)
+            logger.warning(f"压缩失败，已回滚: {exc}", exc_info=True)
+            return False
 
-        if compacted_any:
-            logger.info(
-                f"选择性压缩完成: {initial_tokens} → {current_tokens} tokens "
-                f"(LLM Summary 未启用)"
-            )
-
-        return compacted_any
-
-    async def _truncate_tool_blocks(self, context: "ContextIR", *, keep_recent: int) -> int:
-        """按工具类型差异化截断历史，并用 meta 占位符替换旧块。
-
-        按工具类型分组处理，每种工具根据其 ToolTypeCompactionRule 决定保留策略。
-        工具按优先级排序（低优先级先压缩）。
-
-        Args:
-            context: ContextIR 实例
-            keep_recent: 全局 keep_recent（作为未配置工具的参考，但实际使用工具类型规则）
-
-        Returns:
-            移除的块数量
-        """
+    async def _truncate_tool_blocks(
+        self,
+        context: "ContextIR",
+        *,
+        keep_recent: int,
+        stats: _CompactionStats | None = None,
+    ) -> int:
+        """按“最近 keep_recent 块保留，旧块整块删除”处理工具交互历史。"""
         blocks = self._extract_tool_blocks(context)
         if not blocks:
+            if stats is not None:
+                stats.tool_blocks_kept = 0
+                stats.tool_blocks_dropped = 0
             return 0
 
-        # 1. 按工具类型分组
-        blocks_by_tool: dict[str, list[_ToolInteractionBlock]] = {}
-        for block in blocks:
-            # 取块中第一个工具名作为分类依据
-            tool_name = block.tool_calls[0].tool_name if block.tool_calls else "unknown"
-            blocks_by_tool.setdefault(tool_name, []).append(block)
+        blocks_sorted = sorted(blocks, key=lambda b: b.start_idx)
+        if keep_recent <= 0:
+            kept_blocks: list[_ToolInteractionBlock] = []
+            dropped_blocks = blocks_sorted
+        else:
+            kept_blocks = blocks_sorted[-keep_recent:]
+            dropped_blocks = blocks_sorted[:-keep_recent]
 
-        # 2. 按工具优先级排序（低优先级先压缩）
-        sorted_tools = sorted(
-            blocks_by_tool.keys(),
-            key=lambda t: DEFAULT_TOOL_TYPE_RULES.get(t, DEFAULT_TOOL_RULE).priority
-        )
+        if stats is not None:
+            stats.tool_blocks_kept = len(kept_blocks)
+            stats.tool_blocks_dropped = len(dropped_blocks)
 
-        blocks_to_remove: list[_ToolInteractionBlock] = []
-
-        # 3. 逐工具类型处理
-        for tool_name in sorted_tools:
-            rule = DEFAULT_TOOL_TYPE_RULES.get(tool_name, DEFAULT_TOOL_RULE)
-            tool_blocks = blocks_by_tool[tool_name]
-
-            # 按出现顺序排序（start_idx 越小越早）
-            tool_blocks_sorted = sorted(tool_blocks, key=lambda b: b.start_idx)
-
-            # 根据 keep_recent 决定要移除的块
-            if rule.keep_recent == 0:
-                # 全部移除
-                blocks_to_remove.extend(tool_blocks_sorted)
-                logger.debug(
-                    f"工具 {tool_name}: 全部移除 {len(tool_blocks_sorted)} 个块 "
-                    f"(keep_recent=0, priority={rule.priority})"
-                )
-            elif len(tool_blocks_sorted) > rule.keep_recent:
-                # 保留最近 N 个，移除更早的
-                to_remove = tool_blocks_sorted[:-rule.keep_recent]
-                blocks_to_remove.extend(to_remove)
-                logger.debug(
-                    f"工具 {tool_name}: 移除 {len(to_remove)} 个块，"
-                    f"保留最近 {rule.keep_recent} 个 (priority={rule.priority})"
-                )
-            else:
-                logger.debug(
-                    f"工具 {tool_name}: 无需移除 ({len(tool_blocks_sorted)} <= {rule.keep_recent})"
-                )
-
-        if not blocks_to_remove:
-            return 0
+        for block in kept_blocks:
+            calls_count, results_count = self._truncate_tool_block_fields(context, block)
+            if stats is not None:
+                stats.tool_calls_truncated += calls_count
+                stats.tool_results_truncated += results_count
 
         removed = 0
-
-        # 4. 反向处理，避免索引位移
-        for block in sorted(blocks_to_remove, key=lambda b: b.start_idx, reverse=True):
-            placeholder = await self._build_tool_block_placeholder_item(context, block)
-            context.conversation.items[block.start_idx : block.end_idx + 1] = [placeholder]
+        for block in sorted(dropped_blocks, key=lambda b: b.start_idx, reverse=True):
+            del context.conversation.items[block.start_idx:block.end_idx + 1]
             removed += 1
 
         return removed
+
+    def _truncate_tool_block_fields(
+        self,
+        context: "ContextIR",
+        block: _ToolInteractionBlock,
+    ) -> tuple[int, int]:
+        """对保留工具块内字段做阈值截断。"""
+        from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage
+
+        tool_calls_truncated = 0
+        tool_results_truncated = 0
+
+        assistant_item = context.conversation.items[block.start_idx]
+        assistant_msg = assistant_item.message
+        if isinstance(assistant_msg, AssistantMessage) and assistant_msg.tool_calls:
+            truncation_details: list[dict[str, object]] = []
+            for tool_call in assistant_msg.tool_calls:
+                arguments = tool_call.function.arguments or ""
+                arguments_tokens = context.token_counter.count(arguments)
+                if arguments_tokens <= self.tool_call_threshold:
+                    continue
+                tool_call.function.arguments = self._truncate_text(
+                    text=arguments,
+                    original_tokens=arguments_tokens,
+                )
+                truncation_details.append(
+                    {
+                        "field": "tool_call.arguments",
+                        "tool_call_id": tool_call.id,
+                        "original_tokens": arguments_tokens,
+                        "kept_tokens": self.preview_tokens,
+                        "threshold": self.tool_call_threshold,
+                    }
+                )
+                tool_calls_truncated += 1
+
+            if truncation_details:
+                self._merge_truncation_metadata(assistant_item, truncation_details)
+                self._refresh_assistant_item_tokens(context, assistant_item)
+
+        for result_item in block.tool_result_items:
+            result_msg = result_item.message
+            if not isinstance(result_msg, ToolMessage):
+                continue
+            result_text = result_msg.text
+            result_tokens = context.token_counter.count(result_text)
+            if result_tokens <= self.tool_result_threshold:
+                continue
+
+            result_msg.content = self._truncate_text(
+                text=result_text,
+                original_tokens=result_tokens,
+            )
+            result_item.content_text = result_msg.text
+            result_item.token_count = context.token_counter.count(result_item.content_text)
+            self._merge_truncation_metadata(
+                result_item,
+                [
+                    {
+                        "field": "tool_result.content",
+                        "tool_call_id": result_msg.tool_call_id,
+                        "original_tokens": result_tokens,
+                        "kept_tokens": self.preview_tokens,
+                        "threshold": self.tool_result_threshold,
+                    }
+                ],
+            )
+            tool_results_truncated += 1
+
+        return tool_calls_truncated, tool_results_truncated
+
+    def _truncate_text(self, *, text: str, original_tokens: int) -> str:
+        preview = self._take_first_tokens(text=text, max_tokens=self.preview_tokens, total_tokens=original_tokens)
+        return f"{preview}\n[TRUNCATED original~{original_tokens} tokens]"
+
+    def _take_first_tokens(self, *, text: str, max_tokens: int, total_tokens: int) -> str:
+        if not text:
+            return text
+        if max_tokens <= 0:
+            return ""
+        try:
+            import tiktoken
+
+            encoder = tiktoken.get_encoding("cl100k_base")
+            token_ids = encoder.encode(text)
+            return encoder.decode(token_ids[:max_tokens])
+        except Exception:
+            token_base = max(total_tokens, 1)
+            ratio = min(max_tokens / token_base, 1.0)
+            keep_chars = max(1, int(len(text) * ratio))
+            return text[:keep_chars]
+
+    def _refresh_assistant_item_tokens(self, context: "ContextIR", item: "ContextItem") -> None:
+        from comate_agent_sdk.llm.messages import AssistantMessage
+
+        message = item.message
+        if not isinstance(message, AssistantMessage):
+            return
+
+        content_text = message.text
+        if message.tool_calls:
+            tool_calls_json = json.dumps(
+                [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                    }
+                    for tc in message.tool_calls
+                ],
+                ensure_ascii=False,
+            )
+            content_text = content_text + "\n" + tool_calls_json if content_text else tool_calls_json
+
+        item.content_text = content_text
+        item.token_count = context.token_counter.count(content_text)
+
+    def _merge_truncation_metadata(
+        self,
+        item: "ContextItem",
+        details: list[dict[str, object]],
+    ) -> None:
+        existing = item.metadata.get("truncation")
+        detail_list: list[dict[str, object]]
+        if isinstance(existing, dict):
+            old_details = existing.get("details")
+            if isinstance(old_details, list):
+                detail_list = [d for d in old_details if isinstance(d, dict)]
+            else:
+                detail_list = []
+        else:
+            detail_list = []
+
+        detail_list.extend(details)
+        item.metadata["truncated"] = True
+        item.metadata["truncation"] = {
+            "details": detail_list,
+        }
+
+    def _collect_recent_round_protected_ids(self, context: "ContextIR") -> set[str]:
+        from comate_agent_sdk.llm.messages import UserMessage
+
+        items = context.conversation.items
+        round_ranges: list[tuple[int, int]] = []
+        round_start: int | None = None
+
+        for idx, item in enumerate(items):
+            message = item.message
+            if isinstance(message, UserMessage) and not bool(getattr(message, "is_meta", False)):
+                if round_start is not None:
+                    round_ranges.append((round_start, idx - 1))
+                round_start = idx
+
+        if round_start is not None:
+            round_ranges.append((round_start, len(items) - 1))
+
+        if not round_ranges:
+            return set()
+
+        protected_ranges = round_ranges[-self.dialogue_rounds_keep_min:]
+        protected_ids: set[str] = set()
+        for start, end in protected_ranges:
+            for item in items[start:end + 1]:
+                if item.item_type in (ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE):
+                    protected_ids.add(item.id)
+
+        return protected_ids
+
+    def _append_meta(
+        self,
+        *,
+        phase: Literal["selective_start", "selective_done", "summary_start", "summary_done", "rollback"],
+        tokens_before: int,
+        tokens_after: int,
+        stats: _CompactionStats,
+        reason: str,
+    ) -> None:
+        self.meta_records.append(
+            CompactionMetaRecord(
+                phase=phase,
+                tokens_before=tokens_before,
+                tokens_after=tokens_after,
+                tool_blocks_kept=stats.tool_blocks_kept,
+                tool_blocks_dropped=stats.tool_blocks_dropped,
+                tool_calls_truncated=stats.tool_calls_truncated,
+                tool_results_truncated=stats.tool_results_truncated,
+                reason=reason,
+            )
+        )
 
     def _extract_tool_blocks(self, context: "ContextIR") -> list[_ToolInteractionBlock]:
         """从 conversation 中提取工具交互块（assistant tool_calls + tool_results）。"""
@@ -377,13 +547,10 @@ class SelectiveCompactionPolicy:
 
             tool_calls: list[_ToolCallInfo] = []
             for tc in msg.tool_calls:
-                args = tc.function.arguments
                 tool_calls.append(
                     _ToolCallInfo(
                         tool_call_id=tc.id,
                         tool_name=tc.function.name,
-                        arguments=args,
-                        arguments_token_count=context.token_counter.count(args),
                     )
                 )
 
@@ -424,175 +591,83 @@ class SelectiveCompactionPolicy:
 
         return blocks
 
-    async def _build_tool_block_placeholder_item(
-        self, context: "ContextIR", block: _ToolInteractionBlock
-    ) -> "ContextItem":
-        """为一个旧工具块生成 meta 占位符，并（按阈值）落盘 tool_call/tool_result。"""
-        from comate_agent_sdk.context.items import ContextItem
-        from comate_agent_sdk.llm.messages import ToolMessage, UserMessage
-
-        tool_results_by_call_id: dict[str, "ContextItem"] = {}
-        for it in block.tool_result_items:
-            tm = it.message if isinstance(it.message, ToolMessage) else None
-            if tm is None:
-                continue
-            tool_results_by_call_id.setdefault(tm.tool_call_id, it)
-
-        lines: list[str] = ["[Tool interaction offloaded]", "reason=compaction_truncate"]
-
-        for tc in block.tool_calls:
-            call_abs: str | None = None
-            result_abs: str | None = None
-            redacted = False
-
-            # ---- tool_call 落盘（可复用 index）----
-            if self.fs is not None and self.offload_policy is not None and self.offload_policy.enabled:
-                rec = self.fs.tool_calls.get(tc.tool_call_id) if hasattr(self.fs, "tool_calls") else None
-                if rec and rec.tool_call_path:
-                    call_abs = str(self.fs.root_path / rec.tool_call_path)
-                elif self._should_offload_tool_call_tokens(tc.arguments_token_count):
-                    wr = self.fs.offload_tool_call(
-                        tool_call_id=tc.tool_call_id,
-                        tool_name=tc.tool_name,
-                        arguments=tc.arguments,
-                        assistant_item_id=block.assistant_item_id,
-                        arguments_token_count=tc.arguments_token_count,
-                    )
-                    call_abs = str(self.fs.root_path / wr.relative_path)
-                    redacted = bool(redacted or wr.redacted)
-
-            # ---- tool_result 落盘（可复用 item.offload_path）----
-            result_item = tool_results_by_call_id.get(tc.tool_call_id)
-            if result_item is not None and self.fs is not None and self.offload_policy is not None and self.offload_policy.enabled:
-                if result_item.offloaded and result_item.offload_path:
-                    result_abs = str(self.fs.root_path / result_item.offload_path)
-                elif self._should_offload_tool_result_tokens(result_item.token_count):
-                    wr = self.fs.offload_tool_result(
-                        result_item,
-                        tool_call_id=tc.tool_call_id,
-                        tool_name=tc.tool_name,
-                        result_token_count=result_item.token_count,
-                    )
-                    result_abs = str(self.fs.root_path / wr.relative_path)
-                    redacted = bool(redacted or wr.redacted)
-
-            call_path_disp = call_abs or "<not offloaded>"
-            result_path_disp = result_abs or "<not offloaded>"
-            lines.append(
-                f"- tool={tc.tool_name} call_id={tc.tool_call_id} args~{tc.arguments_token_count} "
-                f"call_path={call_path_disp} result_path={result_path_disp} redacted={redacted}"
-            )
-
-        lines.append("Use Read tool to view details.")
-        text = "\n".join(lines)
-
-        msg = UserMessage(content=text, is_meta=True)
-        return ContextItem(
-            item_type=ItemType.OFFLOAD_PLACEHOLDER,
-            message=msg,
-            content_text=text,
-            token_count=context.token_counter.count(text),
-            priority=DEFAULT_PRIORITIES[ItemType.OFFLOAD_PLACEHOLDER],
-            metadata={"reason": "compaction_truncate"},
-        )
-
-    def _should_offload_tool_call_tokens(self, token_count: int) -> bool:
+    def _should_offload(self, item: "ContextItem") -> bool:
+        """判断是否需要卸载。"""
         if not self.fs or not self.offload_policy:
             return False
         if not self.offload_policy.enabled:
             return False
-        if not bool(self.offload_policy.type_enabled.get("tool_call", False)):
-            return False
-        threshold_by_type = getattr(self.offload_policy, "token_threshold_by_type", {}) or {}
-        threshold = int(threshold_by_type.get("tool_call", 200))
-        return int(token_count) >= threshold
-
-    def _should_offload_tool_result_tokens(self, token_count: int) -> bool:
-        if not self.fs or not self.offload_policy:
-            return False
-        if not self.offload_policy.enabled:
-            return False
-        if not bool(self.offload_policy.type_enabled.get(ItemType.TOOL_RESULT.value, True)):
-            return False
-        threshold_by_type = getattr(self.offload_policy, "token_threshold_by_type", {}) or {}
-        threshold = int(threshold_by_type.get(ItemType.TOOL_RESULT.value, self.offload_policy.token_threshold))
-        return int(token_count) >= threshold
-
-    def _should_offload(self, item) -> bool:
-        """判断是否需要卸载
-
-        Args:
-            item: ContextItem 实例
-
-        Returns:
-            是否应该卸载此条目
-        """
-        if not self.fs or not self.offload_policy:
-            return False
-        if not self.offload_policy.enabled:
-            return False
-        # 已压缩的 summary 不卸载
         if item.item_type == ItemType.COMPACTION_SUMMARY:
             return False
-        # 检查类型是否启用
         type_enabled = self.offload_policy.type_enabled.get(
-            item.item_type.value, False
+            item.item_type.value,
+            False,
         )
         if not type_enabled:
             return False
-        # 检查 token 阈值
         threshold_by_type = getattr(self.offload_policy, "token_threshold_by_type", {}) or {}
-        threshold = int(threshold_by_type.get(item.item_type.value, self.offload_policy.token_threshold))
+        threshold = int(
+            threshold_by_type.get(item.item_type.value, self.offload_policy.token_threshold)
+        )
         return item.token_count >= threshold
 
-    async def _fallback_full_summary(self, context: ContextIR) -> bool:
-        """回退到全量摘要
+    async def _fallback_full_summary_with_retry(self, context: "ContextIR") -> tuple[bool, str]:
+        """带重试的全量摘要回退。"""
+        max_attempts = max(1, int(self.summary_retry_attempts) + 1)
+        last_reason = "unknown"
+        for attempt in range(1, max_attempts + 1):
+            success, reason = await self._fallback_full_summary_once(context)
+            if success:
+                return True, "success"
+            last_reason = reason
+            logger.warning(
+                f"全量摘要失败 (attempt {attempt}/{max_attempts}): reason={reason}"
+            )
+        return False, last_reason
 
-        复用现有 CompactionService.compact() 逻辑。
-        """
+    async def _fallback_full_summary_once(self, context: "ContextIR") -> tuple[bool, str]:
+        """单次全量摘要执行。"""
         from comate_agent_sdk.agent.compaction import CompactionService
+        from comate_agent_sdk.context.items import ContextItem
         from comate_agent_sdk.llm.messages import UserMessage
 
         if self.llm is None:
             logger.warning("无法执行全量摘要回退：未提供 LLM")
-            return False
+            return False, "llm_missing"
 
-        # 获取当前所有 conversation messages（排除 Skill 注入项）
-        #
-        # Skill 的详细指令来自运行时注入，允许随时重复加载。
-        # 为避免在全量摘要中固化 Skill prompt，摘要时应跳过这些注入项。
         conversation_messages = [
             item.message
             for item in context.conversation.items
             if item.message is not None
-            and item.item_type not in (ItemType.SKILL_PROMPT, ItemType.SKILL_METADATA)
         ]
-
         if not conversation_messages:
-            return False
+            return False, "no_messages"
 
         service = CompactionService(llm=self.llm, token_cost=self.token_cost)
-        result = await service.compact(
-            conversation_messages,
-            self.llm,
-            level=self.level,
+        try:
+            result = await service.compact(
+                conversation_messages,
+                self.llm,
+                level=self.level,
+            )
+        except Exception as exc:
+            return False, f"summary_exception:{type(exc).__name__}"
+
+        if not result.compacted or not result.summary:
+            reason = result.failure_reason or "compact_false"
+            if result.stop_reason:
+                reason = f"{reason}|stop_reason={result.stop_reason}"
+            if result.failure_detail:
+                reason = f"{reason}|{result.failure_detail}"
+            return False, reason
+
+        summary_item = ContextItem(
+            item_type=ItemType.COMPACTION_SUMMARY,
+            message=UserMessage(content=result.summary),
+            content_text=result.summary,
+            token_count=context.token_counter.count(result.summary),
+            priority=DEFAULT_PRIORITIES[ItemType.COMPACTION_SUMMARY],
         )
-
-        if result.compacted and result.summary:
-            # 用摘要替换整个 conversation
-            from comate_agent_sdk.context.items import ContextItem
-
-            summary_item = ContextItem(
-                item_type=ItemType.COMPACTION_SUMMARY,
-                message=UserMessage(content=result.summary),
-                content_text=result.summary,
-                token_count=context.token_counter.count(result.summary),
-                priority=DEFAULT_PRIORITIES[ItemType.COMPACTION_SUMMARY],
-            )
-            context.replace_conversation([summary_item])
-            logger.info(
-                f"全量摘要完成: 新 token 数 ~{summary_item.token_count}"
-            )
-            return True
-
-        return False
+        context.replace_conversation([summary_item])
+        logger.info(f"全量摘要完成: 新 token 数 ~{summary_item.token_count}")
+        return True, "success"

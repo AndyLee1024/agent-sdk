@@ -75,9 +75,11 @@ async def query_stream(
 
         # If no tool calls, finish
         if not response.has_tool_calls:
-            compacted, pre_compact_event = await check_and_compact(agent, response)
+            compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)
             if pre_compact_event:
                 yield pre_compact_event
+            for compaction_meta_event in compaction_meta_events:
+                yield compaction_meta_event
             if response.content:
                 yield TextEvent(content=response.content)
             yield StopEvent(reason="completed")
@@ -213,9 +215,11 @@ async def query_stream(
                         agent._context.flush_pending_skill_items()
 
                 # 新增:预检查压缩
-                compacted, pre_compact_event = await precheck_and_compact(agent)
+                compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
                 if pre_compact_event:
                     yield pre_compact_event
+                for compaction_meta_event in compaction_meta_events:
+                    yield compaction_meta_event
 
                 continue
 
@@ -245,9 +249,11 @@ async def query_stream(
             agent._context.add_message(tool_result)
 
             # 新增:预检查压缩
-            compacted, pre_compact_event = await precheck_and_compact(agent)
+            compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
             if pre_compact_event:
                 yield pre_compact_event
+            for compaction_meta_event in compaction_meta_events:
+                yield compaction_meta_event
 
             if agent._context.has_pending_skill_items:
                 agent._context.flush_pending_skill_items()
@@ -283,12 +289,13 @@ async def query_stream(
             idx += 1
 
         # Check for compaction after tool execution
-        compacted, pre_compact_event = await check_and_compact(agent, response)
+        compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)
         if pre_compact_event:
             yield pre_compact_event
+        for compaction_meta_event in compaction_meta_events:
+            yield compaction_meta_event
 
     # Max iterations reached - generate summary of what was accomplished
     summary = await generate_max_iterations_summary(agent)
     yield TextEvent(content=summary)
     yield StopEvent(reason="max_iterations")
-

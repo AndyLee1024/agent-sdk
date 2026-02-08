@@ -436,6 +436,7 @@ ASKUSERQUESTION_USAGE_RULES = """Use this tool when you need to ask the user que
 2. Clarify ambiguous instructions
 3. Get decisions on implementation choices as you work
 4. Offer choices to the user about what direction to take.
+5. 当你向用户确认,澄清,需要让用户补充信息时,必须使用此工具
 
 Usage notes:
 - Users will always be able to select "Other" to provide custom text input (this is handled by the UI layer)

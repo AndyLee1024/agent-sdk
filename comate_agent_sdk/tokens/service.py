@@ -172,7 +172,7 @@ class TokenCost:
             return self._pricing_data[mapped_name]
 
         # Try with common provider prefixes
-        prefixes = ["anthropic/", "openai/", "google/", "azure/", "bedrock/"]
+        prefixes = ["anthropic/", "openai/", "google/", "azure/", "bedrock/", "gemini/"]
         for prefix in prefixes:
             prefixed_name = f"{prefix}{model_name}"
             if prefixed_name in self._pricing_data:

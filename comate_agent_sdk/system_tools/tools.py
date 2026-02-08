@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -40,6 +41,7 @@ _BASH_DEFAULT_TIMEOUT_MS = 120_000
 _BASH_MAX_TIMEOUT_MS = 600_000
 _BASH_OUTPUT_TRUNCATE_CHARS = 30_000
 _WEBFETCH_TIMEOUT_SECONDS = 20
+_WEBFETCH_LLM_TIMEOUT_SECONDS = 30
 _WEBFETCH_CACHE_TTL_SECONDS = 15 * 60
 _WEBFETCH_MARKDOWN_TRUNCATE_CHARS = 50_000
 
@@ -914,16 +916,19 @@ async def WebFetch(
 
     llm = ctx.llm_levels["LOW"]
     try:
-        completion = await llm.ainvoke(
-            messages=[
-                UserMessage(
-                    content=(
-                        f"{prompt}\n\n<url>{final_url}</url>\n\n<content>\n{markdown_for_llm}\n</content>{truncated_note}"
+        completion = await asyncio.wait_for(
+            llm.ainvoke(
+                messages=[
+                    UserMessage(
+                        content=(
+                            f"{prompt}\n\n<url>{final_url}</url>\n\n<content>\n{markdown_for_llm}\n</content>{truncated_note}"
+                        )
                     )
-                )
-            ],
-            tools=None,
-            tool_choice=None,
+                ],
+                tools=None,
+                tool_choice=None,
+            ),
+            timeout=_WEBFETCH_LLM_TIMEOUT_SECONDS,
         )
         if completion.usage:
             ctx.token_cost.add_usage(
@@ -933,6 +938,8 @@ async def WebFetch(
                 source="webfetch",
             )
         return completion.text
+    except asyncio.TimeoutError:
+        return f"Error: WebFetch LLM timeout after {_WEBFETCH_LLM_TIMEOUT_SECONDS}s"
     except Exception as e:
         logger.error(f"WebFetch LLM 调用失败：{e}", exc_info=True)
         return f"Error: WebFetch LLM 调用失败：{e}"

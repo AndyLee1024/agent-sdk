@@ -516,9 +516,21 @@ agent = Agent(
     config=AgentConfig(
         tools=[...],
         compaction=CompactionConfig(threshold_ratio=0.80),
+        emit_compaction_meta_events=False,  # 调试事件开关（默认关闭）
     ),
 )
 ```
+
+当前压缩行为（直接替换旧策略）：
+
+- 工具历史按“工具块”处理：仅保留最近 5 块，更早块整块删除
+- 保留块内字段阈值截断：
+  - `tool_call.arguments > 500 tokens` 才截断
+  - `tool_result.content > 600 tokens` 才截断
+  - 截断保留前 200 tokens，并追加 `[TRUNCATED original~N tokens]`
+- `user/assistant` 至少保留最近 12 轮（`is_meta=True` 不计轮次）
+- 选择性压缩后始终执行 summary；任一步失败原子回滚
+- summary 失败会自动短重试；连续失败进入短冷却，避免高频重复失败
 
 ### 2) Offload（卸载到文件系统）
 
@@ -552,6 +564,12 @@ from comate_agent_sdk import tool
 async def read_big(path: str) -> str:
     return "..."
 ```
+
+### 4) 相关文档
+
+- [上下文压缩策略说明](./docs/compression-strategy.md)
+- [上下文压缩流程详解](./docs/compaction-flow.md)
+- [上下文文件系统（Offload）](./docs/context_filesystem.md)
 
 ## Subagent：`.agent/subagents/*.md` + `Task`
 
