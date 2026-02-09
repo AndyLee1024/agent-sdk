@@ -33,7 +33,14 @@ class GoogleMessageSerializer:
             else:
                 response_data = {"result": "<removed to save context>"}
         elif message.is_error:
-            response_data = {"error": message.text}
+            try:
+                if isinstance(message.content, str):
+                    parsed = json.loads(message.content)
+                    response_data = parsed if isinstance(parsed, dict) else {"error": message.text}
+                else:
+                    response_data = {"error": message.text}
+            except json.JSONDecodeError:
+                response_data = {"error": message.text}
         else:
             # Try to parse content as JSON, otherwise use as string
             try:

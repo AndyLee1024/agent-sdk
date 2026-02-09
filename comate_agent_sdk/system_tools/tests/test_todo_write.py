@@ -1,14 +1,21 @@
 """TodoWrite 工具集成测试"""
 
+import asyncio
 import json
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from comate_agent_sdk.context import ContextIR
 from comate_agent_sdk.system_tools.tools import TodoWrite, _TodoItem
 from comate_agent_sdk.tools.system_context import bind_system_tool_context
-from comate_agent_sdk.context import ContextIR
+
+
+def _parse(raw):
+    if isinstance(raw, str) and raw.strip().startswith(("{", "[")):
+        return json.loads(raw)
+    return raw
 
 
 @pytest.mark.anyio
@@ -30,24 +37,21 @@ async def test_todo_write_updates_context():
             session_root=session_root,
             agent_context=ctx_ir,
         ):
-            result = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
+            raw = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
 
-        # 检查返回值包含提醒文本
-        assert isinstance(result, str)
-        assert "Remember to keep using the TODO list" in result
-        assert "TODO list updated successfully" in result
+        result = _parse(raw)
+        assert isinstance(result, dict)
+        assert result["ok"] is True
+        assert "Remember to keep using the TODO list" in (result.get("message") or "")
 
-        # 检查 ContextIR 是否包含 todo 状态
         todo_state = ctx_ir.get_todo_state()
         assert "todos" in todo_state
         assert len(todo_state["todos"]) == 2
         assert todo_state["todos"][0]["id"] == "1"
         assert todo_state["todos"][0]["priority"] == "high"
 
-        # 检查是否注册了 reminder
         assert any(r.name == "todo_gentle_reminder" for r in ctx_ir.reminders)
 
-        # 检查文件是否被写入
         todo_file = session_root / "todos.json"
         assert todo_file.exists()
         file_data = json.loads(todo_file.read_text(encoding="utf-8"))
@@ -70,9 +74,10 @@ async def test_todo_write_empty_list():
             session_root=session_root,
             agent_context=ctx_ir,
         ):
-            result = await TodoWrite.execute(todos=[])
+            raw = await TodoWrite.execute(todos=[])
 
-        # 检查 ContextIR 注册了 empty reminder
+        result = _parse(raw)
+        assert result["ok"] is True
         assert any(r.name == "todo_list_empty" for r in ctx_ir.reminders)
         assert not ctx_ir.has_todos()
         assert not (session_root / "todos.json").exists()
@@ -89,19 +94,17 @@ async def test_todo_write_without_agent_context():
             _TodoItem(id="1", content="Task 1", status="pending", priority="low"),
         ]
 
-        # 不传递 agent_context
         with bind_system_tool_context(
             project_root=root,
             session_id="test",
             session_root=session_root,
         ):
-            result = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
+            raw = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
 
-        # 应该成功返回（只是不会更新 ContextIR）
-        assert isinstance(result, str)
-        assert "TODO list updated successfully" in result
+        result = _parse(raw)
+        assert result["ok"] is True
+        assert "TODO list" in (result.get("message") or "")
 
-        # 文件应该被写入
         todo_file = session_root / "todos.json"
         assert todo_file.exists()
         file_data = json.loads(todo_file.read_text(encoding="utf-8"))
@@ -129,12 +132,11 @@ async def test_todo_write_with_priority_field():
             session_root=session_root,
             agent_context=ctx_ir,
         ):
-            result = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
+            raw = await TodoWrite.execute(todos=[t.model_dump(mode="json") for t in todos])
 
-        assert isinstance(result, str)
-        assert "TODO list updated successfully" in result
+        result = _parse(raw)
+        assert result["ok"] is True
 
-        # 检查 ContextIR 中的状态
         todo_state = ctx_ir.get_todo_state()
         assert todo_state["todos"][0]["priority"] == "high"
         assert todo_state["todos"][1]["priority"] == "medium"
@@ -173,10 +175,10 @@ async def test_todo_write_deletes_file_when_all_completed():
 
         assert not (session_root / "todos.json").exists()
 
+
 @pytest.mark.anyio
 async def test_todo_write_default_priority():
     """测试 priority 字段的默认值为 medium"""
-    # 测试 Pydantic 模型的默认值
     todo = _TodoItem(id="1", content="Test task", status="pending")
     assert todo.priority == "medium"
 
@@ -184,19 +186,15 @@ async def test_todo_write_default_priority():
 @pytest.mark.anyio
 async def test_todo_item_validation():
     """测试 TodoItem 的字段验证"""
-    # 测试缺少必填字段
-    with pytest.raises(Exception):  # Pydantic ValidationError
-        _TodoItem(content="Test")  # 缺少 id 和 status
+    with pytest.raises(Exception):
+        _TodoItem(content="Test")
 
-    # 测试 status 必须是指定值
     with pytest.raises(Exception):
         _TodoItem(id="1", content="Test", status="invalid", priority="high")
 
-    # 测试 priority 必须是指定值
     with pytest.raises(Exception):
         _TodoItem(id="1", content="Test", status="pending", priority="critical")
 
-    # 测试正常情况
     todo = _TodoItem(id="1", content="Test", status="pending", priority="high")
     assert todo.id == "1"
     assert todo.status == "pending"

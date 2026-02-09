@@ -153,8 +153,8 @@ def summarize_tool_args(tool_name: str, args: dict[str, Any]) -> str:
         return f"path={path} old_len={old_len} new_len={new_len}" if path else _compact_json(args)
     if lowered == "read":
         path = _lookup_arg(args, "file_path", "path")
-        offset = _lookup_arg(args, "offset")
-        limit = _lookup_arg(args, "limit")
+        offset = _lookup_arg(args, "offset_line")
+        limit = _lookup_arg(args, "limit_lines")
         return f"path={path} offset={offset} limit={limit}" if path else _compact_json(args)
     if lowered in {"grep", "glob", "ls"}:
         pattern = _lookup_arg(args, "pattern")

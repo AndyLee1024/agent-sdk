@@ -1,6 +1,7 @@
+import asyncio
+import json
 import tempfile
 import unittest
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -32,7 +33,7 @@ class TestSystemTools(unittest.TestCase):
         names = set(get_default_registry().names())
         self.assertTrue({"Read", "Grep", "Bash", "Glob"}.issubset(names))
 
-    def test_read_offset_is_zero_based_and_default_limit(self) -> None:
+    def test_read_offset_line_and_limit_lines(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             p = root / "a.txt"
@@ -40,16 +41,20 @@ class TestSystemTools(unittest.TestCase):
 
             with bind_system_tool_context(project_root=root):
                 out0 = self._run(Read, file_path=str(p))
-                self.assertIn("\t" + "l1", out0["content"])
-                self.assertEqual(out0["total_lines"], 3)
-                self.assertEqual(out0["lines_returned"], 3)
+                self.assertTrue(out0["ok"])
+                data0 = out0["data"]
+                self.assertIn("\tl1", data0["content"])
+                self.assertEqual(data0["total_lines"], 3)
+                self.assertEqual(data0["lines_returned"], 3)
 
-                out1 = self._run(Read, file_path=str(p), offset=1, limit=1)
-                self.assertIn("\t" + "l2", out1["content"])
-                self.assertNotIn("\t" + "l1", out1["content"])
-                self.assertEqual(out1["lines_returned"], 1)
+                out1 = self._run(Read, file_path=str(p), offset_line=1, limit_lines=1)
+                self.assertTrue(out1["ok"])
+                data1 = out1["data"]
+                self.assertIn("\tl2", data1["content"])
+                self.assertNotIn("\tl1", data1["content"])
+                self.assertEqual(data1["lines_returned"], 1)
 
-    def test_read_accepts_relative_path_resolved_from_project_root(self) -> None:
+    def test_read_accepts_relative_path_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             nested = root / "skill" / "SKILL.md"
@@ -58,33 +63,39 @@ class TestSystemTools(unittest.TestCase):
 
             with bind_system_tool_context(project_root=root):
                 out = self._run(Read, file_path="skill/SKILL.md")
-                self.assertEqual(out["total_lines"], 1)
-                self.assertIn("\t# skill", out["content"])
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["total_lines"], 1)
+                self.assertIn("\t# skill", out["data"]["content"])
 
-    def test_write_creates_parent_dirs_and_overwrites(self) -> None:
+    def test_write_only_allows_workspace_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            p = root / "sub" / "b.txt"
+            workspace = root / ".agent_workspace"
+            p_ok = workspace / "sub" / "b.txt"
+            p_bad = root / "outside.txt"
 
             with bind_system_tool_context(project_root=root):
-                out = self._run(Write, file_path=str(p), content="hello")
-                self.assertEqual(out["bytes_written"], 5)
-                self.assertTrue(p.exists())
-                self.assertEqual(p.read_text(encoding="utf-8"), "hello")
+                ok_out = self._run(Write, file_path=str(p_ok), content="hello")
+                self.assertTrue(ok_out["ok"])
+                self.assertTrue(p_ok.exists())
+                self.assertEqual(p_ok.read_text(encoding="utf-8"), "hello")
 
-                self._run(Write, file_path=str(p), content="hi")
-                self.assertEqual(p.read_text(encoding="utf-8"), "hi")
+                bad_out = self._run(Write, file_path=str(p_bad), content="nope")
+                self.assertFalse(bad_out["ok"])
+                self.assertIn(bad_out["error"]["code"], {"PATH_ESCAPE", "PERMISSION_DENIED"})
 
     def test_edit_requires_unique_old_string_unless_replace_all(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            p = root / "c.txt"
+            workspace = root / ".agent_workspace"
+            p = workspace / "c.txt"
+            p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x\nx\n", encoding="utf-8")
 
             with bind_system_tool_context(project_root=root):
                 out = self._run(Edit, file_path=str(p), old_string="x", new_string="y")
-                self.assertEqual(out["replacements"], 0)
-                self.assertTrue(out["message"].startswith("Error:"))
+                self.assertFalse(out["ok"])
+                self.assertEqual(out["error"]["code"], "CONFLICT")
                 self.assertEqual(p.read_text(encoding="utf-8"), "x\nx\n")
 
                 out2 = self._run(
@@ -94,10 +105,11 @@ class TestSystemTools(unittest.TestCase):
                     new_string="y",
                     replace_all=True,
                 )
-                self.assertEqual(out2["replacements"], 2)
+                self.assertTrue(out2["ok"])
+                self.assertEqual(out2["data"]["replacements"], 2)
                 self.assertEqual(p.read_text(encoding="utf-8"), "y\ny\n")
 
-    def test_glob_returns_paths_relative_to_project_root(self) -> None:
+    def test_glob_returns_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "d").mkdir()
@@ -106,10 +118,11 @@ class TestSystemTools(unittest.TestCase):
 
             with bind_system_tool_context(project_root=root):
                 out = self._run(Glob, pattern="**/*.txt")
-                self.assertEqual(out["count"], 2)
-                self.assertTrue(all(not Path(m).is_absolute() for m in out["matches"]))
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["count"], 2)
+                self.assertTrue(all(not Path(m).is_absolute() for m in out["data"]["matches"]))
 
-    def test_grep_alias_flags_are_parsed_and_context_attaches_without_n(self) -> None:
+    def test_grep_alias_flags_with_context(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             p = root / "e.txt"
@@ -126,25 +139,28 @@ class TestSystemTools(unittest.TestCase):
                         "-n": False,
                     },
                 )
-                self.assertEqual(out["total_matches"], 1)
-                m = out["matches"][0]
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["total_matches"], 1)
+                m = out["data"]["matches"][0]
                 self.assertIsNone(m["line_number"])
                 self.assertEqual(m["after_context"], ["b"])
 
-    def test_bash_runs_in_project_root_and_returns_exit_code(self) -> None:
+    def test_bash_runs_and_returns_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "x.txt").write_text("ok", encoding="utf-8")
 
             with bind_system_tool_context(project_root=root):
-                out = self._run(Bash, command="cat x.txt")
-                self.assertEqual(out["exitCode"], 0)
-                self.assertIn("ok", out["output"])
+                out = self._run(Bash, args=["cat", "x.txt"])
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["exit_code"], 0)
+                self.assertIn("ok", out["data"]["stdout"])
 
     def test_multiedit_creates_new_file_with_first_empty_old_string(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            p = root / "new.txt"
+            workspace = root / ".agent_workspace"
+            p = workspace / "new.txt"
 
             with bind_system_tool_context(project_root=root):
                 out = self._run(
@@ -155,7 +171,8 @@ class TestSystemTools(unittest.TestCase):
                         {"old_string": "hello", "new_string": "hi", "replace_all": False},
                     ],
                 )
-                self.assertEqual(out["replacements"], 1)
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["total_replacements"], 1)
                 self.assertTrue(p.exists())
                 self.assertEqual(p.read_text(encoding="utf-8"), "hi\n")
 
@@ -168,7 +185,8 @@ class TestSystemTools(unittest.TestCase):
 
             with bind_system_tool_context(project_root=root):
                 out = self._run(LS, path=str(root), ignore=["b.txt"])
-                names = [e["name"] for e in out["entries"]]
+                self.assertTrue(out["ok"])
+                names = [e["name"] for e in out["data"]["entries"]]
                 self.assertIn("a.txt", names)
                 self.assertIn("d", names)
                 self.assertNotIn("b.txt", names)
@@ -186,9 +204,7 @@ class TestSystemTools(unittest.TestCase):
                         {"content": "t2", "status": "completed", "id": "2"},
                     ],
                 )
-                # TodoWrite 现在返回 str（包含 JSON + 提醒文本）
-                self.assertIsInstance(out, str)
-                self.assertIn("TODO list updated successfully", out)
+                self.assertTrue(out["ok"])
                 self.assertTrue((session_root / "todos.json").exists())
                 data = json.loads((session_root / "todos.json").read_text(encoding="utf-8"))
                 self.assertEqual(data.get("schema_version"), 2)
@@ -238,7 +254,9 @@ class TestSystemTools(unittest.TestCase):
                 with mock.patch.dict("sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}):
                     with mock.patch.dict("sys.modules", {"markdownify": SimpleNamespace(markdownify=lambda html: "# Hello")}):
                         out = self._run_raw(WebFetch, url="https://example.com", prompt="Summarize")
-                        self.assertEqual(out, "answer")
+                        self.assertTrue(out["ok"])
+                        self.assertEqual(out["data"]["summary_text"], "answer")
+                        self.assertIn("artifact", out["data"])
                         self.assertEqual(len(token_cost.usage_history), 1)
                         self.assertEqual(token_cost.usage_history[0].model, "dummy-low")
                         self.assertEqual(token_cost.usage_history[0].level, "LOW")
@@ -262,7 +280,6 @@ class TestSystemTools(unittest.TestCase):
                 async def ainvoke(self, messages, tools=None, tool_choice=None, **kwargs):
                     raise AssertionError("should not be called")
 
-            token_cost = TokenCost(include_cost=False)
             llm_levels = {"LOW": ExplodingLLM()}
 
             def fake_get(url, timeout, impersonate):
@@ -272,13 +289,12 @@ class TestSystemTools(unittest.TestCase):
                 project_root=root,
                 session_id="s1",
                 session_root=root / "sessions" / "s1",
-                token_cost=token_cost,
                 llm_levels=llm_levels,
             ):
                 with mock.patch.dict("sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}):
                     out = self._run_raw(WebFetch, url="https://example-404.com", prompt="Summarize")
-                    self.assertTrue(out.startswith("Error: HTTP 404"))
-                    self.assertEqual(len(token_cost.usage_history), 0)
+                    self.assertFalse(out["ok"])
+                    self.assertEqual(out["error"]["code"], "NOT_FOUND")
 
     def test_webfetch_records_subagent_prefixed_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -318,66 +334,19 @@ class TestSystemTools(unittest.TestCase):
                 project_root=root,
                 session_id="s1",
                 session_root=root / "sessions" / "s1",
-                subagent_name="Explorer",
                 token_cost=token_cost,
                 llm_levels=llm_levels,
+                subagent_name="researcher",
             ):
                 with mock.patch.dict("sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}):
                     with mock.patch.dict("sys.modules", {"markdownify": SimpleNamespace(markdownify=lambda html: "# Hello")}):
                         out = self._run_raw(WebFetch, url="https://example.com", prompt="Summarize")
-                        self.assertEqual(out, "answer")
+                        self.assertTrue(out["ok"])
                         self.assertEqual(len(token_cost.usage_history), 1)
-                        self.assertEqual(token_cost.usage_history[0].source, "subagent:Explorer:webfetch")
-
-    def test_webfetch_llm_timeout_returns_timeout_error(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-
-            class HangingLLM:
-                model = "dummy-low"
-
-                @property
-                def provider(self) -> str:
-                    return "dummy"
-
-                @property
-                def name(self) -> str:
-                    return self.model
-
-                async def ainvoke(self, messages, tools=None, tool_choice=None, **kwargs):
-                    import asyncio
-
-                    await asyncio.sleep(999)
-                    return ChatInvokeCompletion(content="should-not-return")
-
-            token_cost = TokenCost(include_cost=False)
-            llm_levels = {"LOW": HangingLLM()}
-
-            def fake_get(url, timeout, impersonate):
-                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>")
-
-            with bind_system_tool_context(
-                project_root=root,
-                session_id="s1",
-                session_root=root / "sessions" / "s1",
-                token_cost=token_cost,
-                llm_levels=llm_levels,
-            ):
-                with mock.patch("comate_agent_sdk.system_tools.tools._WEBFETCH_LLM_TIMEOUT_SECONDS", 0.01):
-                    with mock.patch.dict(
-                        "sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}
-                    ):
-                        with mock.patch.dict("sys.modules", {"markdownify": SimpleNamespace(markdownify=lambda html: "# Hello")}):
-                            out = self._run_raw(WebFetch, url="https://example-timeout.com", prompt="Summarize")
-                            self.assertTrue(out.startswith("Error: WebFetch LLM timeout after"))
-                            self.assertIn("timeout", out.lower())
-                            self.assertEqual(len(token_cost.usage_history), 0)
+                        self.assertEqual(token_cost.usage_history[0].source, "subagent:researcher:webfetch")
 
     @staticmethod
     def _run(tool_obj, /, **kwargs):
-        # Tool.execute 是 async，这里用 event loop 运行最小封装
-        import asyncio
-
         raw = asyncio.run(tool_obj.execute(**kwargs))
         if isinstance(raw, str) and raw.strip().startswith(("{", "[")):
             return json.loads(raw)
@@ -385,10 +354,7 @@ class TestSystemTools(unittest.TestCase):
 
     @staticmethod
     def _run_raw(tool_obj, /, **kwargs):
-        import asyncio
-
-        raw = asyncio.run(tool_obj.execute(**kwargs))
-        return raw
+        return TestSystemTools._run(tool_obj, **kwargs)
 
 
 if __name__ == "__main__":

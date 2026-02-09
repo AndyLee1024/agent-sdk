@@ -13,11 +13,28 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
 )
 from comate_agent_sdk.observability import Laminar
+from comate_agent_sdk.system_tools.tool_result import is_tool_result_envelope
 
 logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.core import AgentRuntime
+
+
+def _detect_tool_error(result: str | list[ContentPartTextParam | ContentPartImageParam]) -> bool:
+    if isinstance(result, list):
+        return False
+
+    text = result.strip()
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+        except Exception:
+            payload = None
+        if is_tool_result_envelope(payload):
+            return not bool(payload.get("ok", False))
+
+    return text.lower().startswith("error:")
 
 
 async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolMessage:
@@ -89,12 +106,7 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
             # Execute the tool (with dependency overrides if configured)
             result = await tool.execute(_overrides=agent.dependency_overrides, **args)
 
-            # Heuristic error detection:
-            # Many tools return "Error: ..." strings instead of raising exceptions.
-            is_error = False
-            if isinstance(result, str):
-                if result.lstrip().lower().startswith("error:"):
-                    is_error = True
+            is_error = _detect_tool_error(result)
 
             # Check if the tool is marked as ephemeral (can be bool or int for keep count)
             is_ephemeral = bool(tool.ephemeral)  # Convert int to bool (2 -> True)

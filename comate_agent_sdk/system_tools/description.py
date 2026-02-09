@@ -6,7 +6,7 @@
 Tool API 层的短描述在 tools.py 的 @tool() 装饰器中定义。
 """
 
-BASH_USAGE_RULES = """Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+BASH_USAGE_RULES = """Executes a command with argv-style args and optional timeout, ensuring proper handling and security measures.
 
 Before executing the command, please follow these steps:
 
@@ -25,11 +25,11 @@ Before executing the command, please follow these steps:
    - Capture the output of the command.
 
 Usage notes:
-  - The command argument is required.
-  - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands will timeout after 120000ms (2 minutes).
+  - The `args` argument is required, where `args[0]` is executable and the rest are arguments.
+  - You can specify an optional timeout in milliseconds (up to 600000ms / 10 minutes). If not specified, commands timeout after 120000ms (2 minutes).
+  - You can optionally pass `cwd` and `env`.
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds 30000 characters, output will be truncated before being returned to you.
-  - You can use the `run_in_background` parameter to run the command in the background, which allows you to continue working while the command runs. You can monitor the output using the Bash tool as it becomes available. Never use `run_in_background` to run 'sleep' as it will return immediately. You do not need to use '&' at the end of the command when using this parameter.
   - VERY IMPORTANT: You MUST avoid using search commands like `find` and `grep`. Instead use Grep, Glob, or Task to search. You MUST avoid read tools like `cat`, `head`, `tail`, and `ls`, and use Read and LS to read files.
  - If you _still_ need to run `grep`, STOP. ALWAYS USE ripgrep at `rg` first, which all Claude Code users have pre-installed.
   - When issuing multiple commands, use the ';' or '&&' operator to separate them. DO NOT use newlines (newlines are ok in quoted strings).
@@ -126,10 +126,12 @@ Assume this tool is able to read all files on the machine. If the User provides 
 Usage:
 - file_path supports both absolute and relative paths
 - Relative paths are resolved against the current project root
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- CRITICAL: ALWAYS explicitly specify offset_line and limit_lines parameters (range: 50-200 lines). Do NOT rely on defaults
+- When reading from start of file: offset_line=0, limit_lines=100
+- When reading specific section: use Grep results to determine offset_line, then set appropriate limit_lines
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
+- BEST PRACTICE: For large files or unfamiliar codebases, use Grep first to locate relevant sections (returns line numbers), then use Read with precise line ranges. This pattern (Grep → Read) is MUCH more efficient than blindly reading entire files
 - This tool allows Claude Code to read images (eg PNG, JPG, etc). When reading an image file the contents are presented visually as Claude Code is a multimodal LLM.
 - This tool can read PDF files (.pdf). PDFs are processed page by page, extracting both text and visual content for analysis.
 - This tool can read Jupyter notebooks (.ipynb files) and returns all cells with their outputs, combining code, text, and visualizations.
@@ -221,6 +223,14 @@ GREP_USAGE_RULES = """A powerful search tool built on ripgrep
   - Use Task tool for open-ended searches requiring multiple rounds
   - Pattern syntax: Uses ripgrep (not grep) - literal braces need escaping (use `interface\\{\\}` to find `interface{}` in Go code)
   - Multiline matching: By default patterns match within single lines only. For cross-line patterns like `struct \\{[\\s\\S]*?field`, use `multiline: true`
+
+  Search Strategy - CRITICAL:
+  - ALWAYS use regex alternation (|) to search multiple terms in ONE call instead of multiple sequential searches
+  - Consider: naming variants (PascalCase|snake_case|camelCase), related terms, synonyms, AND cross-layer entities (class names, method names, field names, values)
+  - Examples:
+    * Searching "ContextIR": use "ContextIR|context_ir|contextIR|Context|IR|context_info"
+    * Searching "tool result handling": use "tool_result|ToolResultBlockParam|serialize_tool|handle_tool_result"
+  - This is MUCH faster and more comprehensive than separate searches
 """
 
 

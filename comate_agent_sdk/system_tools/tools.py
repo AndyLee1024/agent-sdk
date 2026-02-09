@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
+import tempfile
 import time
 from collections import defaultdict
 from fnmatch import fnmatch
@@ -16,33 +17,58 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field
 
 from comate_agent_sdk.llm.messages import UserMessage
-from comate_agent_sdk.tools.decorator import Tool, tool
-from comate_agent_sdk.tools.depends import Depends
-from comate_agent_sdk.tools.system_context import SystemToolContext, get_system_tool_context
+from comate_agent_sdk.system_tools.artifact_store import ArtifactStore
 from comate_agent_sdk.system_tools.description import (
     BASH_USAGE_RULES,
-    READ_USAGE_RULES,
-    WRITE_USAGE_RULES,
     EDIT_USAGE_RULES,
-    MULTIEDIT_USAGE_RULES,
     GLOB_USAGE_RULES,
     GREP_USAGE_RULES,
     LS_USAGE_RULES,
+    MULTIEDIT_USAGE_RULES,
+    READ_USAGE_RULES,
     TODO_USAGE_RULES,
     WEBFETCH_USAGE_RULES,
+    WRITE_USAGE_RULES,
 )
+from comate_agent_sdk.system_tools.path_guard import (
+    PathGuardError,
+    resolve_for_read,
+    resolve_for_search,
+    resolve_for_write,
+    to_safe_relpath,
+)
+from comate_agent_sdk.system_tools.tool_result import err, ok
+from comate_agent_sdk.tools.decorator import Tool, tool
+from comate_agent_sdk.tools.depends import Depends
+from comate_agent_sdk.tools.system_context import SystemToolContext, get_system_tool_context
 
 logger = logging.getLogger(__name__)
 
-_READ_DEFAULT_LIMIT = 500
+_READ_MIN_LIMIT = 50
+_READ_DEFAULT_LIMIT = 100
+_READ_MAX_LIMIT = 200
 _LINE_TRUNCATE_CHARS = 2000
+
 _BASH_DEFAULT_TIMEOUT_MS = 120_000
 _BASH_MAX_TIMEOUT_MS = 600_000
-_BASH_OUTPUT_TRUNCATE_CHARS = 30_000
+_BASH_OUTPUT_DEFAULT_MAX_CHARS = 30_000
+
 _WEBFETCH_TIMEOUT_SECONDS = 20
 _WEBFETCH_LLM_TIMEOUT_SECONDS = 30
 _WEBFETCH_CACHE_TTL_SECONDS = 15 * 60
 _WEBFETCH_MARKDOWN_TRUNCATE_CHARS = 50_000
+
+_TEXT_SPILL_CHARS = 10_000
+_BYTES_SPILL_LIMIT = 16 * 1024
+_LIST_SPILL_LIMIT = 200
+_ARTIFACT_TTL_SECONDS = 3600
+
+_EXCLUDED_WALK_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".agent"}
+
+_BASH_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
+_FILE_LOCKS_BY_LOOP: dict[int, dict[str, asyncio.Lock]] = defaultdict(dict)
+
+_WEBFETCH_CACHE: dict[str, dict[str, Any]] = {}
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -57,63 +83,12 @@ def _truncate_line(line: str, max_chars: int) -> str:
     return line[:max_chars] + "...(truncated)"
 
 
-def _ensure_abs_path(file_path: str) -> Path:
-    p = Path(file_path)
-    if not p.is_absolute():
-        raise ValueError(f"file_path 必须是绝对路径：{file_path}")
-    return p
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _resolve_read_path(file_path: str, project_root: Path) -> Path:
-    """Resolve read path.
-
-    - absolute path: use as-is
-    - relative path: resolve against project_root
-    """
-    p = Path(file_path)
-    if p.is_absolute():
-        return p.resolve()
-    return (project_root / p).resolve()
-
-
-def _resolve_search_path(path: str | None, project_root: Path) -> Path:
-    if path is None:
-        return project_root
-    p = Path(path)
-    if p.is_absolute():
-        return p
-    return (project_root / p).resolve()
-
-
-def _relpath(p: Path, project_root: Path) -> str:
-    try:
-        return os.path.relpath(str(p), start=str(project_root))
-    except Exception:
-        return str(p)
-
-
-def _warn_bash_command(command: str) -> str | None:
-    # 仅 warning（不阻止执行）：提示优先用专用工具
-    # 注意：不要过度严格，避免误伤，比如字符串里出现 "grep"。
-    # 这里以常见的命令起始/分隔符后的 token 为准。
-    pattern = r'(^|[;&|()]\s*)(find|grep|rg|cat|ls|head|tail)\b'
-    m = re.search(pattern, command)
-    if not m:
-        return None
-    cmd = m.group(2)
-    return (
-        f"Warning: 检测到命令 `{cmd}`。通常应优先使用专用工具（搜索用 Grep/Glob，读文件用 Read），"
-        f"以获得更稳定的权限与输出格式。"
-    )
-
-
-def _session_root_from_ctx(ctx: SystemToolContext) -> Path | None:
-    if ctx.session_root is None:
-        return None
-    try:
-        return ctx.session_root.resolve()
-    except Exception:
-        return ctx.session_root
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _cleanup_ttl_cache(cache: dict[str, dict[str, Any]], *, now: float, ttl: int) -> None:
@@ -126,285 +101,209 @@ def _cleanup_ttl_cache(cache: dict[str, dict[str, Any]], *, now: float, ttl: int
         cache.pop(k, None)
 
 
-@tool(
-    "Executes a bash command with optional timeout. Returns combined output and exit code.",
-    name="Bash",
-    usage_rules=BASH_USAGE_RULES,
-)
-async def Bash(
-    command: str,
-    timeout: int | None = None,
-    description: str | None = None,
-    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    if description:
-        logger.info(f"Bash: {description} | {command}")
-    else:
-        logger.info(f"Bash: {command}")
+def _project_root(ctx: SystemToolContext) -> Path:
+    return ctx.project_root.resolve()
 
-    warn = _warn_bash_command(command)
 
-    timeout_ms = timeout if timeout is not None else _BASH_DEFAULT_TIMEOUT_MS
-    if timeout_ms > _BASH_MAX_TIMEOUT_MS:
-        timeout_ms = _BASH_MAX_TIMEOUT_MS
-    if timeout_ms < 0:
-        timeout_ms = _BASH_DEFAULT_TIMEOUT_MS
+def _workspace_root(ctx: SystemToolContext) -> Path:
+    if ctx.workspace_root is not None:
+        return ctx.workspace_root.resolve()
+    return (_project_root(ctx) / ".agent_workspace").resolve()
 
+
+def _session_root_from_ctx(ctx: SystemToolContext) -> Path | None:
+    if ctx.session_root is None:
+        return None
+    return ctx.session_root.resolve()
+
+
+def _allowed_roots(ctx: SystemToolContext) -> list[Path]:
+    roots = [_project_root(ctx)]
+    roots.append(_workspace_root(ctx))
+    return roots
+
+
+def _artifact_store(ctx: SystemToolContext) -> ArtifactStore:
+    return ArtifactStore(_workspace_root(ctx))
+
+
+def _loop_id() -> int:
+    return id(asyncio.get_running_loop())
+
+
+def _bash_semaphore() -> asyncio.Semaphore:
+    lid = _loop_id()
+    sem = _BASH_SEMAPHORES.get(lid)
+    if sem is None:
+        sem = asyncio.Semaphore(4)
+        _BASH_SEMAPHORES[lid] = sem
+    return sem
+
+
+def _file_lock(path: Path) -> asyncio.Lock:
+    lid = _loop_id()
+    key = str(path.resolve())
+    lock = _FILE_LOCKS_BY_LOOP[lid].get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _FILE_LOCKS_BY_LOOP[lid][key] = lock
+    return lock
+
+
+async def _io_call(func, /, *args, **kwargs):
+    return func(*args, **kwargs)
+
+
+async def _read_text(path: Path, *, encoding: str = "utf-8") -> str:
+    return await _io_call(path.read_text, encoding=encoding, errors="replace")
+
+
+async def _exists(path: Path) -> bool:
+    return await _io_call(path.exists)
+
+
+async def _is_dir(path: Path) -> bool:
+    return await _io_call(path.is_dir)
+
+
+async def _is_file(path: Path) -> bool:
+    return await _io_call(path.is_file)
+
+
+async def _stat(path: Path):
+    return await _io_call(path.stat)
+
+
+def _atomic_write_bytes_sync(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".tmp_", dir=str(path.parent))
     try:
-        result = subprocess.run(
-            command,
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd=str(ctx.project_root),
-            timeout=timeout_ms / 1000.0,
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        if warn:
-            output = f"{warn}\n\n{output}"
-        output = _truncate_text(output.strip(), _BASH_OUTPUT_TRUNCATE_CHARS)
-        return {"output": output, "exitCode": int(result.returncode), "killed": False}
-    except subprocess.TimeoutExpired as e:
-        stdout = getattr(e, "stdout", "") or ""
-        stderr = getattr(e, "stderr", "") or ""
-        output = stdout + stderr
-        if warn:
-            output = f"{warn}\n\n{output}"
-        output = _truncate_text(
-            output.strip() or f"Command timed out after {timeout_ms}ms",
-            _BASH_OUTPUT_TRUNCATE_CHARS,
-        )
-        return {"output": output, "exitCode": -1, "killed": True}
-    except Exception as e:
-        msg = f"Error: Bash 执行失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"output": msg, "exitCode": -1, "killed": None}
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_name, path)
+        try:
+            dir_fd = os.open(str(path.parent), os.O_DIRECTORY)
+        except Exception:
+            dir_fd = None
+        if dir_fd is not None:
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+    finally:
+        if os.path.exists(tmp_name):
+            try:
+                os.remove(tmp_name)
+            except FileNotFoundError:
+                pass
 
 
-@tool("Reads a text file with line numbers.", name="Read", usage_rules=READ_USAGE_RULES)
-async def Read(
-    file_path: str,
-    offset: int | None = None,
-    limit: int | None = None,
-    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+async def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    payload = content.encode(encoding)
+    await _io_call(_atomic_write_bytes_sync, path, payload)
+
+
+def _path_error_result(exc: PathGuardError) -> dict[str, Any]:
+    return err(exc.code, exc.message)
+
+
+def _invalid_argument(message: str, *, field: str | None = None) -> dict[str, Any]:
+    field_errors: list[dict[str, Any]] = []
+    if field:
+        field_errors.append({"field": field, "message": message})
+    return err("INVALID_ARGUMENT", message, field_errors=field_errors)
+
+
+async def _spill_text(
+    *,
+    ctx: SystemToolContext,
+    namespace: str,
+    text: str,
+    mime: str,
 ) -> dict[str, Any]:
-    try:
-        path = _resolve_read_path(file_path, ctx.project_root)
-        if not path.exists():
-            return {"content": f"Error: File not found: {file_path}", "total_lines": 0, "lines_returned": 0}
-        if path.is_dir():
-            return {"content": f"Error: Path is a directory: {file_path}", "total_lines": 0, "lines_returned": 0}
-
-        text = path.read_text(encoding="utf-8", errors="replace")
-        lines = text.splitlines()
-        total_lines = len(lines)
-
-        start = int(offset) if offset is not None else 0
-        if start < 0:
-            start = 0
-        take = int(limit) if limit is not None else _READ_DEFAULT_LIMIT
-        if take < 0:
-            take = _READ_DEFAULT_LIMIT
-
-        sliced = lines[start : start + take]
-        rendered: list[str] = []
-        for i, line in enumerate(sliced, start=start):
-            rendered.append(f"{i + 1:6d}\t{_truncate_line(line, _LINE_TRUNCATE_CHARS)}")
-
-        return {
-            "content": "\n".join(rendered),
-            "total_lines": total_lines,
-            "lines_returned": len(sliced),
-        }
-    except Exception as e:
-        msg = f"Error: Read 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"content": msg, "total_lines": 0, "lines_returned": 0}
-
-
-@tool("Writes content to a file (overwrites).", name="Write", usage_rules=WRITE_USAGE_RULES)
-async def Write(
-    file_path: str,
-    content: str,
-    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    try:
-        path = _ensure_abs_path(file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        bytes_written = len(content.encode("utf-8"))
-        return {
-            "message": f"Success: Wrote {bytes_written} bytes to {file_path}",
-            "bytes_written": bytes_written,
-            "file_path": file_path,
-        }
-    except Exception as e:
-        msg = f"Error: Write 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"message": msg, "bytes_written": 0, "file_path": file_path}
-
-
-@tool("Performs exact string replacement in a file.", name="Edit", usage_rules=EDIT_USAGE_RULES)
-async def Edit(
-    file_path: str,
-    old_string: str,
-    new_string: str,
-    replace_all: bool | None = None,
-    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    try:
-        path = _ensure_abs_path(file_path)
-        if not path.exists():
-            return {"message": f"Error: File not found: {file_path}", "replacements": 0, "file_path": file_path}
-        if path.is_dir():
-            return {"message": f"Error: Path is a directory: {file_path}", "replacements": 0, "file_path": file_path}
-        if old_string == "":
-            return {"message": "Error: old_string 不能为空", "replacements": 0, "file_path": file_path}
-        if old_string == new_string:
-            return {"message": "Error: new_string 必须与 old_string 不同", "replacements": 0, "file_path": file_path}
-
-        content = path.read_text(encoding="utf-8", errors="replace")
-        count = content.count(old_string)
-        if count == 0:
-            return {"message": f"Error: String not found in {file_path}", "replacements": 0, "file_path": file_path}
-
-        do_replace_all = bool(replace_all) if replace_all is not None else False
-        if (not do_replace_all) and count > 1:
-            return {
-                "message": f"Error: old_string 在文件中出现 {count} 次；请提供更精确的 old_string 或设置 replace_all=true",
-                "replacements": 0,
-                "file_path": file_path,
-            }
-
-        if do_replace_all:
-            new_content = content.replace(old_string, new_string)
-            replacements = count
-        else:
-            new_content = content.replace(old_string, new_string, 1)
-            replacements = 1
-
-        path.write_text(new_content, encoding="utf-8")
-        return {"message": "Success: Edit applied", "replacements": replacements, "file_path": file_path}
-    except Exception as e:
-        msg = f"Error: Edit 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"message": msg, "replacements": 0, "file_path": file_path}
-
-
-class _MultiEditOp(BaseModel):
-    old_string: str = Field(description="The text to replace")
-    new_string: str = Field(description="The text to replace it with")
-    replace_all: bool = Field(
-        default=False,
-        description="Replace all occurences of old_string (default false).",
+    return await _artifact_store(ctx).put_text(
+        namespace=namespace,
+        text=text,
+        mime=mime,
+        ttl_seconds=_ARTIFACT_TTL_SECONDS,
     )
+
+
+async def _spill_json(
+    *,
+    ctx: SystemToolContext,
+    namespace: str,
+    data: Any,
+) -> dict[str, Any]:
+    return await _artifact_store(ctx).put_json(
+        namespace=namespace,
+        data=data,
+        ttl_seconds=_ARTIFACT_TTL_SECONDS,
+    )
+
+
+class BashInput(BaseModel):
+    args: list[str] = Field(min_length=1, description="Executable and arguments")
+    timeout_ms: int = Field(default=_BASH_DEFAULT_TIMEOUT_MS, ge=1, le=_BASH_MAX_TIMEOUT_MS)
+    cwd: str | None = Field(default=None, description="Working directory for command")
+    env: dict[str, str] | None = Field(default=None, description="Optional environment variable overrides")
+    max_output_chars: int = Field(default=_BASH_OUTPUT_DEFAULT_MAX_CHARS, ge=200, le=200_000)
 
     model_config = {"extra": "forbid"}
 
 
-class _MultiEditInput(BaseModel):
-    file_path: str = Field(description="The absolute path to the file to modify")
-    edits: list[_MultiEditOp] = Field(
-        min_length=1,
-        description="Array of edit operations to perform sequentially on the file",
-    )
+class ReadInput(BaseModel):
+    file_path: str = Field(description="Path to text file")
+    offset_line: int = Field(ge=0, description="Line number to start reading from (0-based)")
+    limit_lines: int = Field(ge=_READ_MIN_LIMIT, le=_READ_MAX_LIMIT, description="Number of lines to read (50-200)")
+    format: Literal["line_numbers", "raw"] = Field(default="line_numbers")
+    max_line_chars: int = Field(default=_LINE_TRUNCATE_CHARS, ge=100, le=20_000)
 
     model_config = {"extra": "forbid"}
 
 
-@tool(
-    "Make multiple edits to a single file atomically (all succeed or none).",
-    name="MultiEdit",
-    usage_rules=MULTIEDIT_USAGE_RULES,
-)
-async def MultiEdit(
-    params: _MultiEditInput,
-    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    file_path = params.file_path
-    edits = params.edits
+class WriteInput(BaseModel):
+    file_path: str = Field(description="Target file path")
+    content: str = Field(description="Content to write")
+    mode: Literal["overwrite", "append"] = Field(default="overwrite")
+    encoding: str = Field(default="utf-8")
 
-    try:
-        path = _ensure_abs_path(file_path)
-        exists = path.exists()
-
-        content = ""
-        if exists:
-            if path.is_dir():
-                return {"message": f"Error: Path is a directory: {file_path}", "replacements": 0, "file_path": file_path}
-            content = path.read_text(encoding="utf-8", errors="replace")
-        else:
-            # 创建新文件：仅当第一条 edit 的 old_string 为空
-            if not edits:
-                return {"message": "Error: edits 不能为空", "replacements": 0, "file_path": file_path}
-            if edits[0].old_string != "":
-                return {
-                    "message": "Error: File not found and first edit.old_string must be empty to create a new file",
-                    "replacements": 0,
-                    "file_path": file_path,
-                }
-            # content 由第一条 new_string 初始化（后续 edits 继续对该内容做替换）
-            content = edits[0].new_string
-            edits = edits[1:]
-
-        total_replacements = 0
-        for op in edits:
-            if op.old_string == "":
-                return {"message": "Error: old_string 不能为空（创建新文件仅允许第一条）", "replacements": 0, "file_path": file_path}
-            if op.old_string == op.new_string:
-                return {"message": "Error: new_string 必须与 old_string 不同", "replacements": 0, "file_path": file_path}
-
-            count = content.count(op.old_string)
-            if count == 0:
-                return {"message": f"Error: String not found in {file_path}", "replacements": 0, "file_path": file_path}
-
-            if not op.replace_all and count > 1:
-                return {
-                    "message": f"Error: old_string 在文件中出现 {count} 次；请提供更精确的 old_string 或设置 replace_all=true",
-                    "replacements": 0,
-                    "file_path": file_path,
-                }
-
-            if op.replace_all:
-                content = content.replace(op.old_string, op.new_string)
-                total_replacements += count
-            else:
-                content = content.replace(op.old_string, op.new_string, 1)
-                total_replacements += 1
-
-        # 原子落盘：全部成功后才写入
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return {"message": "Success: MultiEdit applied", "replacements": total_replacements, "file_path": file_path}
-    except Exception as e:
-        msg = f"Error: MultiEdit 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"message": msg, "replacements": 0, "file_path": file_path}
+    model_config = {"extra": "forbid"}
 
 
-@tool("Find files matching a glob pattern.", name="Glob", usage_rules=GLOB_USAGE_RULES)
-async def Glob(
-    pattern: str,
-    path: str | None = None,
-    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> dict[str, Any]:
-    try:
-        search_dir = _resolve_search_path(path, ctx.project_root)
-        if not search_dir.exists():
-            return {"matches": [], "count": 0, "search_path": str(search_dir)}
-        if not search_dir.is_dir():
-            return {"matches": [], "count": 0, "search_path": str(search_dir)}
+class EditInput(BaseModel):
+    file_path: str = Field(description="Target file path")
+    old_string: str = Field(min_length=1, description="Text to replace")
+    new_string: str = Field(description="Replacement text")
+    replace_all: bool = Field(default=False)
 
-        candidates = [p for p in search_dir.glob(pattern)]
-        files = [p for p in candidates if p.is_file()]
-        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    model_config = {"extra": "forbid"}
 
-        matches = [_relpath(p.resolve(), ctx.project_root) for p in files]
-        return {"matches": matches, "count": len(matches), "search_path": str(search_dir.resolve())}
-    except Exception as e:
-        msg = f"Error: Glob 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"matches": [], "count": 0, "search_path": str(ctx.project_root)}
+
+class MultiEditOp(BaseModel):
+    old_string: str = Field(description="Text to replace")
+    new_string: str = Field(description="Replacement text")
+    replace_all: bool = Field(default=False)
+
+    model_config = {"extra": "forbid"}
+
+
+class MultiEditInput(BaseModel):
+    file_path: str = Field(description="Target file path")
+    edits: list[MultiEditOp] = Field(min_length=1)
+
+    model_config = {"extra": "forbid"}
+
+
+class GlobInput(BaseModel):
+    pattern: str
+    path: str | None = None
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=10_000)
+    include_dirs: bool = False
+
+    model_config = {"extra": "forbid"}
 
 
 class GrepInput(BaseModel):
@@ -412,18 +311,76 @@ class GrepInput(BaseModel):
     path: str | None = None
     glob: str | None = None
     type: str | None = None
-    output_mode: Literal["content", "files_with_matches", "count"] | None = None
+    output_mode: Literal["content", "files_with_matches", "count"] = "files_with_matches"
 
-    B: int | None = Field(default=None, alias="-B")
-    A: int | None = Field(default=None, alias="-A")
-    C: int | None = Field(default=None, alias="-C")
+    B: int | None = Field(default=None, alias="-B", ge=0)
+    A: int | None = Field(default=None, alias="-A", ge=0)
+    C: int | None = Field(default=None, alias="-C", ge=0)
     i: bool | None = Field(default=None, alias="-i")
-    n: bool | None = Field(default=None, alias="-n")
+    n: bool | None = Field(default=True, alias="-n")
 
-    head_limit: int | None = None
-    multiline: bool | None = None
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=10_000)
+    multiline: bool = False
+    max_files: int = Field(default=2000, ge=1, le=100_000)
 
-    model_config = {"populate_by_name": True}
+    model_config = {"populate_by_name": True, "extra": "forbid"}
+
+
+class LSInput(BaseModel):
+    path: str | None = None
+    ignore: list[str] | None = None
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=10_000)
+    include_hidden: bool = False
+    sort_by: Literal["name", "mtime", "size"] = "name"
+
+    model_config = {"extra": "forbid"}
+
+
+class TodoItem(BaseModel):
+    id: str = Field(description="Unique identifier for the todo item")
+    content: str = Field(min_length=1, description="Description of the task")
+    status: Literal["pending", "in_progress", "completed"] = Field(description="Current status of the task")
+    priority: Literal["high", "medium", "low"] = Field(default="medium", description="Priority level of the task")
+
+    model_config = {"extra": "forbid"}
+
+
+class TodoWriteInput(BaseModel):
+    todos: list[TodoItem] = Field(description="The updated todo list")
+
+    model_config = {"extra": "forbid"}
+
+
+class WebFetchInput(BaseModel):
+    url: str = Field(
+        description="The URL to fetch content from",
+        json_schema_extra={"format": "uri"},
+    )
+    prompt: str = Field(description="The prompt to run on the fetched content")
+
+    model_config = {"extra": "forbid"}
+
+
+class QuestionOption(BaseModel):
+    label: str = Field(max_length=50, description="Display text for this option (1-5 words)")
+    description: str = Field(description="Explanation of this option")
+
+    model_config = {"extra": "forbid"}
+
+
+class Question(BaseModel):
+    question: str = Field(description="The complete question to ask the user")
+    header: str = Field(max_length=12, description="Short label displayed as a chip/tag (max 12 chars)")
+    options: list[QuestionOption] = Field(min_length=2, max_length=4, description="Available options (2-4)")
+    multiSelect: bool = Field(default=False)
+
+    model_config = {"extra": "forbid"}
+
+
+class AskUserQuestionInput(BaseModel):
+    questions: list[Question] = Field(min_length=1, max_length=4, description="Questions to ask")
+
+    model_config = {"extra": "forbid"}
 
 
 def _compute_context_window(params: GrepInput) -> tuple[int, int]:
@@ -435,7 +392,7 @@ def _compute_context_window(params: GrepInput) -> tuple[int, int]:
     return max(0, int(before)), max(0, int(after))
 
 
-def _rg_base_args(params: GrepInput) -> list[str]:
+def _build_rg_base_args(params: GrepInput) -> list[str]:
     args: list[str] = ["rg", "--color=never", "--no-messages"]
     if params.i:
         args.append("-i")
@@ -448,60 +405,515 @@ def _rg_base_args(params: GrepInput) -> list[str]:
     return args
 
 
-def _run_rg_lines(cmd: list[str]) -> tuple[int, str, str]:
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return int(result.returncode), result.stdout or "", result.stderr or ""
+async def _run_subprocess(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return await _io_call(
+        subprocess.run,
+        args,
+        capture_output=True,
+        text=True,
+        cwd=str(cwd) if cwd is not None else None,
+    )
+
+
+def _walk_candidates(
+    *,
+    search_path: Path,
+    include_dirs: bool,
+    glob_pattern: str | None,
+    max_files: int | None,
+) -> list[Path]:
+    if not search_path.exists():
+        return []
+
+    if search_path.is_file():
+        return [search_path]
+
+    candidates: list[Path] = []
+    visited_files = 0
+    for root, dirs, files in os.walk(search_path, topdown=True):
+        dirs[:] = [d for d in dirs if d not in _EXCLUDED_WALK_DIRS]
+
+        root_path = Path(root)
+        if include_dirs:
+            for d in dirs:
+                p = root_path / d
+                rel = p.relative_to(search_path).as_posix()
+                if glob_pattern and not (fnmatch(rel, glob_pattern) or fnmatch(d, glob_pattern)):
+                    continue
+                candidates.append(p)
+
+        for f in files:
+            p = root_path / f
+            rel = p.relative_to(search_path).as_posix()
+            if glob_pattern and not (fnmatch(rel, glob_pattern) or fnmatch(f, glob_pattern)):
+                continue
+            candidates.append(p)
+            visited_files += 1
+            if max_files is not None and visited_files >= max_files:
+                return candidates
+
+    return candidates
+
+
+def _sort_ls(entries: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]]:
+    if sort_by == "mtime":
+        return sorted(entries, key=lambda x: (x["mtime"], x["name"]), reverse=True)
+    if sort_by == "size":
+        return sorted(entries, key=lambda x: (x["size"], x["name"]), reverse=True)
+    return sorted(entries, key=lambda x: x["name"])
+
+
+@tool(
+    "Executes a command using argv args with optional timeout. Returns stdout/stderr and exit code.",
+    name="Bash",
+    usage_rules=BASH_USAGE_RULES,
+)
+async def Bash(
+    params: BashInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    start = time.monotonic()
+
+    try:
+        if params.cwd is not None:
+            cwd = resolve_for_read(
+                user_path=params.cwd,
+                project_root=_project_root(ctx),
+                workspace_root=_workspace_root(ctx),
+            )
+            if not await _exists(cwd):
+                return err("NOT_FOUND", f"cwd not found: {params.cwd}")
+            if not await _is_dir(cwd):
+                return err("INVALID_ARGUMENT", f"cwd is not a directory: {params.cwd}")
+        else:
+            cwd = _project_root(ctx)
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    env = os.environ.copy()
+    if params.env:
+        env.update(params.env)
+
+    timed_out = False
+    cp: subprocess.CompletedProcess[str] | None = None
+    stdout = ""
+    stderr = ""
+    exit_code = -1
+
+    async with _bash_semaphore():
+        try:
+            cp = await _io_call(
+                subprocess.run,
+                params.args,
+                capture_output=True,
+                text=True,
+                cwd=str(cwd),
+                env=env,
+                timeout=params.timeout_ms / 1000.0,
+            )
+            stdout = cp.stdout or ""
+            stderr = cp.stderr or ""
+            exit_code = int(cp.returncode)
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
+            stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
+            exit_code = -1
+
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    combined = stdout + stderr
+    should_spill = len(combined) > params.max_output_chars or len(combined.encode("utf-8")) > _BYTES_SPILL_LIMIT
+
+    artifact: dict[str, Any] | None = None
+    if should_spill:
+        artifact = await _spill_json(
+            ctx=ctx,
+            namespace="bash",
+            data={
+                "args": params.args,
+                "cwd": str(cwd),
+                "stdout": stdout,
+                "stderr": stderr,
+                "exit_code": exit_code,
+                "timed_out": timed_out,
+            },
+        )
+
+    data = {
+        "stdout": _truncate_text(stdout, params.max_output_chars),
+        "stderr": _truncate_text(stderr, params.max_output_chars),
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "killed": timed_out,
+        "duration_ms": duration_ms,
+        "truncated": bool(should_spill),
+    }
+    if artifact is not None:
+        data["artifact"] = artifact
+        data["read_hint"] = (
+            f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+        )
+
+    if timed_out:
+        return err(
+            "TIMEOUT",
+            f"Command timed out after {params.timeout_ms}ms",
+            retryable=True,
+            meta=data,
+        )
+
+    return ok(data=data)
+
+
+@tool("Reads a text file with line numbers.", name="Read", usage_rules=READ_USAGE_RULES)
+async def Read(
+    params: ReadInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    try:
+        path = resolve_for_read(
+            user_path=params.file_path,
+            project_root=_project_root(ctx),
+            workspace_root=_workspace_root(ctx),
+        )
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    if not await _exists(path):
+        return err("NOT_FOUND", f"File not found: {params.file_path}")
+    if await _is_dir(path):
+        return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
+    if not await _is_file(path):
+        return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+
+    text = await _read_text(path)
+    lines = text.splitlines()
+    total_lines = len(lines)
+
+    start = params.offset_line
+    end = min(total_lines, start + params.limit_lines)
+    sliced = lines[start:end]
+
+    line_truncated = False
+    if params.format == "line_numbers":
+        rendered_lines: list[str] = []
+        for i, line in enumerate(sliced, start=start):
+            clipped = _truncate_line(line, params.max_line_chars)
+            if clipped != line:
+                line_truncated = True
+            rendered_lines.append(f"{i + 1:6d}\t{clipped}")
+        content = "\n".join(rendered_lines)
+    else:
+        clipped_lines = []
+        for line in sliced:
+            clipped = _truncate_line(line, params.max_line_chars)
+            if clipped != line:
+                line_truncated = True
+            clipped_lines.append(clipped)
+        content = "\n".join(clipped_lines)
+
+    has_more = end < total_lines
+    output_too_large = len(content) > _TEXT_SPILL_CHARS or len(content.encode("utf-8")) > _BYTES_SPILL_LIMIT
+
+    data: dict[str, Any] = {
+        "content": _truncate_text(content, _TEXT_SPILL_CHARS),
+        "total_lines": total_lines,
+        "lines_returned": len(sliced),
+        "has_more": has_more,
+        "truncated": bool(line_truncated or output_too_large),
+        "meta": {
+            "encoding": "utf-8",
+            "file_bytes": int((await _stat(path)).st_size),
+            "sha256": _sha256_text(text),
+        },
+    }
+
+    if line_truncated or output_too_large:
+        artifact = await _spill_text(
+            ctx=ctx,
+            namespace="read",
+            text=content,
+            mime="text/plain",
+        )
+        data["artifact"] = artifact
+        data["read_hint"] = (
+            f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+        )
+
+    if has_more:
+        data["next_offset_line"] = end
+
+    return ok(data=data)
+
+
+@tool("Writes content to a file.", name="Write", usage_rules=WRITE_USAGE_RULES)
+async def Write(
+    params: WriteInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    workspace_root = _workspace_root(ctx)
+    try:
+        path = resolve_for_write(user_path=params.file_path, workspace_root=workspace_root)
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    async with _file_lock(path):
+        existed = await _exists(path)
+        if existed and await _is_dir(path):
+            return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
+        if existed and not await _is_file(path):
+            return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+
+        if params.mode == "append" and existed:
+            original = await _read_text(path, encoding=params.encoding)
+            final_content = original + params.content
+        elif params.mode == "append" and not existed:
+            final_content = params.content
+        else:
+            final_content = params.content
+
+        await _atomic_write_text(path, final_content, encoding=params.encoding)
+
+    final_bytes = len(final_content.encode(params.encoding, errors="replace"))
+    op_bytes = len(params.content.encode(params.encoding, errors="replace"))
+    relpath = to_safe_relpath(path, roots=[workspace_root])
+    return ok(
+        data={
+            "bytes_written": op_bytes,
+            "file_bytes": final_bytes,
+            "created": not existed,
+            "sha256": _sha256_text(final_content),
+            "relpath": relpath,
+        }
+    )
+
+
+@tool("Performs exact string replacement in a file.", name="Edit", usage_rules=EDIT_USAGE_RULES)
+async def Edit(
+    params: EditInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    if params.old_string == params.new_string:
+        return _invalid_argument("new_string must differ from old_string", field="new_string")
+
+    workspace_root = _workspace_root(ctx)
+    try:
+        path = resolve_for_write(user_path=params.file_path, workspace_root=workspace_root)
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    async with _file_lock(path):
+        if not await _exists(path):
+            return err("NOT_FOUND", f"File not found: {params.file_path}")
+        if await _is_dir(path):
+            return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
+        if not await _is_file(path):
+            return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+
+        before = await _read_text(path)
+        count = before.count(params.old_string)
+        if count == 0:
+            return err("CONFLICT", f"old_string not found in file: {params.file_path}")
+
+        if not params.replace_all and count > 1:
+            return err(
+                "CONFLICT",
+                f"old_string appears {count} times; provide a more specific old_string or set replace_all=true",
+            )
+
+        if params.replace_all:
+            after = before.replace(params.old_string, params.new_string)
+            replacements = count
+        else:
+            after = before.replace(params.old_string, params.new_string, 1)
+            replacements = 1
+
+        await _atomic_write_text(path, after)
+
+    return ok(
+        data={
+            "replacements": replacements,
+            "before_sha256": _sha256_text(before),
+            "after_sha256": _sha256_text(after),
+            "relpath": to_safe_relpath(path, roots=[workspace_root]),
+        }
+    )
+
+
+@tool(
+    "Make multiple edits to a single file atomically (all succeed or none).",
+    name="MultiEdit",
+    usage_rules=MULTIEDIT_USAGE_RULES,
+)
+async def MultiEdit(
+    params: MultiEditInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    workspace_root = _workspace_root(ctx)
+    try:
+        path = resolve_for_write(user_path=params.file_path, workspace_root=workspace_root)
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    async with _file_lock(path):
+        exists = await _exists(path)
+
+        if exists:
+            if await _is_dir(path):
+                return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
+            if not await _is_file(path):
+                return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+            content = await _read_text(path)
+            before_hash = _sha256_text(content)
+            edits = params.edits
+            created = False
+        else:
+            edits = list(params.edits)
+            if edits[0].old_string != "":
+                return err(
+                    "NOT_FOUND",
+                    "File does not exist; first edit.old_string must be empty to create a file",
+                )
+            content = edits[0].new_string
+            before_hash = None
+            edits = edits[1:]
+            created = True
+
+        total_replacements = 0
+        for idx, op in enumerate(edits):
+            if op.old_string == "":
+                return err(
+                    "INVALID_ARGUMENT",
+                    f"edits[{idx}] old_string cannot be empty",
+                )
+            if op.old_string == op.new_string:
+                return err(
+                    "INVALID_ARGUMENT",
+                    f"edits[{idx}] new_string must differ from old_string",
+                )
+
+            count = content.count(op.old_string)
+            if count == 0:
+                return err(
+                    "CONFLICT",
+                    f"edits[{idx}] old_string not found in file",
+                )
+
+            if not op.replace_all and count > 1:
+                return err(
+                    "CONFLICT",
+                    f"edits[{idx}] old_string appears {count} times; use replace_all=true or provide more context",
+                )
+
+            if op.replace_all:
+                content = content.replace(op.old_string, op.new_string)
+                total_replacements += count
+            else:
+                content = content.replace(op.old_string, op.new_string, 1)
+                total_replacements += 1
+
+        await _atomic_write_text(path, content)
+
+    return ok(
+        data={
+            "total_replacements": total_replacements,
+            "created": created,
+            "before_sha256": before_hash,
+            "after_sha256": _sha256_text(content),
+            "bytes": len(content.encode("utf-8")),
+            "relpath": to_safe_relpath(path, roots=[workspace_root]),
+        }
+    )
+
+
+@tool("Find files matching a glob pattern.", name="Glob", usage_rules=GLOB_USAGE_RULES)
+async def Glob(
+    params: GlobInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    try:
+        search_dir = resolve_for_search(
+            user_path=params.path,
+            project_root=_project_root(ctx),
+            workspace_root=_workspace_root(ctx),
+        )
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    if not await _exists(search_dir):
+        return err("NOT_FOUND", f"Search path not found: {params.path or str(search_dir)}")
+
+    candidates = await _io_call(
+        _walk_candidates,
+        search_path=search_dir,
+        include_dirs=params.include_dirs,
+        glob_pattern=params.pattern,
+        max_files=None,
+    )
+
+    root_refs = _allowed_roots(ctx)
+    matches = [
+        to_safe_relpath(p.resolve(), roots=root_refs)
+        for p in candidates
+        if params.include_dirs or p.is_file()
+    ]
+    matches = sorted(matches)
+
+    total = len(matches)
+    preview = matches[: params.head_limit]
+    truncated = total > len(preview)
+
+    data: dict[str, Any] = {
+        "matches": preview,
+        "count": total,
+        "search_path": to_safe_relpath(search_dir, roots=root_refs),
+        "truncated": truncated,
+    }
+
+    if truncated:
+        artifact = await _spill_json(
+            ctx=ctx,
+            namespace="glob",
+            data={"matches": matches, "count": total},
+        )
+        data["artifact"] = artifact
+        data["read_hint"] = (
+            f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+        )
+
+    return ok(data=data)
 
 
 def _grep_fallback(
     *,
     params: GrepInput,
-    ctx: SystemToolContext,
     search_path: Path,
-    output_mode: str,
+    project_root: Path,
 ) -> dict[str, Any]:
     import re
 
     before, after = _compute_context_window(params)
-    ignore_case = bool(params.i)
-    multiline = bool(params.multiline)
-
     flags = re.MULTILINE
-    if ignore_case:
+    if params.i:
         flags |= re.IGNORECASE
-    if multiline:
+    if params.multiline:
         flags |= re.DOTALL
 
     try:
         rx = re.compile(params.pattern, flags)
-    except Exception as e:
-        logger.error(f"Grep pattern 编译失败：{e}", exc_info=True)
-        if output_mode == "content":
-            return {"matches": [], "total_matches": 0}
-        if output_mode == "count":
-            return {"counts": [], "total_matches": 0}
-        return {"files": [], "count": 0}
+    except Exception as exc:
+        return err("INVALID_ARGUMENT", f"invalid regex pattern: {exc}")
 
-    def iter_files() -> list[Path]:
-        if search_path.is_file():
-            return [search_path]
-        if not search_path.exists() or not search_path.is_dir():
-            return []
+    files = _walk_candidates(
+        search_path=search_path,
+        include_dirs=False,
+        glob_pattern=params.glob,
+        max_files=params.max_files,
+    )
+    files = [p for p in files if p.is_file()]
 
-        candidates = [p for p in search_path.rglob("*") if p.is_file()]
-        if params.glob:
-            pat = str(params.glob)
-            filtered: list[Path] = []
-            for p in candidates:
-                rel = p.relative_to(search_path).as_posix()
-                if fnmatch(rel, pat) or fnmatch(p.name, pat):
-                    filtered.append(p)
-            candidates = filtered
-        return candidates
-
-    files = iter_files()
-
-    if output_mode == "files_with_matches":
+    if params.output_mode == "files_with_matches":
         matched: list[str] = []
         for f in files:
             try:
@@ -509,32 +921,37 @@ def _grep_fallback(
             except Exception:
                 continue
             if rx.search(text):
-                matched.append(_relpath(f.resolve(), ctx.project_root))
-                if params.head_limit is not None and params.head_limit >= 0:
-                    if len(matched) >= int(params.head_limit):
-                        break
-        return {"files": matched, "count": len(matched)}
+                matched.append(to_safe_relpath(f.resolve(), roots=[project_root]))
+        total = len(matched)
+        preview = matched[: params.head_limit]
+        return ok(data={"files": preview, "count": total, "truncated": total > len(preview)})
 
-    if output_mode == "count":
+    if params.output_mode == "count":
         counts: list[dict[str, Any]] = []
-        total = 0
+        total_matches = 0
         for f in files:
             try:
                 text = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
-            c = len(list(rx.finditer(text))) if multiline else sum(1 for line in text.splitlines() if rx.search(line))
+            c = len(list(rx.finditer(text))) if params.multiline else sum(1 for line in text.splitlines() if rx.search(line))
             if c <= 0:
                 continue
-            total += c
-            counts.append({"file": _relpath(f.resolve(), ctx.project_root), "count": c})
-            if params.head_limit is not None and params.head_limit >= 0:
-                if len(counts) >= int(params.head_limit):
-                    break
-        return {"counts": counts, "total_matches": total}
+            total_matches += c
+            counts.append({"file": to_safe_relpath(f.resolve(), roots=[project_root]), "count": c})
 
-    # content mode
+        total = len(counts)
+        preview = counts[: params.head_limit]
+        return ok(
+            data={
+                "counts": preview,
+                "total_matches": total_matches,
+                "truncated": total > len(preview),
+            }
+        )
+
     matches: list[dict[str, Any]] = []
+    total_matches = 0
     for f in files:
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
@@ -542,50 +959,37 @@ def _grep_fallback(
             continue
 
         lines = text.splitlines()
-        rel_file = _relpath(f.resolve(), ctx.project_root)
+        rel_file = to_safe_relpath(f.resolve(), roots=[project_root])
+        for idx, line in enumerate(lines, start=1):
+            if not rx.search(line):
+                continue
+            total_matches += 1
+            if len(matches) >= params.head_limit:
+                continue
 
-        def add_match(line_no: int) -> None:
-            ln0 = max(0, int(line_no) - 1)
-            line_text = lines[ln0] if ln0 < len(lines) else ""
-            match_item = {
+            item: dict[str, Any] = {
                 "file": rel_file,
-                "line_number": int(line_no) if params.n and line_no is not None else None,
-                "line": _truncate_line(line_text, _LINE_TRUNCATE_CHARS),
+                "line_number": idx if params.n else None,
+                "line": _truncate_line(line, _LINE_TRUNCATE_CHARS),
                 "before_context": None,
                 "after_context": None,
             }
             if before > 0:
-                b0 = max(0, ln0 - before)
-                match_item["before_context"] = [
-                    _truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0:ln0]
-                ]
+                b0 = max(0, idx - 1 - before)
+                item["before_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0 : idx - 1]]
             if after > 0:
-                a1 = min(len(lines), ln0 + 1 + after)
-                match_item["after_context"] = [
-                    _truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[ln0 + 1 : a1]
-                ]
-            matches.append(match_item)
+                a1 = min(len(lines), idx + after)
+                item["after_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[idx:a1]]
 
-        if multiline:
-            for m in rx.finditer(text):
-                line_no = text.count("\n", 0, m.start()) + 1
-                add_match(line_no)
-                if params.head_limit is not None and params.head_limit >= 0:
-                    if len(matches) >= int(params.head_limit):
-                        break
-        else:
-            for idx, line in enumerate(lines, start=1):
-                if rx.search(line):
-                    add_match(idx)
-                    if params.head_limit is not None and params.head_limit >= 0:
-                        if len(matches) >= int(params.head_limit):
-                            break
+            matches.append(item)
 
-        if params.head_limit is not None and params.head_limit >= 0:
-            if len(matches) >= int(params.head_limit):
-                break
-
-    return {"matches": matches, "total_matches": len(matches)}
+    return ok(
+        data={
+            "matches": matches,
+            "total_matches": total_matches,
+            "truncated": total_matches > len(matches),
+        }
+    )
 
 
 @tool("Search file contents with regex (ripgrep).", name="Grep", usage_rules=GREP_USAGE_RULES)
@@ -593,237 +997,311 @@ async def Grep(
     params: GrepInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    output_mode = params.output_mode or "files_with_matches"
-    search_path = _resolve_search_path(params.path, ctx.project_root)
+    try:
+        search_path = resolve_for_search(
+            user_path=params.path,
+            project_root=_project_root(ctx),
+            workspace_root=_workspace_root(ctx),
+        )
+    except PathGuardError as exc:
+        return _path_error_result(exc)
+
+    if not await _exists(search_path):
+        return err("NOT_FOUND", f"Search path not found: {params.path or str(search_path)}")
 
     rg_path = shutil.which("rg")
     if not rg_path:
-        logger.warning("未找到 rg (ripgrep)，Grep 将使用 Python fallback 实现（性能较差）")
+        logger.warning("ripgrep not found; Grep will use Python fallback")
         return _grep_fallback(
             params=params,
-            ctx=ctx,
             search_path=search_path,
-            output_mode=output_mode,
+            project_root=_project_root(ctx),
         )
 
-    if output_mode == "files_with_matches":
-        cmd = _rg_base_args(params) + ["-l", params.pattern, str(search_path)]
-        code, stdout, stderr = _run_rg_lines(cmd)
-        if code == 2:
-            logger.error(f"Grep 执行失败：{(stderr or stdout).strip()}")
-            return {"files": [], "count": 0}
-        if code == 1:
-            return {"files": [], "count": 0}
+    root_refs = _allowed_roots(ctx)
 
-        files = [line.strip() for line in stdout.splitlines() if line.strip()]
-        rel_files = [_relpath(Path(f).resolve(), ctx.project_root) for f in files]
-        if params.head_limit is not None and params.head_limit >= 0:
-            rel_files = rel_files[: int(params.head_limit)]
-        return {"files": rel_files, "count": len(rel_files)}
+    if params.output_mode == "files_with_matches":
+        cmd = _build_rg_base_args(params) + ["-l", params.pattern, str(search_path)]
+        result = await _run_subprocess(cmd)
+        if result.returncode == 2:
+            return err("INVALID_ARGUMENT", (result.stderr or result.stdout).strip() or "rg failed")
+        if result.returncode == 1:
+            return ok(data={"files": [], "count": 0, "truncated": False})
 
-    if output_mode == "count":
-        cmd = _rg_base_args(params) + ["--count-matches", params.pattern, str(search_path)]
-        code, stdout, stderr = _run_rg_lines(cmd)
-        if code == 2:
-            logger.error(f"Grep 执行失败：{(stderr or stdout).strip()}")
-            return {"counts": [], "total_matches": 0}
-        if code == 1:
-            return {"counts": [], "total_matches": 0}
+        rel_files = [
+            to_safe_relpath(Path(line.strip()).resolve(), roots=root_refs)
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+        total = len(rel_files)
+        preview = rel_files[: params.head_limit]
+        data: dict[str, Any] = {
+            "files": preview,
+            "count": total,
+            "truncated": total > len(preview),
+        }
+        if total > len(preview):
+            artifact = await _spill_json(
+                ctx=ctx,
+                namespace="grep_files",
+                data={"files": rel_files, "count": total},
+            )
+            data["artifact"] = artifact
+            data["read_hint"] = (
+                f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+            )
+        return ok(data=data)
+
+    if params.output_mode == "count":
+        cmd = _build_rg_base_args(params) + ["--count-matches", params.pattern, str(search_path)]
+        result = await _run_subprocess(cmd)
+        if result.returncode == 2:
+            return err("INVALID_ARGUMENT", (result.stderr or result.stdout).strip() or "rg failed")
+        if result.returncode == 1:
+            return ok(data={"counts": [], "total_matches": 0, "truncated": False})
 
         counts: list[dict[str, Any]] = []
-        total = 0
-        for line in stdout.splitlines():
-            line = line.strip()
-            if not line:
+        total_matches = 0
+        for line in result.stdout.splitlines():
+            row = line.strip()
+            if not row:
                 continue
             try:
-                file_part, count_part = line.rsplit(":", 1)
+                file_part, count_part = row.rsplit(":", 1)
                 c = int(count_part)
-                total += c
-                counts.append({"file": _relpath(Path(file_part).resolve(), ctx.project_root), "count": c})
             except Exception:
                 continue
+            total_matches += c
+            counts.append(
+                {
+                    "file": to_safe_relpath(Path(file_part).resolve(), roots=root_refs),
+                    "count": c,
+                }
+            )
 
-        if params.head_limit is not None and params.head_limit >= 0:
-            counts = counts[: int(params.head_limit)]
-        return {"counts": counts, "total_matches": total}
+        total = len(counts)
+        preview = counts[: params.head_limit]
+        data = {
+            "counts": preview,
+            "total_matches": total_matches,
+            "truncated": total > len(preview),
+        }
+        if total > len(preview):
+            artifact = await _spill_json(
+                ctx=ctx,
+                namespace="grep_count",
+                data={"counts": counts, "total_matches": total_matches},
+            )
+            data["artifact"] = artifact
+            data["read_hint"] = (
+                f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+            )
+        return ok(data=data)
 
-    # content mode
     before, after = _compute_context_window(params)
+    cmd = _build_rg_base_args(params) + ["--json", params.pattern, str(search_path)]
+    result = await _run_subprocess(cmd)
+    if result.returncode == 2:
+        return err("INVALID_ARGUMENT", (result.stderr or result.stdout).strip() or "rg failed")
+    if result.returncode == 1:
+        return ok(data={"matches": [], "total_matches": 0, "truncated": False})
 
-    # 使用 rg --json 获取行号与原文，避免手工解析
-    cmd = _rg_base_args(params) + ["--json", params.pattern, str(search_path)]
-
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     matches: list[dict[str, Any]] = []
-    internal_line_numbers: list[int | None] = []
-    by_file: dict[str, list[int]] = defaultdict(list)  # abs_path -> indices in matches
-    try:
-        assert proc.stdout is not None
-        for raw in proc.stdout:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                evt = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            if evt.get("type") != "match":
-                continue
-            data = evt.get("data", {})
-            path_text = ((data.get("path") or {}).get("text") or "").strip()
-            line_no = data.get("line_number")
-            line_text = ((data.get("lines") or {}).get("text") or "").rstrip("\n")
-            line_text = _truncate_line(line_text, _LINE_TRUNCATE_CHARS)
+    line_refs: list[tuple[str, int]] = []
+    total_matches = 0
 
-            abs_path = str(Path(path_text).resolve()) if path_text else ""
-            match_item = {
-                "file": _relpath(Path(abs_path), ctx.project_root) if abs_path else "",
-                "line_number": int(line_no) if params.n and line_no is not None else None,
-                "line": line_text,
+    for raw in result.stdout.splitlines():
+        row = raw.strip()
+        if not row:
+            continue
+        try:
+            evt = json.loads(row)
+        except json.JSONDecodeError:
+            continue
+        if evt.get("type") != "match":
+            continue
+
+        data = evt.get("data", {})
+        path_text = ((data.get("path") or {}).get("text") or "").strip()
+        line_no = data.get("line_number")
+        line_text = ((data.get("lines") or {}).get("text") or "").rstrip("\n")
+
+        total_matches += 1
+        if len(matches) >= params.head_limit:
+            continue
+
+        abs_path = str(Path(path_text).resolve()) if path_text else ""
+        rel_file = to_safe_relpath(Path(abs_path), roots=root_refs) if abs_path else ""
+        ln = int(line_no) if line_no is not None else 0
+
+        matches.append(
+            {
+                "file": rel_file,
+                "line_number": ln if params.n and line_no is not None else None,
+                "line": _truncate_line(line_text, _LINE_TRUNCATE_CHARS),
                 "before_context": None,
                 "after_context": None,
             }
-            matches.append(match_item)
-            internal_line_numbers.append(int(line_no) if line_no is not None else None)
-            if abs_path:
-                by_file[abs_path].append(len(matches) - 1)
+        )
+        line_refs.append((abs_path, ln))
 
-            if params.head_limit is not None and params.head_limit >= 0:
-                if len(matches) >= int(params.head_limit):
-                    break
-    finally:
-        try:
-            proc.terminate()
-        except Exception:
-            pass
-        try:
-            proc.wait(timeout=1)
-        except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
-        try:
-            if proc.stdout is not None:
-                proc.stdout.close()
-        except Exception:
-            pass
-        try:
-            if proc.stderr is not None:
-                proc.stderr.close()
-        except Exception:
-            pass
+    if (before > 0 or after > 0) and matches:
+        by_file: dict[str, list[tuple[int, int]]] = defaultdict(list)
+        for idx, (abs_path, line_no) in enumerate(line_refs):
+            if not abs_path or line_no <= 0:
+                continue
+            by_file[abs_path].append((idx, line_no))
 
-    # 读取文件补充上下文
-    if (before > 0 or after > 0) and by_file:
-        for abs_path, idxs in by_file.items():
+        for abs_path, refs in by_file.items():
             try:
-                file_lines = Path(abs_path).read_text(encoding="utf-8", errors="replace").splitlines()
+                file_lines = await _read_text(Path(abs_path))
             except Exception:
                 continue
-            total = len(file_lines)
-            for i in idxs:
-                item = matches[i]
-                real_line_no = internal_line_numbers[i]
-                if real_line_no is None:
-                    continue
-                ln0 = int(real_line_no) - 1
+            lines = file_lines.splitlines()
+            total_lines = len(lines)
+            for idx, line_no in refs:
+                ln0 = line_no - 1
                 b0 = max(0, ln0 - before)
-                a1 = min(total, ln0 + 1 + after)
-                before_ctx = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in file_lines[b0:ln0]]
-                after_ctx = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in file_lines[ln0 + 1 : a1]]
-                item["before_context"] = before_ctx
-                item["after_context"] = after_ctx
+                a1 = min(total_lines, ln0 + 1 + after)
+                matches[idx]["before_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0:ln0]]
+                matches[idx]["after_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[ln0 + 1 : a1]]
 
-    return {"matches": matches, "total_matches": len(matches)}
+    truncated = total_matches > len(matches)
+    data = {
+        "matches": matches,
+        "total_matches": total_matches,
+        "truncated": truncated,
+    }
 
+    if truncated or len(result.stdout.encode("utf-8")) > _BYTES_SPILL_LIMIT:
+        artifact = await _spill_text(
+            ctx=ctx,
+            namespace="grep_content",
+            text=result.stdout,
+            mime="text/plain",
+        )
+        data["artifact"] = artifact
+        data["read_hint"] = (
+            f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+        )
 
-class _LSInput(BaseModel):
-    path: str = Field(description="The absolute path to the directory to list (must be absolute, not relative)")
-    ignore: list[str] | None = Field(default=None, description="List of glob patterns to ignore")
-
-    model_config = {"extra": "forbid"}
+    return ok(data=data)
 
 
 @tool("Lists files and directories in a given path.", name="LS", usage_rules=LS_USAGE_RULES)
 async def LS(
-    params: _LSInput,
+    params: LSInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     try:
-        p = _ensure_abs_path(params.path)
-        if not p.exists():
-            return {"entries": [], "count": 0}
-        if not p.is_dir():
-            return {"entries": [], "count": 0}
+        p = resolve_for_search(
+            user_path=params.path,
+            project_root=_project_root(ctx),
+            workspace_root=_workspace_root(ctx),
+        )
+    except PathGuardError as exc:
+        return _path_error_result(exc)
 
-        ignore = params.ignore or []
-        entries: list[dict[str, Any]] = []
-        for child in sorted(p.iterdir(), key=lambda x: x.name):
+    if not await _exists(p):
+        return err("NOT_FOUND", f"Path not found: {params.path or str(p)}")
+    if not await _is_dir(p):
+        return err("IS_DIRECTORY", f"Path is not a directory: {params.path or str(p)}")
+
+    ignore = params.ignore or []
+
+    def _collect_entries(path: Path) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for child in path.iterdir():
             name = child.name
+            if not params.include_hidden and name.startswith("."):
+                continue
             if any(fnmatch(name, pat) for pat in ignore):
                 continue
+
             item_type = "dir" if child.is_dir() else "file" if child.is_file() else "other"
-            size = int(child.stat().st_size) if child.is_file() else 0
-            entries.append({"name": name, "type": item_type, "size": size})
+            try:
+                st = child.stat()
+                size = int(st.st_size) if child.is_file() else 0
+                mtime = int(st.st_mtime)
+            except Exception:
+                size = 0
+                mtime = 0
 
-        return {"entries": entries, "count": len(entries)}
-    except Exception as e:
-        msg = f"Error: LS 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"entries": [], "count": 0, "error": msg}
+            rows.append({
+                "name": name,
+                "type": item_type,
+                "size": size,
+                "mtime": mtime,
+            })
+        return rows
 
+    entries = await _io_call(_collect_entries, p)
+    entries = _sort_ls(entries, params.sort_by)
 
-class _TodoItem(BaseModel):
-    id: str = Field(description="Unique identifier for the todo item")
-    content: str = Field(min_length=1, description="Description of the task")
-    status: Literal["pending", "in_progress", "completed"] = Field(description="Current status of the task")
-    priority: Literal["high", "medium", "low"] = Field(default="medium", description="Priority level of the task")
+    total = len(entries)
+    preview = entries[: params.head_limit]
+    data: dict[str, Any] = {
+        "entries": preview,
+        "count": total,
+        "truncated": total > len(preview),
+        "path": to_safe_relpath(p, roots=_allowed_roots(ctx)),
+    }
 
-    model_config = {"extra": "forbid"}
+    if total > len(preview):
+        artifact = await _spill_json(
+            ctx=ctx,
+            namespace="ls",
+            data={"entries": entries, "count": total},
+        )
+        data["artifact"] = artifact
+        data["read_hint"] = (
+            f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+        )
 
-
-class _TodoWriteInput(BaseModel):
-    todos: list[_TodoItem] = Field(description="The updated todo list")
-
-    model_config = {"extra": "forbid"}
+    return ok(data=data)
 
 
 @tool("Create and manage a structured task list for the current session.", name="TodoWrite", usage_rules=TODO_USAGE_RULES)
 async def TodoWrite(
-    params: _TodoWriteInput,
+    params: TodoWriteInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> str:
-    """创建和管理结构化任务列表
+) -> dict[str, Any]:
+    reminder_text = (
+        "Remember to keep using the TODO list to keep track of your work and "
+        "to now follow the next task on the list. Mark tasks as in_progress "
+        "when you start them and completed when done."
+    )
 
-    工具返回时会附加固定提醒文本，强化 Agent 继续执行 TODO 的行为
-    """
     try:
-        # 1. 序列化 todos
         todos_data = [t.model_dump(mode="json") for t in params.todos]
+        active_count = sum(1 for t in todos_data if t.get("status") in ("pending", "in_progress"))
+        has_active = active_count > 0
 
-        has_active = any(t.get("status") in ("pending", "in_progress") for t in todos_data)
-
-        # 2. 更新 ContextIR 的 todo 状态（通过 SystemToolContext 中的 agent_context）
         if ctx.agent_context is not None:
             if has_active:
                 ctx.agent_context.set_todo_state(todos_data)
             else:
                 ctx.agent_context.set_todo_state([])
 
-        # 3. 可选：持久化到文件（如果有 session_root）
+        persisted = False
+        todo_path_rel: str | None = None
+
         root = _session_root_from_ctx(ctx)
         if root is not None:
             root.mkdir(parents=True, exist_ok=True)
             todo_path = root / "todos.json"
+            todo_path_rel = "todos.json"
+
             if not has_active:
-                try:
-                    todo_path.unlink()
-                except FileNotFoundError:
-                    pass
+                def _remove_todo() -> None:
+                    try:
+                        todo_path.unlink()
+                    except FileNotFoundError:
+                        pass
+
+                await _io_call(_remove_todo)
             else:
-                data = {
+                payload = {
                     "schema_version": 2,
                     "todos": todos_data,
                     "turn_number_at_update": (
@@ -832,49 +1310,38 @@ async def TodoWrite(
                         else 0
                     ),
                 }
-                todo_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+                await _atomic_write_text(
+                    todo_path,
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                )
+                persisted = True
 
-        # 4. 返回成功消息 + 固定提醒
-        # 注意：不返回 todos_json，因为会占用 token；TODO 状态通过 ContextIR 管理（必要时会注入温和提醒）
-        reminder_text = (
-            "\n\n"
-            "Remember to keep using the TODO list to keep track of your work "
-            "and to now follow the next task on the list. "
-            "Mark tasks as 'in_progress' when you start them and 'completed' when done."
+        return ok(
+            data={
+                "count": len(todos_data),
+                "active_count": active_count,
+                "persisted": persisted,
+                "todo_path": todo_path_rel,
+            },
+            message=reminder_text,
         )
-
-        return f"TODO list updated successfully: {len(todos_data)} items.{reminder_text}"
-
-    except Exception as e:
-        msg = f"Error: TodoWrite 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return msg
-
-
-_WEBFETCH_CACHE: dict[str, dict[str, Any]] = {}
-
-
-class _WebFetchInput(BaseModel):
-    url: str = Field(
-        description="The URL to fetch content from",
-        json_schema_extra={"format": "uri"},
-    )
-    prompt: str = Field(description="The prompt to run on the fetched content")
-
-    model_config = {"extra": "forbid"}
+    except Exception as exc:
+        logger.error(f"TodoWrite failed: {exc}", exc_info=True)
+        return err("INTERNAL", f"TodoWrite failed: {exc}")
 
 
 @tool("Fetch a URL, convert to markdown, and process with a small model.", name="WebFetch", usage_rules=WEBFETCH_USAGE_RULES)
 async def WebFetch(
-    params: _WebFetchInput,
+    params: WebFetchInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
-) -> str:
+) -> dict[str, Any]:
     url = params.url.strip()
     prompt = params.prompt
 
-    ## make http protocol to https
+    if not url:
+        return _invalid_argument("url cannot be empty", field="url")
     if url.startswith("http://"):
-        url = "https://" + url[7:]
+        url = f"https://{url[7:]}"
 
     now = time.time()
     _cleanup_ttl_cache(_WEBFETCH_CACHE, now=now, ttl=_WEBFETCH_CACHE_TTL_SECONDS)
@@ -883,47 +1350,66 @@ async def WebFetch(
     if cached and (now - float(cached.get("ts", 0.0)) <= _WEBFETCH_CACHE_TTL_SECONDS):
         markdown = str(cached.get("markdown", ""))
         final_url = str(cached.get("final_url", url))
+        status = int(cached.get("status", 200))
+        cached_hit = True
     else:
+        cached_hit = False
         try:
             from curl_cffi import requests as crequests
-        except Exception as e:
-            return f"Error: WebFetch 缺少依赖 curl_cffi：{e}"
+        except Exception as exc:
+            return err("TOOL_NOT_AVAILABLE", f"WebFetch missing dependency curl_cffi: {exc}")
 
         try:
-            r = crequests.get(
+            response = await _io_call(
+                crequests.get,
                 url,
                 timeout=_WEBFETCH_TIMEOUT_SECONDS,
                 impersonate="chrome",
             )
-        except Exception as e:
-            return f"Error: WebFetch 请求失败：{e}"
+        except Exception as exc:
+            return err("INTERNAL", f"WebFetch request failed: {exc}", retryable=True)
 
-        status = int(getattr(r, "status_code", 0) or 0)
-        final_url = str(getattr(r, "url", "") or url)
-        text = str(getattr(r, "text", "") or "")
+        status = int(getattr(response, "status_code", 0) or 0)
+        final_url = str(getattr(response, "url", "") or url)
+        html_text = str(getattr(response, "text", "") or "")
 
         if status != 200:
-            preview = _truncate_text(text, 2000)
-            return f"Error: HTTP {status} fetching {final_url}\n\n{preview}"
+            preview = _truncate_text(html_text, 2000)
+            code = "NOT_FOUND" if status == 404 else "INTERNAL"
+            return err(
+                code,
+                f"HTTP {status} fetching {final_url}",
+                meta={"status": status, "preview": preview},
+            )
 
         try:
             from markdownify import markdownify as to_markdown
-        except Exception as e:
-            return f"Error: WebFetch 缺少依赖 markdownify：{e}"
+        except Exception as exc:
+            return err("TOOL_NOT_AVAILABLE", f"WebFetch missing dependency markdownify: {exc}")
 
-        markdown = to_markdown(text)
-        _WEBFETCH_CACHE[url] = {"ts": now, "markdown": markdown, "final_url": final_url}
+        markdown = await _io_call(to_markdown, html_text)
+        _WEBFETCH_CACHE[url] = {
+            "ts": now,
+            "markdown": markdown,
+            "final_url": final_url,
+            "status": status,
+        }
+
+    artifact = await _spill_text(
+        ctx=ctx,
+        namespace="webfetch",
+        text=markdown,
+        mime="text/markdown",
+    )
 
     if ctx.llm_levels is None or "LOW" not in ctx.llm_levels:
-        return "Error: WebFetch 需要 LOW 级别 LLM（llm_levels['LOW'] 未配置）"
-    if ctx.token_cost is None:
-        return "Error: WebFetch 需要 token_cost 注入以记录 usage"
+        return err("TOOL_NOT_AVAILABLE", "WebFetch requires llm_levels['LOW']")
 
     markdown_for_llm = markdown
-    truncated_note = ""
+    truncated_for_llm = False
     if len(markdown_for_llm) > _WEBFETCH_MARKDOWN_TRUNCATE_CHARS:
         markdown_for_llm = markdown_for_llm[:_WEBFETCH_MARKDOWN_TRUNCATE_CHARS]
-        truncated_note = "\n\n(Note: Page content was truncated for context budget.)"
+        truncated_for_llm = True
 
     llm = ctx.llm_levels["LOW"]
     try:
@@ -932,7 +1418,8 @@ async def WebFetch(
                 messages=[
                     UserMessage(
                         content=(
-                            f"{prompt}\n\n<url>{final_url}</url>\n\n<content>\n{markdown_for_llm}\n</content>{truncated_note}"
+                            f"{prompt}\n\n<url>{final_url}</url>\n\n"
+                            f"<content>\n{markdown_for_llm}\n</content>"
                         )
                     )
                 ],
@@ -941,81 +1428,69 @@ async def WebFetch(
             ),
             timeout=_WEBFETCH_LLM_TIMEOUT_SECONDS,
         )
-        if completion.usage:
-            source = "webfetch"
-            if ctx.subagent_name:
-                source = f"subagent:{ctx.subagent_name}:webfetch"
-            ctx.token_cost.add_usage(
-                str(llm.model),
-                completion.usage,
-                level="LOW",
-                source=source,
-            )
-        return completion.text
     except asyncio.TimeoutError:
-        return f"Error: WebFetch LLM timeout after {_WEBFETCH_LLM_TIMEOUT_SECONDS}s"
-    except Exception as e:
-        logger.error(f"WebFetch LLM 调用失败：{e}", exc_info=True)
-        return f"Error: WebFetch LLM 调用失败：{e}"
+        return err(
+            "TIMEOUT",
+            f"WebFetch LLM timeout after {_WEBFETCH_LLM_TIMEOUT_SECONDS}s",
+            retryable=True,
+        )
+    except Exception as exc:
+        logger.error(f"WebFetch LLM call failed: {exc}", exc_info=True)
+        return err("INTERNAL", f"WebFetch LLM call failed: {exc}", retryable=True)
 
+    if completion.usage and ctx.token_cost is not None:
+        source = "webfetch"
+        if ctx.subagent_name:
+            source = f"subagent:{ctx.subagent_name}:webfetch"
+        ctx.token_cost.add_usage(
+            str(llm.model),
+            completion.usage,
+            level="LOW",
+            source=source,
+        )
 
-class _QuestionOption(BaseModel):
-    label: str = Field(max_length=50, description="Display text for this option (1-5 words)")
-    description: str = Field(description="Explanation of what this option means or what will happen if chosen")
-
-    model_config = {"extra": "forbid"}
-
-
-class _Question(BaseModel):
-    question: str = Field(description="The complete question to ask the user")
-    header: str = Field(max_length=12, description="Short label displayed as a chip/tag (max 12 chars)")
-    options: list[_QuestionOption] = Field(min_length=2, max_length=4, description="The available choices (2-4 options)")
-    multiSelect: bool = Field(
-        default=False,
-        description="Set to true to allow the user to select multiple options instead of just one",
+    return ok(
+        data={
+            "final_url": final_url,
+            "status": status,
+            "cached": cached_hit,
+            "artifact": artifact,
+            "truncated_for_llm": truncated_for_llm,
+            "summary_text": completion.text,
+            "model_used": str(llm.model),
+            "read_hint": (
+                f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
+            ),
+        }
     )
-
-    model_config = {"extra": "forbid"}
-
-
-class _AskUserQuestionInput(BaseModel):
-    questions: list[_Question] = Field(min_length=1, max_length=4, description="Questions to ask the user (1-4 questions)")
-    model_config = {"extra": "forbid"}
 
 
 @tool(
-"Use this tool when you need to ask the user questions during execution. This allows you to:\n1. Gather user preferences or requirements\n2. Clarify ambiguous instructions\n3. Get decisions on implementation choices as you work\n4. Offer choices to the user about what direction to take.\n\nUsage notes:\n- Users will always be able to select \"Other\" to provide custom text input\n- Use multiSelect: true to allow multiple answers to be selected for a question\n- If you recommend a specific option, make that the first option in the list and add \"(Recommended)\" at the end of the label\n\nPlan mode note: In plan mode, use this tool to clarify requirements or choose between approaches BEFORE finalizing your plan. Do NOT use this tool to ask \"Is my plan ready?\" or \"Should I proceed?\" - use ExitPlanMode for plan approval.\n",
-    name="AskUserQuestion"
-    )
+    "Use this tool when you need to ask the user questions during execution.",
+    name="AskUserQuestion",
+)
 async def AskUserQuestion(
-    params: _AskUserQuestionInput,
+    params: AskUserQuestionInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    """向用户询问问题以收集输入和澄清需求
-
-    此工具会触发特殊的执行流程：
-    1. 返回包含问题的 ToolResult
-    2. runner_stream 检测到此工具后会 yield UserQuestionEvent
-    3. 然后 yield StopEvent(reason='waiting_for_input') 暂停执行
-    4. 外部 UI 展示问题，用户回答后通过新的 UserMessage 发送
-    """
     try:
-        # 序列化问题列表
         questions_data = [q.model_dump(mode="json") for q in params.questions]
+        logger.info(f"AskUserQuestion prepared {len(questions_data)} question(s)")
+        return ok(
+            data={
+                "status": "waiting_for_input",
+                "questions": questions_data,
+            },
+            message=f"Prepared {len(questions_data)} question(s) for user",
+        )
+    except Exception as exc:
+        logger.error(f"AskUserQuestion failed: {exc}", exc_info=True)
+        return err("INTERNAL", f"AskUserQuestion failed: {exc}")
 
-        logger.info(f"AskUserQuestion: {len(questions_data)} question(s) prepared for user")
 
-        # 返回状态和问题数据
-        # runner_stream 会检测这个返回值并触发特殊流程
-        return {
-            "questions": questions_data,
-            "status": "waiting_for_input",
-            "message": f"Prepared {len(questions_data)} question(s) for user. Waiting for user response.",
-        }
-    except Exception as e:
-        msg = f"Error: AskUserQuestion 失败：{e}"
-        logger.error(msg, exc_info=True)
-        return {"status": "error", "message": msg, "questions": []}
+# Backward-compatible aliases for tests/importers.
+_TodoItem = TodoItem
+_TodoWriteInput = TodoWriteInput
 
 
 SYSTEM_TOOLS: list[Tool] = [

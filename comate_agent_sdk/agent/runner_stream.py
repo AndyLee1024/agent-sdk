@@ -32,6 +32,7 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
     UserMessage,
 )
+from comate_agent_sdk.system_tools.tool_result import is_tool_result_envelope
 
 logger = logging.getLogger("comate_agent_sdk.agent")
 
@@ -276,8 +277,24 @@ async def query_stream(
 
             # Check if this was AskUserQuestion - if so, yield UserQuestionEvent and stop
             if tool_name == "AskUserQuestion" and not tool_result.is_error:
-                # Parse questions from tool call arguments
-                questions = args.get("questions", []) if isinstance(args, dict) else []
+                questions: list[dict] = []
+                try:
+                    payload = json.loads(tool_result.text)
+                    if is_tool_result_envelope(payload):
+                        data = payload.get("data", {})
+                        if isinstance(data, dict):
+                            raw_questions = data.get("questions", [])
+                            if isinstance(raw_questions, list):
+                                questions = [q for q in raw_questions if isinstance(q, dict)]
+                except Exception:
+                    questions = []
+
+                if not questions and isinstance(args, dict):
+                    # fallback for legacy behavior
+                    raw_questions = args.get("questions", [])
+                    if isinstance(raw_questions, list):
+                        questions = [q for q in raw_questions if isinstance(q, dict)]
+
                 if questions:
                     yield UserQuestionEvent(
                         questions=questions,

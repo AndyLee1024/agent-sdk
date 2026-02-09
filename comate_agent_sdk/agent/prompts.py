@@ -38,6 +38,7 @@ SDK_DEFAULT_SYSTEM_PROMPT = """
 - MAY respond with multiple tool calls in a single response ONLY when they are independent (no inter-tool dependencies within the same turn)
 - Prefer using multiple Task tool calls in parallel when you want to explore multiple directions via subagents
 - NEVER mention specific tool names in user-facing messages or status descriptions
+- CRITICAL WORKFLOW: When exploring code or files, follow the pattern: Grep (locate) → Read (precise retrieval). Use regex alternation in Grep to search multiple related terms at once (e.g., "ContextIR|context_ir|Context|IR"), then read only the necessary line ranges. This is exponentially more efficient than sequential searches or blind file reads
 </tool_use>
 
 <error_handling>

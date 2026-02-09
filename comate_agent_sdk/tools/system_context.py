@@ -29,6 +29,7 @@ class SystemToolContext:
     project_root: Path
     session_id: str = "default"
     session_root: Path | None = None
+    workspace_root: Path | None = None
     subagent_name: str | None = None
     token_cost: TokenCost | None = None
     llm_levels: dict[str, "BaseChatModel"] | None = None
@@ -62,6 +63,7 @@ def bind_system_tool_context(
     project_root: Path,
     session_id: str = "default",
     session_root: Path | None = None,
+    workspace_root: Path | None = None,
     subagent_name: str | None = None,
     token_cost: TokenCost | None = None,
     llm_levels: dict[str, "BaseChatModel"] | None = None,
@@ -69,11 +71,21 @@ def bind_system_tool_context(
 ) -> Iterator[None]:
     """临时注入 SystemToolContext（并发安全）。"""
     root = project_root.resolve()
+    resolved_session_root = session_root.resolve() if session_root is not None else None
+
+    if workspace_root is not None:
+        resolved_workspace_root = workspace_root.resolve()
+    elif resolved_session_root is not None:
+        resolved_workspace_root = (resolved_session_root / "workspace").resolve()
+    else:
+        resolved_workspace_root = (root / ".agent_workspace").resolve()
+
     token = _SYSTEM_TOOL_CONTEXT.set(
         SystemToolContext(
             project_root=root,
             session_id=session_id,
-            session_root=session_root,
+            session_root=resolved_session_root,
+            workspace_root=resolved_workspace_root,
             subagent_name=subagent_name,
             token_cost=token_cost,
             llm_levels=llm_levels,

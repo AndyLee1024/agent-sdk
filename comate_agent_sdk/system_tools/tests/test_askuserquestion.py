@@ -39,12 +39,15 @@ class TestAskUserQuestion(unittest.TestCase):
                     ]
                 )
 
-                # 验证结果
-                self.assertEqual(result["status"], "waiting_for_input")
-                self.assertEqual(len(result["questions"]), 1)
-                self.assertEqual(result["questions"][0]["question"], "Which authentication method should we use?")
-                self.assertEqual(len(result["questions"][0]["options"]), 2)
-                self.assertEqual(result["questions"][0]["multiSelect"], False)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["data"]["status"], "waiting_for_input")
+                self.assertEqual(len(result["data"]["questions"]), 1)
+                self.assertEqual(
+                    result["data"]["questions"][0]["question"],
+                    "Which authentication method should we use?",
+                )
+                self.assertEqual(len(result["data"]["questions"][0]["options"]), 2)
+                self.assertEqual(result["data"]["questions"][0]["multiSelect"], False)
 
     def test_askuserquestion_multiple_questions(self):
         """测试多个问题 + multiSelect"""
@@ -77,10 +80,11 @@ class TestAskUserQuestion(unittest.TestCase):
                     ]
                 )
 
-                self.assertEqual(result["status"], "waiting_for_input")
-                self.assertEqual(len(result["questions"]), 2)
-                self.assertEqual(result["questions"][1]["multiSelect"], True)
-                self.assertEqual(len(result["questions"][1]["options"]), 3)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["data"]["status"], "waiting_for_input")
+                self.assertEqual(len(result["data"]["questions"]), 2)
+                self.assertEqual(result["data"]["questions"][1]["multiSelect"], True)
+                self.assertEqual(len(result["data"]["questions"][1]["options"]), 3)
 
     def test_askuserquestion_validation_header_length(self):
         """测试 header 长度验证 (max 12 chars)"""
@@ -88,14 +92,13 @@ class TestAskUserQuestion(unittest.TestCase):
             root = Path(td)
 
             with bind_system_tool_context(project_root=root):
-                # header 超过 12 字符应该失败
-                with self.assertRaises(Exception) as ctx:
+                with self.assertRaises(Exception):
                     self._run(
                         AskUserQuestion,
                         questions=[
                             {
                                 "question": "Test?",
-                                "header": "This is way too long",  # 20 字符
+                                "header": "This is way too long",
                                 "options": [
                                     {"label": "A", "description": "Option A"},
                                     {"label": "B", "description": "Option B"},
@@ -111,8 +114,7 @@ class TestAskUserQuestion(unittest.TestCase):
             root = Path(td)
 
             with bind_system_tool_context(project_root=root):
-                # 只有 1 个 option 应该失败
-                with self.assertRaises(Exception) as ctx:
+                with self.assertRaises(Exception):
                     self._run(
                         AskUserQuestion,
                         questions=[
@@ -133,8 +135,7 @@ class TestAskUserQuestion(unittest.TestCase):
             root = Path(td)
 
             with bind_system_tool_context(project_root=root):
-                # 空列表应该失败
-                with self.assertRaises(Exception) as ctx:
+                with self.assertRaises(Exception):
                     self._run(
                         AskUserQuestion,
                         questions=[]
@@ -142,7 +143,6 @@ class TestAskUserQuestion(unittest.TestCase):
 
     @staticmethod
     def _run(tool_obj, /, **kwargs):
-        """辅助方法: 运行 async 工具并解析结果"""
         raw = asyncio.run(tool_obj.execute(**kwargs))
         if isinstance(raw, str) and raw.strip().startswith(("{", "[")):
             return json.loads(raw)
@@ -150,5 +150,4 @@ class TestAskUserQuestion(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # 运行测试
     unittest.main(verbosity=2)
