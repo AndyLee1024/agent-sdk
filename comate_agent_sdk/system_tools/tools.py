@@ -44,9 +44,9 @@ from comate_agent_sdk.tools.system_context import SystemToolContext, get_system_
 
 logger = logging.getLogger(__name__)
 
-_READ_MIN_LIMIT = 50
-_READ_DEFAULT_LIMIT = 100
-_READ_MAX_LIMIT = 200
+_READ_MIN_LIMIT = 1
+_READ_DEFAULT_LIMIT = 500
+_READ_MAX_LIMIT = 5000
 _LINE_TRUNCATE_CHARS = 2000
 
 _BASH_DEFAULT_TIMEOUT_MS = 120_000
@@ -60,7 +60,7 @@ _WEBFETCH_MARKDOWN_TRUNCATE_CHARS = 50_000
 
 _TEXT_SPILL_CHARS = 10_000
 _BYTES_SPILL_LIMIT = 16 * 1024
-_LIST_SPILL_LIMIT = 200
+_LIST_SPILL_LIMIT = 100
 _ARTIFACT_TTL_SECONDS = 3600
 
 _EXCLUDED_WALK_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".agent"}
@@ -127,6 +127,14 @@ def _artifact_store(ctx: SystemToolContext) -> ArtifactStore:
     return ArtifactStore(_workspace_root(ctx))
 
 
+def _is_under(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
 def _loop_id() -> int:
     return id(asyncio.get_running_loop())
 
@@ -172,6 +180,51 @@ async def _is_file(path: Path) -> bool:
 
 async def _stat(path: Path):
     return await _io_call(path.stat)
+
+
+async def _resolve_write_path(
+    *,
+    user_path: str,
+    ctx: SystemToolContext,
+) -> Path:
+    """Resolve write target.
+
+    Policy:
+    - New files are created under workspace root.
+    - Existing files under project root are writable (for repository edits).
+    - Existing files under workspace remain writable.
+    """
+    workspace_root = _workspace_root(ctx)
+    project_root = _project_root(ctx)
+
+    try:
+        workspace_target = resolve_for_write(user_path=user_path, workspace_root=workspace_root)
+    except PathGuardError as ws_exc:
+        # May be an absolute project-root path for existing file edits.
+        project_candidate = resolve_for_read(
+            user_path=user_path,
+            project_root=project_root,
+            workspace_root=workspace_root,
+        )
+        if await _exists(project_candidate):
+            return project_candidate
+        raise ws_exc
+
+    # Direct workspace target exists: use it.
+    if await _exists(workspace_target):
+        return workspace_target
+
+    # For relative paths, prefer existing project file so Read/Edit target the same file.
+    if not Path(user_path).is_absolute():
+        project_candidate = resolve_for_read(
+            user_path=user_path,
+            project_root=project_root,
+            workspace_root=workspace_root,
+        )
+        if _is_under(project_candidate, project_root) and await _exists(project_candidate):
+            return project_candidate
+
+    return workspace_target
 
 
 def _atomic_write_bytes_sync(path: Path, payload: bytes) -> None:
@@ -256,8 +309,17 @@ class BashInput(BaseModel):
 
 class ReadInput(BaseModel):
     file_path: str = Field(description="Path to text file")
-    offset_line: int = Field(ge=0, description="Line number to start reading from (0-based)")
-    limit_lines: int = Field(ge=_READ_MIN_LIMIT, le=_READ_MAX_LIMIT, description="Number of lines to read (50-200)")
+    offset_line: int = Field(
+        default=0,
+        ge=0,
+        description="Line number to start reading from (0-based)",
+    )
+    limit_lines: int = Field(
+        default=_READ_DEFAULT_LIMIT,
+        ge=_READ_MIN_LIMIT,
+        le=_READ_MAX_LIMIT,
+        description="Number of lines to read",
+    )
     format: Literal["line_numbers", "raw"] = Field(default="line_numbers")
     max_line_chars: int = Field(default=_LINE_TRUNCATE_CHARS, ge=100, le=20_000)
 
@@ -300,7 +362,7 @@ class MultiEditInput(BaseModel):
 class GlobInput(BaseModel):
     pattern: str
     path: str | None = None
-    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=10_000)
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300)
     include_dirs: bool = False
 
     model_config = {"extra": "forbid"}
@@ -319,7 +381,7 @@ class GrepInput(BaseModel):
     i: bool | None = Field(default=None, alias="-i")
     n: bool | None = Field(default=True, alias="-n")
 
-    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=10_000)
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300)
     multiline: bool = False
     max_files: int = Field(default=2000, ge=1, le=100_000)
 
@@ -329,7 +391,7 @@ class GrepInput(BaseModel):
 class LSInput(BaseModel):
     path: str | None = None
     ignore: list[str] | None = None
-    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=10_000)
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300)
     include_hidden: bool = False
     sort_by: Literal["name", "mtime", "size"] = "name"
 
@@ -652,12 +714,12 @@ async def Write(
     params: WriteInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    workspace_root = _workspace_root(ctx)
     try:
-        path = resolve_for_write(user_path=params.file_path, workspace_root=workspace_root)
+        path = await _resolve_write_path(user_path=params.file_path, ctx=ctx)
     except PathGuardError as exc:
         return _path_error_result(exc)
 
+    workspace_root = _workspace_root(ctx)
     async with _file_lock(path):
         existed = await _exists(path)
         if existed and await _is_dir(path):
@@ -697,12 +759,12 @@ async def Edit(
     if params.old_string == params.new_string:
         return _invalid_argument("new_string must differ from old_string", field="new_string")
 
-    workspace_root = _workspace_root(ctx)
     try:
-        path = resolve_for_write(user_path=params.file_path, workspace_root=workspace_root)
+        path = await _resolve_write_path(user_path=params.file_path, ctx=ctx)
     except PathGuardError as exc:
         return _path_error_result(exc)
 
+    workspace_root = _workspace_root(ctx)
     async with _file_lock(path):
         if not await _exists(path):
             return err("NOT_FOUND", f"File not found: {params.file_path}")
@@ -750,12 +812,12 @@ async def MultiEdit(
     params: MultiEditInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
-    workspace_root = _workspace_root(ctx)
     try:
-        path = resolve_for_write(user_path=params.file_path, workspace_root=workspace_root)
+        path = await _resolve_write_path(user_path=params.file_path, ctx=ctx)
     except PathGuardError as exc:
         return _path_error_result(exc)
 
+    workspace_root = _workspace_root(ctx)
     async with _file_lock(path):
         exists = await _exists(path)
 

@@ -54,6 +54,16 @@ class TestSystemTools(unittest.TestCase):
                 self.assertNotIn("\tl1", data1["content"])
                 self.assertEqual(data1["lines_returned"], 1)
 
+    def test_read_legacy_offset_limit_aliases_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "a.txt"
+            p.write_text("l1\nl2\nl3\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                with self.assertRaises(Exception):
+                    self._run(Read, file_path=str(p), offset=1, limit=1)
+
     def test_read_accepts_relative_path_from_project_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -108,6 +118,18 @@ class TestSystemTools(unittest.TestCase):
                 self.assertTrue(out2["ok"])
                 self.assertEqual(out2["data"]["replacements"], 2)
                 self.assertEqual(p.read_text(encoding="utf-8"), "y\ny\n")
+
+    def test_edit_can_target_existing_project_file_by_relative_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "proj.txt"
+            p.write_text("hello\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(Edit, file_path="proj.txt", old_string="hello", new_string="hi")
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["replacements"], 1)
+                self.assertEqual(p.read_text(encoding="utf-8"), "hi\n")
 
     def test_glob_returns_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:

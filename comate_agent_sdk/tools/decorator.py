@@ -323,18 +323,10 @@ class Tool:
                     if isinstance(call_kwargs[param_name], dict):
                         call_kwargs[param_name] = param_type(**call_kwargs[param_name])
                 else:
-                    # Kwargs are the model fields directly (support alias keys too)
-                    allowed_names = set(param_type.model_fields.keys())
-                    allowed_aliases = {
-                        field.alias
-                        for field in param_type.model_fields.values()
-                        if getattr(field, "alias", None)
-                    }
-                    model_kwargs = {
-                        k: v
-                        for k, v in kwargs.items()
-                        if k in allowed_names or k in allowed_aliases
-                    }
+                    # Kwargs are the model fields directly.
+                    # Keep all user-provided keys so model_config(extra="forbid")
+                    # can reject unknown fields instead of silently dropping them.
+                    model_kwargs = dict(kwargs)
                     call_kwargs = {
                         param_name: param_type(**model_kwargs),
                         **resolved_deps,

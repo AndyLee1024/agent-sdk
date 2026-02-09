@@ -70,9 +70,24 @@ def resolve_for_read(*, user_path: str, project_root: Path, workspace_root: Path
 
     project_root_resolved = project_root.resolve()
     candidate = Path(user_path)
-    if not candidate.is_absolute():
-        candidate = project_root_resolved / candidate
-    resolved = candidate.resolve()
+    if candidate.is_absolute():
+        resolved = candidate.resolve()
+    else:
+        project_candidate = (project_root_resolved / candidate).resolve()
+        workspace_candidate: Path | None = None
+        if workspace_root is not None:
+            workspace_candidate = (workspace_root.resolve() / candidate).resolve()
+
+        if workspace_candidate is not None and workspace_candidate.exists():
+            # Prefer workspace for relative paths so Read/Edit/MultiEdit target the same tree.
+            resolved = workspace_candidate
+        elif project_candidate.exists():
+            resolved = project_candidate
+        elif workspace_candidate is not None:
+            # Not found in either place: keep project fallback behavior for error message stability.
+            resolved = project_candidate
+        else:
+            resolved = project_candidate
 
     allowed_roots: list[Path] = [project_root_resolved]
     if workspace_root is not None:

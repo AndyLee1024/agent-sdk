@@ -54,13 +54,13 @@ def create_task_tool(
         parent_map = {t.name: t for t in parent_tools}
 
         if agent_def.tools is None:
-            tools = [t for t in parent_tools if t.name != "Task"]
+            tools = [t for t in parent_tools if t.name not in ("Task", "AskUserQuestion")]
             return tools, []
 
         resolved: list[Tool] = []
         missing: list[str] = []
         for name in agent_def.tools or []:
-            if name == "Task":
+            if name in ("Task", "AskUserQuestion"):
                 continue
             if name in parent_map:
                 resolved.append(parent_map[name])

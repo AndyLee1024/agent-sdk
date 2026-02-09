@@ -125,9 +125,10 @@ Assume this tool is able to read all files on the machine. If the User provides 
 
 Usage:
 - file_path supports both absolute and relative paths
-- Relative paths are resolved against the current project root
-- CRITICAL: ALWAYS explicitly specify offset_line and limit_lines parameters (range: 50-200 lines). Do NOT rely on defaults
-- When reading from start of file: offset_line=0, limit_lines=100
+- Relative paths are resolved against workspace first, then project root
+- CRITICAL: ALWAYS explicitly specify offset_line and limit_lines parameters. Do NOT use offset/limit
+- offset_line must be >= 0; limit_lines range is 1-5000 (default 500)
+- When reading from start of file: offset_line=0, limit_lines=500
 - When reading specific section: use Grep results to determine offset_line, then set appropriate limit_lines
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
