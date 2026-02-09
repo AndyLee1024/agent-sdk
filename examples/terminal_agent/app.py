@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from contextlib import suppress
 from typing import Any
@@ -36,6 +37,14 @@ pt_style = PTStyle.from_dict(
     }
 )
 prompt_session = PromptSession(history=InMemoryHistory(), style=pt_style)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    return normalized not in {"0", "false", "no", "off"}
 
 
 @tool("Add two numbers 涉及到加法运算 必须使用这个工具")
@@ -212,7 +221,7 @@ async def _stream_message(
     waiting_for_input = False
     questions: list[dict[str, Any]] | None = None
     min_anim_seconds = 0.35
-    progress_tick_interval_seconds = 1.0
+    progress_tick_interval_seconds = 0.125
     progress_tick_stop_event = asyncio.Event()
 
     async def _tick_progress() -> None:
@@ -295,7 +304,11 @@ async def run() -> None:
         render_resume_timeline(console, session)
     _help_text()
 
-    renderer = EventRenderer(console)
+    renderer = EventRenderer(
+        console,
+        fancy_progress_effect=_bool_env("COMATE_TERMINAL_FANCY_PROGRESS_EFFECT", True),
+        target_fps=8,
+    )
     animator = SubmissionAnimator(animation_console)
 
     while True:

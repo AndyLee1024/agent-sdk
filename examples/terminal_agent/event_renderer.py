@@ -37,10 +37,20 @@ def _truncate(content: str, max_len: int = 300) -> str:
 class EventRenderer:
     """Convert SDK stream events into structured terminal UI output."""
 
-    def __init__(self, console: Console) -> None:
+    def __init__(
+        self,
+        console: Console,
+        *,
+        fancy_progress_effect: bool = True,
+        target_fps: int = 8,
+    ) -> None:
         self._console = console
         self._assistant = AssistantStreamRenderer(console)
-        self._tools = ToolEventView(console)
+        self._tools = ToolEventView(
+            console,
+            fancy_progress_effect=fancy_progress_effect,
+            target_fps=target_fps,
+        )
         self._todo = TodoDiffView(console)
         self._thinking_live: Live | None = None
         self._thinking_frame = 0
