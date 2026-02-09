@@ -10,10 +10,14 @@ from comate_agent_sdk.agent.events import (
     PreCompactEvent,
     SessionInitEvent,
     StopEvent,
+    SubagentProgressEvent,
+    SubagentStartEvent,
+    SubagentStopEvent,
     TextEvent,
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
+    UsageDeltaEvent,
     UserQuestionEvent,
 )
 
@@ -40,10 +44,19 @@ class EventRenderer:
         self._todo = TodoDiffView(console)
         self._thinking_live: Live | None = None
         self._thinking_frame = 0
+        self._pending_gap_before_assistant = False
+        self._overlay_active = False
 
     def start_turn(self) -> None:
         self._assistant.start_turn()
         self._stop_thinking()
+        self._pending_gap_before_assistant = False
+
+    def set_overlay_active(self, active: bool) -> None:
+        self._overlay_active = active
+        self._tools.set_live_suspended(active)
+        if active:
+            self._stop_thinking()
 
     def update_usage_tokens(
         self,
@@ -69,10 +82,13 @@ class EventRenderer:
 
     def interrupt_turn(self) -> None:
         self._stop_thinking()
-        self._assistant.finalize_markdown()
+        self._assistant.finalize_turn()
+        self._pending_gap_before_assistant = False
         self._tools.interrupt_running()
 
     def _update_thinking(self, content: str) -> None:
+        if self._overlay_active:
+            return
         if self._thinking_live is None:
             self._thinking_live = Live(
                 Text(""),
@@ -104,28 +120,59 @@ class EventRenderer:
             case SessionInitEvent(session_id=_):
                 pass
             case ThinkingEvent(content=thinking):
+                self._assistant.flush_line_for_external_event()
                 self._update_thinking(thinking)
+                self._pending_gap_before_assistant = False
             case PreCompactEvent(current_tokens=_, threshold=_, trigger=_):
                 pass
             case ToolCallEvent(tool=tool_name, args=arguments, tool_call_id=tool_call_id):
+                self._assistant.flush_line_for_external_event()
                 args_dict = arguments if isinstance(arguments, dict) else {"_raw": str(arguments)}
                 self._tools.render_call(tool_name, args_dict, tool_call_id)
                 self._todo.maybe_render_update(tool_name, args_dict)
+                self._pending_gap_before_assistant = True
             case ToolResultEvent(tool=tool_name, result=result, tool_call_id=tool_call_id, is_error=is_error):
+                self._assistant.flush_line_for_external_event()
                 self._tools.render_result(
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
                     result=result,
                     is_error=is_error,
                 )
+                self._pending_gap_before_assistant = True
+            case UsageDeltaEvent(source=_, model=_, level=_, delta_prompt_tokens=_, delta_prompt_cached_tokens=_, delta_completion_tokens=_, delta_total_tokens=_):
+                pass
+            case SubagentStartEvent(tool_call_id=_, subagent_name=_, description=_):
+                pass
+            case SubagentProgressEvent(
+                tool_call_id=tool_call_id,
+                subagent_name=_,
+                description=_,
+                status=_,
+                elapsed_ms=elapsed_ms,
+                tokens=tokens,
+            ):
+                self._tools.update_task_progress(
+                    tool_call_id=tool_call_id,
+                    tokens=tokens,
+                    elapsed_ms=elapsed_ms,
+                )
+            case SubagentStopEvent(tool_call_id=_, subagent_name=_, status=_, duration_ms=_, error=_):
+                pass
             case UserQuestionEvent(questions=questions, tool_call_id=_):
-                self._assistant.finalize_markdown()
+                self._assistant.finalize_turn()
+                self._pending_gap_before_assistant = False
                 return (True, questions)
             case TextEvent(content=text):
+                if self._pending_gap_before_assistant:
+                    self._assistant.insert_gap_before_next_segment()
+                    self._pending_gap_before_assistant = False
                 self._assistant.append_text(text)
             case StopEvent(reason=reason):
                 if reason == "waiting_for_input":
-                    self._assistant.finalize_markdown()
+                    self._assistant.finalize_turn()
+                    self._pending_gap_before_assistant = False
                     return (True, None)
-                self._assistant.finalize_markdown()
+                self._assistant.finalize_turn()
+                self._pending_gap_before_assistant = False
         return (False, None)

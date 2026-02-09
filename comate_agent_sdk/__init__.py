@@ -8,7 +8,9 @@ from comate_agent_sdk.agent import (
     AgentRuntime,
     AgentTemplate,
     ChatSession,
+    SubagentProgressEvent,
     SessionInitEvent,
+    UsageDeltaEvent,
 )
 from comate_agent_sdk.context import MemoryConfig
 from comate_agent_sdk.observability import Laminar, observe, observe_debug
@@ -35,6 +37,8 @@ __all__ = [
     "AgentConfig",
     "ChatSession",
     "SessionInitEvent",
+    "UsageDeltaEvent",
+    "SubagentProgressEvent",
     "Laminar",
     "observe",
     "observe_debug",

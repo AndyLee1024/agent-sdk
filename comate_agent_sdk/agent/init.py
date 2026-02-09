@@ -321,6 +321,15 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
             raise ValueError(f"level='{effective_level}' 不在 llm_levels 中")
         runtime.llm = runtime.llm_levels[effective_level]
 
+    runtime._subagent_source_prefix = None
+    if runtime._is_subagent:
+        prefix_parts: list[str] = ["subagent"]
+        if runtime.name:
+            prefix_parts.append(runtime.name)
+        if runtime._subagent_run_id:
+            prefix_parts.append(runtime._subagent_run_id)
+        runtime._subagent_source_prefix = ":".join(prefix_parts)
+
     if runtime._parent_token_cost is not None:
         runtime._token_cost = runtime._parent_token_cost
     else:
@@ -348,8 +357,8 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     compaction_config = runtime.compaction if runtime.compaction is not None else CompactionConfig()
     compaction_llm = _resolve_compaction_llm(runtime, compaction_config)
     compaction_usage_source = "compaction"
-    if runtime._is_subagent and runtime.name:
-        compaction_usage_source = f"subagent:{runtime.name}:compaction"
+    if runtime._subagent_source_prefix:
+        compaction_usage_source = f"{runtime._subagent_source_prefix}:compaction"
     runtime._compaction_service = CompactionService(
         config=compaction_config,
         llm=compaction_llm,

@@ -518,6 +518,59 @@ class TestSystemTools(unittest.TestCase):
                         self.assertEqual(len(token_cost.usage_history), 1)
                         self.assertEqual(token_cost.usage_history[0].source, "subagent:researcher:webfetch")
 
+    def test_webfetch_records_subagent_run_prefixed_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            class DummyLLM:
+                model = "dummy-low"
+
+                @property
+                def provider(self) -> str:
+                    return "dummy"
+
+                @property
+                def name(self) -> str:
+                    return self.model
+
+                async def ainvoke(self, messages, tools=None, tool_choice=None, **kwargs):
+                    return ChatInvokeCompletion(
+                        content="answer",
+                        usage=ChatInvokeUsage(
+                            prompt_tokens=8,
+                            prompt_cached_tokens=None,
+                            prompt_cache_creation_tokens=None,
+                            prompt_image_tokens=None,
+                            completion_tokens=4,
+                            total_tokens=12,
+                        ),
+                    )
+
+            token_cost = TokenCost(include_cost=False)
+            llm_levels = {"LOW": DummyLLM()}
+
+            def fake_get(url, timeout, impersonate):
+                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>")
+
+            with bind_system_tool_context(
+                project_root=root,
+                session_id="s1",
+                session_root=root / "sessions" / "s1",
+                token_cost=token_cost,
+                llm_levels=llm_levels,
+                subagent_name="researcher",
+                subagent_source_prefix="subagent:researcher:tc_42",
+            ):
+                with mock.patch.dict("sys.modules", {"curl_cffi": SimpleNamespace(requests=SimpleNamespace(get=fake_get))}):
+                    with mock.patch.dict("sys.modules", {"markdownify": SimpleNamespace(markdownify=lambda html: "# Hello")}):
+                        out = self._run_raw(WebFetch, url="https://example.com", prompt="Summarize")
+                        self.assertTrue(out["ok"])
+                        self.assertEqual(len(token_cost.usage_history), 1)
+                        self.assertEqual(
+                            token_cost.usage_history[0].source,
+                            "subagent:researcher:tc_42:webfetch",
+                        )
+
     @staticmethod
     def _run(tool_obj, /, **kwargs):
         raw = asyncio.run(tool_obj.execute(**kwargs))

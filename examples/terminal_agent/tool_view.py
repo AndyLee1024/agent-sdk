@@ -189,6 +189,16 @@ class ToolEventView:
         self._latest_tokens_by_source_prefix: dict[str, int] = {}
         self._progress_live: Live | None = None
         self._live_disabled = False
+        self._live_suspended = False
+
+    def set_live_suspended(self, suspended: bool) -> None:
+        if self._live_suspended == suspended:
+            return
+        self._live_suspended = suspended
+        if suspended:
+            self._stop_progress_live()
+        else:
+            self._refresh_progress_live()
 
     def _next_pulse(self) -> str:
         pulse = _PULSE_GLYPHS[self._frame % len(_PULSE_GLYPHS)]
@@ -251,6 +261,9 @@ class ToolEventView:
             self._console.print(f"[dim]{line}[/]")
 
     def _refresh_progress_live(self) -> None:
+        if self._live_suspended:
+            self._stop_progress_live()
+            return
         running_states = self._running_states()
         if not running_states:
             self._stop_progress_live()
@@ -277,6 +290,8 @@ class ToolEventView:
         return any(state.status == "running" for state in self._state_by_id.values())
 
     def tick_progress(self) -> None:
+        if self._live_suspended:
+            return
         if not self.has_running_tasks():
             return
         self._refresh_progress_live()
@@ -298,6 +313,28 @@ class ToolEventView:
         state.task_tokens = 0
         state.last_progress_tokens = 0
         self._latest_tokens_by_source_prefix[state.subagent_source_prefix] = normalized
+        self._refresh_progress_live()
+
+    def update_task_progress(
+        self,
+        *,
+        tool_call_id: str,
+        tokens: int | None = None,
+        elapsed_ms: float | None = None,
+    ) -> None:
+        state = self._state_by_id.get(tool_call_id)
+        if state is None or not state.is_task:
+            return
+
+        if tokens is not None:
+            normalized_tokens = max(int(tokens), 0)
+            state.task_tokens = normalized_tokens
+            state.last_progress_tokens = normalized_tokens
+
+        if elapsed_ms is not None:
+            normalized_elapsed = max(float(elapsed_ms), 0.0)
+            state.started_at_monotonic = time.monotonic() - (normalized_elapsed / 1000)
+
         self._refresh_progress_live()
 
     def _task_token_text(self, state: ToolRunState) -> str:
@@ -370,7 +407,7 @@ class ToolEventView:
         if is_task:
             subagent_name, task_desc = _extract_task_identity(args)
             subagent_source_prefix = (
-                f"subagent:{subagent_name}" if subagent_name else ""
+                f"subagent:{subagent_name}:{tool_call_id}" if subagent_name else ""
             )
             baseline_source_tokens = self._latest_tokens_by_source_prefix.get(
                 subagent_source_prefix,

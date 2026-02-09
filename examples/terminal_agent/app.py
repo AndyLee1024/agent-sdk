@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-import time
 from contextlib import suppress
 from typing import Any
 
@@ -18,10 +17,9 @@ from rich.table import Table
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig, ChatSession
-from comate_agent_sdk.agent.events import ToolCallEvent
 from comate_agent_sdk.tools import tool
 
-from terminal_agent.animations import SubmissionAnimator
+from terminal_agent.animations import AnimationPhase, StreamAnimationController, SubmissionAnimator
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.session_view import (
     render_resume_timeline,
@@ -29,9 +27,8 @@ from terminal_agent.session_view import (
 )
 
 console = Console()
-animation_console = Console(stderr=True)
+animation_console = console
 logging.getLogger("comate_agent_sdk.system_tools.tools").setLevel(logging.ERROR)
-logger = logging.getLogger("terminal_agent.app")
 
 pt_style = PTStyle.from_dict(
     {
@@ -214,57 +211,9 @@ async def _stream_message(
 ) -> tuple[bool, list[dict[str, Any]] | None]:
     waiting_for_input = False
     questions: list[dict[str, Any]] | None = None
-    first_event = False
     min_anim_seconds = 0.35
     progress_tick_interval_seconds = 1.0
-    usage_poll_interval_seconds = 0.4
-    usage_poll_stop_event = asyncio.Event()
     progress_tick_stop_event = asyncio.Event()
-
-    async def _poll_usage() -> None:
-        while not usage_poll_stop_event.is_set():
-            if not renderer.has_running_tasks():
-                try:
-                    await asyncio.wait_for(
-                        usage_poll_stop_event.wait(),
-                        timeout=usage_poll_interval_seconds,
-                    )
-                except TimeoutError:
-                    continue
-                continue
-            try:
-                usage = await session.get_usage()
-                source_prefixes = renderer.get_running_subagent_source_prefixes()
-                source_totals: dict[str, int] = {}
-
-                if source_prefixes:
-                    source_prefix_list = sorted(source_prefixes)
-                    source_results = await asyncio.gather(
-                        *[
-                            session.get_usage(source_prefix=source_prefix)
-                            for source_prefix in source_prefix_list
-                        ],
-                        return_exceptions=True,
-                    )
-                    for source_prefix, source_usage in zip(source_prefix_list, source_results):
-                        if isinstance(source_usage, Exception):
-                            logger.debug(
-                                f"子任务 token 刷新失败: prefix={source_prefix}, err={source_usage}"
-                            )
-                            continue
-                        source_totals[source_prefix] = int(source_usage.total_tokens)
-
-                renderer.update_usage_tokens(usage.total_tokens, source_totals)
-            except Exception as exc:
-                logger.debug(f"实时 token 刷新失败: {exc}")
-
-            try:
-                await asyncio.wait_for(
-                    usage_poll_stop_event.wait(),
-                    timeout=usage_poll_interval_seconds,
-                )
-            except TimeoutError:
-                continue
 
     async def _tick_progress() -> None:
         while not progress_tick_stop_event.is_set():
@@ -279,51 +228,31 @@ async def _stream_message(
                 continue
 
     renderer.start_turn()
-    animator_start_ts = time.monotonic()
-    usage_poll_task = asyncio.create_task(_poll_usage(), name="usage-poll")
+    animation_controller = StreamAnimationController(
+        animator,
+        min_visible_seconds=min_anim_seconds,
+    )
+    renderer.set_overlay_active(True)
     progress_tick_task = asyncio.create_task(_tick_progress(), name="progress-tick")
-    await animator.start()
+    await animation_controller.start()
     try:
         async for event in session.query_stream(text):
-            if not first_event:
-                first_event = True
-                elapsed = time.monotonic() - animator_start_ts
-                if elapsed < min_anim_seconds:
-                    await asyncio.sleep(min_anim_seconds - elapsed)
-                await animator.stop()
+            await animation_controller.on_event(event)
+            renderer.set_overlay_active(
+                animation_controller.phase == AnimationPhase.SUBMITTING
+            )
             is_waiting, new_questions = renderer.handle_event(event)
-            if isinstance(event, ToolCallEvent) and event.tool == "Task":
-                args_dict = event.args if isinstance(event.args, dict) else {}
-                raw_subagent_type = args_dict.get("subagent_type")
-                subagent_type = (
-                    raw_subagent_type.strip()
-                    if isinstance(raw_subagent_type, str)
-                    else ""
-                )
-                if subagent_type:
-                    try:
-                        source_prefix = f"subagent:{subagent_type}"
-                        source_usage = await session.get_usage(source_prefix=source_prefix)
-                        renderer.set_task_source_baseline(
-                            tool_call_id=event.tool_call_id,
-                            source_total_tokens=source_usage.total_tokens,
-                        )
-                    except Exception as exc:
-                        logger.debug(f"任务基线 token 初始化失败: {exc}")
             if is_waiting:
                 waiting_for_input = True
                 if new_questions is not None:
                     questions = new_questions
     finally:
-        usage_poll_stop_event.set()
+        renderer.set_overlay_active(False)
         progress_tick_stop_event.set()
-        usage_poll_task.cancel()
         progress_tick_task.cancel()
         with suppress(asyncio.CancelledError):
-            await usage_poll_task
-        with suppress(asyncio.CancelledError):
             await progress_tick_task
-        await animator.stop()
+        await animation_controller.shutdown()
 
     return waiting_for_input, questions
 

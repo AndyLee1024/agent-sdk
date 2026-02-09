@@ -95,6 +95,8 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
         session_id=agent._session_id,
         session_root=session_root,
         subagent_name=agent.name if agent._is_subagent else None,
+        tool_call_id=tool_call.id,
+        subagent_source_prefix=agent._subagent_source_prefix,
         token_cost=agent._token_cost,
         llm_levels=agent.llm_levels,  # type: ignore[arg-type]
         agent_context=agent._context,

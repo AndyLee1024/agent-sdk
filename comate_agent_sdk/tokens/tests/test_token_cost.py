@@ -173,6 +173,55 @@ class TestTokenCost(unittest.TestCase):
         self.assertEqual(summary.total_completion_tokens, 13)
         self.assertEqual(summary.total_tokens, 32)
 
+    def test_usage_observer_receives_new_entry(self) -> None:
+        token_cost = TokenCost(include_cost=False)
+        observed_sources: list[str] = []
+
+        observer_id = token_cost.subscribe_usage(
+            lambda entry: observed_sources.append(entry.source or "")
+        )
+        token_cost.add_usage(
+            "m-observe",
+            ChatInvokeUsage(
+                prompt_tokens=5,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=2,
+                total_tokens=7,
+            ),
+            level="MID",
+            source="subagent:Explorer:tc_1",
+        )
+        token_cost.unsubscribe_usage(observer_id)
+
+        self.assertEqual(observed_sources, ["subagent:Explorer:tc_1"])
+
+    def test_usage_observer_can_unsubscribe(self) -> None:
+        token_cost = TokenCost(include_cost=False)
+        callback_count = 0
+
+        def _observer(_entry) -> None:
+            nonlocal callback_count
+            callback_count += 1
+
+        observer_id = token_cost.subscribe_usage(_observer)
+        token_cost.unsubscribe_usage(observer_id)
+        token_cost.add_usage(
+            "m-observe",
+            ChatInvokeUsage(
+                prompt_tokens=3,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=1,
+                total_tokens=4,
+            ),
+            level="LOW",
+            source="agent",
+        )
+        self.assertEqual(callback_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

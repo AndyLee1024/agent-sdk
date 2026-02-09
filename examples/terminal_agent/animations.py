@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Sequence
+from enum import Enum
 
 from rich.align import Align
 from rich.console import Console
 from rich.live import Live
 from rich.text import Text
+
+from comate_agent_sdk.agent.events import StopEvent, TextEvent, ToolCallEvent, ToolResultEvent, UserQuestionEvent
 
 DEFAULT_STATUS_PHRASES: tuple[str, ...] = (
     "Vibing...",
@@ -100,6 +103,7 @@ class SubmissionAnimator:
         self._refresh_interval = refresh_interval
         self._min_phrase_seconds = max(0.6, min_phrase_seconds)
         self._max_phrase_seconds = max(self._min_phrase_seconds, max_phrase_seconds)
+        self._status_hint: str | None = None
         self._live: Live | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
@@ -130,6 +134,13 @@ class SubmissionAnimator:
         self._live.start()
         self._task = asyncio.create_task(self._run(), name="submission-animator")
 
+    def set_status_hint(self, hint: str | None) -> None:
+        if hint is None:
+            self._status_hint = None
+            return
+        normalized = hint.strip()
+        self._status_hint = normalized or None
+
     async def stop(self) -> None:
         if self._task is None:
             return
@@ -158,7 +169,7 @@ class SubmissionAnimator:
                 phrase_duration = self._phrase_duration(phrase_idx)
 
             pulse_idx = self._frame % len(PULSE_COLORS)
-            phrase = self._phrases[phrase_idx]
+            phrase = self._status_hint if self._status_hint else self._phrases[phrase_idx]
             dot = Text(
                 f"{PULSE_GLYPHS[pulse_idx]} ",
                 style=f"bold {PULSE_COLORS[pulse_idx]}",
@@ -169,3 +180,74 @@ class SubmissionAnimator:
                 self._live.update(Align.left(line))
             self._frame += 1
             await asyncio.sleep(self._refresh_interval)
+
+
+class AnimationPhase(str, Enum):
+    IDLE = "idle"
+    SUBMITTING = "submitting"
+    TOOL_RUNNING = "tool_running"
+    ASSISTANT_STREAMING = "assistant_streaming"
+    DONE = "done"
+
+
+class StreamAnimationController:
+    """Controls submission animation lifecycle across stream events."""
+
+    def __init__(
+        self,
+        animator: SubmissionAnimator,
+        *,
+        min_visible_seconds: float = 0.35,
+    ) -> None:
+        self._animator = animator
+        self._min_visible_seconds = max(0.0, float(min_visible_seconds))
+        self._phase = AnimationPhase.IDLE
+        self._started_at_monotonic = 0.0
+        self._stopped = True
+        self._active_tool_call_ids: set[str] = set()
+
+    @property
+    def phase(self) -> AnimationPhase:
+        return self._phase
+
+    async def start(self) -> None:
+        self._active_tool_call_ids.clear()
+        self._animator.set_status_hint(None)
+        self._started_at_monotonic = time.monotonic()
+        self._phase = AnimationPhase.SUBMITTING
+        self._stopped = False
+        await self._animator.start()
+
+    async def shutdown(self) -> None:
+        await self._stop_if_needed(AnimationPhase.DONE)
+
+    async def on_event(self, event: object) -> None:
+        if self._stopped:
+            return
+
+        if isinstance(event, ToolCallEvent):
+            self._active_tool_call_ids.add(event.tool_call_id)
+            await self._stop_if_needed(AnimationPhase.TOOL_RUNNING)
+            return
+
+        if isinstance(event, ToolResultEvent):
+            self._active_tool_call_ids.discard(event.tool_call_id)
+            return
+
+        if isinstance(event, TextEvent):
+            await self._stop_if_needed(AnimationPhase.ASSISTANT_STREAMING)
+            return
+
+        if isinstance(event, UserQuestionEvent) or isinstance(event, StopEvent):
+            await self._stop_if_needed(AnimationPhase.DONE)
+
+    async def _stop_if_needed(self, next_phase: AnimationPhase) -> None:
+        if self._stopped:
+            return
+        elapsed = time.monotonic() - self._started_at_monotonic
+        if elapsed < self._min_visible_seconds:
+            await asyncio.sleep(self._min_visible_seconds - elapsed)
+        self._animator.set_status_hint(None)
+        await self._animator.stop()
+        self._stopped = True
+        self._phase = next_phase

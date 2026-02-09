@@ -106,6 +106,7 @@ class AgentTemplate:
         parent_token_cost: TokenCost | None = None,
         is_subagent: bool = False,
         name: str | None = None,
+        subagent_run_id: str | None = None,
     ) -> "AgentRuntime":
         runtime_options = build_runtime_options(
             config=self.config,
@@ -124,6 +125,7 @@ class AgentTemplate:
             template=self,
             _is_subagent=is_subagent,
             _parent_token_cost=parent_token_cost,
+            _subagent_run_id=subagent_run_id,
         )
 
     @observe(name="agent_query")
@@ -186,6 +188,8 @@ class AgentRuntime:
     template: AgentTemplate | None = field(default=None, repr=False)
     _is_subagent: bool = field(default=False, repr=False)
     _parent_token_cost: TokenCost | None = field(default=None, repr=False)
+    _subagent_run_id: str | None = field(default=None, repr=False)
+    _subagent_source_prefix: str | None = field(default=None, repr=False, init=False)
 
     # Internal state
     _context: ContextIR = field(default=None, repr=False, init=False)  # type: ignore[assignment]

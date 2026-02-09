@@ -39,8 +39,8 @@ async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
             # Track token usage
             if response.usage:
                 source = "agent"
-                if agent._is_subagent:
-                    source = f"subagent:{agent.name}" if agent.name else "subagent"
+                if agent._subagent_source_prefix:
+                    source = agent._subagent_source_prefix
                 agent._token_cost.add_usage(
                     agent.llm.model,
                     response.usage,

@@ -86,12 +86,19 @@ def create_task_tool(
         """
         # 延迟导入避免循环依赖
         from comate_agent_sdk.agent import AgentConfig, AgentTemplate
+        from comate_agent_sdk.tools.system_context import get_system_tool_context
 
         if subagent_type not in agent_map:
             available = ", ".join(agent_map.keys())
             return f"Error: Unknown subagent '{subagent_type}'. Available: {available}"
 
         agent_def = agent_map[subagent_type]
+        tool_call_id: str | None = None
+        try:
+            tool_ctx = get_system_tool_context()
+            tool_call_id = tool_ctx.tool_call_id
+        except Exception:
+            tool_call_id = None
 
         # 解析模型
         llm = resolve_model(
@@ -132,6 +139,7 @@ def create_task_tool(
             parent_token_cost=parent_token_cost,
             is_subagent=True,
             name=agent_def.name,
+            subagent_run_id=tool_call_id,
         )
 
         # Subagent Skills 筛选（如果 AgentDefinition.skills 不为空）

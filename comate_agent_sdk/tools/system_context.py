@@ -31,6 +31,8 @@ class SystemToolContext:
     session_root: Path | None = None
     workspace_root: Path | None = None
     subagent_name: str | None = None
+    tool_call_id: str | None = None
+    subagent_source_prefix: str | None = None
     token_cost: TokenCost | None = None
     llm_levels: dict[str, "BaseChatModel"] | None = None
     agent_context: "ContextIR | None" = None
@@ -65,6 +67,8 @@ def bind_system_tool_context(
     session_root: Path | None = None,
     workspace_root: Path | None = None,
     subagent_name: str | None = None,
+    tool_call_id: str | None = None,
+    subagent_source_prefix: str | None = None,
     token_cost: TokenCost | None = None,
     llm_levels: dict[str, "BaseChatModel"] | None = None,
     agent_context: "ContextIR | None" = None,
@@ -87,6 +91,8 @@ def bind_system_tool_context(
             session_root=resolved_session_root,
             workspace_root=resolved_workspace_root,
             subagent_name=subagent_name,
+            tool_call_id=tool_call_id,
+            subagent_source_prefix=subagent_source_prefix,
             token_cost=token_cost,
             llm_levels=llm_levels,
             agent_context=agent_context,

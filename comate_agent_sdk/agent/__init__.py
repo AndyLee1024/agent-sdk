@@ -13,12 +13,14 @@ from comate_agent_sdk.agent.events import (
     SessionInitEvent,
     StopEvent,
     PreCompactEvent,
+    SubagentProgressEvent,
     SubagentStartEvent,
     SubagentStopEvent,
     TextEvent,
     ThinkingEvent,
     ToolCallEvent,
     ToolResultEvent,
+    UsageDeltaEvent,
     UserQuestionEvent,
 )
 from comate_agent_sdk.agent.chat_session import (
@@ -43,6 +45,8 @@ __all__ = [
     "AgentEvent",
     "SessionInitEvent",
     "StopEvent",
+    "UsageDeltaEvent",
+    "SubagentProgressEvent",
     "SubagentStartEvent",
     "SubagentStopEvent",
     "TextEvent",

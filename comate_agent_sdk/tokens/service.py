@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 import anyio
@@ -55,6 +56,8 @@ class TokenCost:
         self._pricing_data: dict[str, Any] | None = None
         self._initialized = False
         self._cache_dir = xdg_cache_home() / self.CACHE_DIR_NAME
+        self._usage_observers: dict[int, Callable[[TokenUsageEntry], None]] = {}
+        self._next_observer_id = 1
 
     async def initialize(self) -> None:
         """Initialize the service by loading pricing data"""
@@ -276,8 +279,29 @@ class TokenCost:
         )
 
         self.usage_history.append(entry)
+        self._notify_usage_observers(entry)
 
         return entry
+
+    def subscribe_usage(self, observer: Callable[[TokenUsageEntry], None]) -> int:
+        """订阅 usage 增量事件，返回订阅 id。"""
+        observer_id = self._next_observer_id
+        self._next_observer_id += 1
+        self._usage_observers[observer_id] = observer
+        return observer_id
+
+    def unsubscribe_usage(self, observer_id: int) -> None:
+        """取消 usage 增量订阅。"""
+        self._usage_observers.pop(observer_id, None)
+
+    def _notify_usage_observers(self, entry: TokenUsageEntry) -> None:
+        if not self._usage_observers:
+            return
+        for observer in list(self._usage_observers.values()):
+            try:
+                observer(entry)
+            except Exception as exc:
+                logger.debug(f"Usage observer failed: {exc}", exc_info=True)
 
     def get_usage_tokens_for_model(self, model: str) -> ModelUsageTokens:
         """Get usage tokens for a specific model"""

@@ -239,6 +239,68 @@ class SubagentStopEvent:
 
 
 @dataclass
+class UsageDeltaEvent:
+	"""Emitted whenever token usage receives a new entry."""
+
+	source: str
+	"""Usage source (e.g., 'agent', 'subagent:Explorer:tc_1', 'subagent:Explorer:tc_1:webfetch')."""
+
+	model: str
+	"""Model identifier for this usage entry."""
+
+	level: str | None = None
+	"""Optional LLM level tag."""
+
+	delta_prompt_tokens: int = 0
+	"""Prompt token delta from this usage entry."""
+
+	delta_prompt_cached_tokens: int = 0
+	"""Prompt cached token delta from this usage entry."""
+
+	delta_completion_tokens: int = 0
+	"""Completion token delta from this usage entry."""
+
+	delta_total_tokens: int = 0
+	"""Total token delta from this usage entry."""
+
+	def __str__(self) -> str:
+		level = f' [{self.level}]' if self.level else ''
+		return (
+			f'📊 Usage{level} {self.source}: +{self.delta_total_tokens} tok '
+			f'(p={self.delta_prompt_tokens}, c={self.delta_completion_tokens})'
+		)
+
+
+@dataclass
+class SubagentProgressEvent:
+	"""Emitted during subagent execution with live elapsed time and token usage."""
+
+	tool_call_id: str
+	"""The Task tool_call_id for correlation."""
+
+	subagent_name: str
+	"""Subagent name."""
+
+	description: str = ''
+	"""Subagent task description."""
+
+	status: Literal['running', 'completed', 'error', 'timeout'] = 'running'
+	"""Current task status."""
+
+	elapsed_ms: float = 0.0
+	"""Elapsed time in milliseconds."""
+
+	tokens: int = 0
+	"""Subagent accumulated tokens for this task call."""
+
+	def __str__(self) -> str:
+		return (
+			f'⏱️ Subagent progress: {self.subagent_name} '
+			f'({self.status}, {self.elapsed_ms:.0f}ms, {self.tokens} tok)'
+		)
+
+
+@dataclass
 class HiddenUserMessageEvent:
 	"""Emitted when the agent injects a hidden user message (ex: incomplete todos prompt).
 	Hidden messages are saved to history and sent to the LLM but not displayed in the UI.
@@ -338,6 +400,8 @@ AgentEvent = (
 	| StepCompleteEvent
 	| SubagentStartEvent
 	| SubagentStopEvent
+	| UsageDeltaEvent
+	| SubagentProgressEvent
 	| HiddenUserMessageEvent
 	| UserQuestionEvent
 	| PreCompactEvent

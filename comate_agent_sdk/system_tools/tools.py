@@ -1698,7 +1698,9 @@ async def WebFetch(
 
     if completion.usage and ctx.token_cost is not None:
         source = "webfetch"
-        if ctx.subagent_name:
+        if ctx.subagent_source_prefix:
+            source = f"{ctx.subagent_source_prefix}:webfetch"
+        elif ctx.subagent_name:
             source = f"subagent:{ctx.subagent_name}:webfetch"
         ctx.token_cost.add_usage(
             str(llm.model),
