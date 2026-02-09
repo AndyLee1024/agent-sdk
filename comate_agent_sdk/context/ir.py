@@ -537,9 +537,11 @@ class ContextIR:
         token_count = self.token_counter.count(content_text)
 
         # ToolMessage 特殊属性
+        is_tool_error = False
         if isinstance(message, ToolMessage):
             ephemeral = ephemeral or message.ephemeral
             tool_name = tool_name or message.tool_name
+            is_tool_error = message.is_error
 
         item = ContextItem(
             item_type=item_type,
@@ -551,6 +553,8 @@ class ContextIR:
             tool_name=tool_name,
             metadata=metadata or {},
             cache_hint=cache_hint,
+            is_tool_error=is_tool_error,
+            created_turn=self._turn_number,
         )
 
         self.conversation.items.append(item)
@@ -579,6 +583,76 @@ class ContextIR:
     def get_turn_number(self) -> int:
         """获取当前 turn_number（真实用户输入轮次）。"""
         return int(self._turn_number)
+
+    def cleanup_stale_error_items(self, max_turns: int = 10) -> list[str]:
+        """清理超过指定轮次的失败工具调用项
+
+        同时删除失败的 tool_result 及其关联的 AssistantMessage(保持消息配对完整性)
+
+        Args:
+            max_turns: 最大保留轮次(默认10轮后删除)
+
+        Returns:
+            被删除的 item ID 列表
+        """
+        current_turn = self._turn_number
+        removed_ids: list[str] = []
+
+        # 1. 收集需要删除的失败 tool_result
+        error_tool_results: list[ContextItem] = []
+        for item in self.conversation.items:
+            if (item.item_type == ItemType.TOOL_RESULT
+                and item.is_tool_error
+                and (current_turn - item.created_turn) >= max_turns):
+                error_tool_results.append(item)
+
+        if not error_tool_results:
+            return removed_ids
+
+        # 2. 收集需要删除的关联 AssistantMessage
+        error_tool_call_ids = set()
+        for item in error_tool_results:
+            if isinstance(item.message, ToolMessage):
+                error_tool_call_ids.add(item.message.tool_call_id)
+
+        assistant_items_to_remove: list[str] = []
+        for item in self.conversation.items:
+            if item.item_type != ItemType.ASSISTANT_MESSAGE:
+                continue
+            if not isinstance(item.message, AssistantMessage):
+                continue
+            if not item.message.tool_calls:
+                continue
+            # 检查是否所有 tool_calls 都是失败的
+            all_failed = all(
+                tc.id in error_tool_call_ids
+                for tc in item.message.tool_calls
+            )
+            if all_failed:
+                assistant_items_to_remove.append(item.id)
+
+        # 3. 执行删除(先删除 tool_result,再删除 assistant)
+        for item in error_tool_results:
+            if self.conversation.remove_by_id(item.id):
+                removed_ids.append(item.id)
+                self.event_bus.emit(ContextEvent(
+                    event_type=EventType.ITEM_REMOVED,
+                    item_type=ItemType.TOOL_RESULT,
+                    item_id=item.id,
+                    detail=f"stale error tool_result removed (turn gap={current_turn - item.created_turn})",
+                ))
+
+        for item_id in assistant_items_to_remove:
+            if self.conversation.remove_by_id(item_id):
+                removed_ids.append(item_id)
+                self.event_bus.emit(ContextEvent(
+                    event_type=EventType.ITEM_REMOVED,
+                    item_type=ItemType.ASSISTANT_MESSAGE,
+                    item_id=item_id,
+                    detail="associated assistant message removed (all tool_calls failed)",
+                ))
+
+        return removed_ids
 
     def add_skill_injection(
         self,

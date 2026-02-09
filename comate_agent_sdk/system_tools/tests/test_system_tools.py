@@ -28,6 +28,7 @@ from comate_agent_sdk.tokens import TokenCost
 class TestSystemTools(unittest.TestCase):
     def setUp(self) -> None:
         system_tools_module._WEBFETCH_CACHE.clear()
+        system_tools_module._READ_REGISTRY_MEMORY.clear()
 
     def test_default_registry_contains_core_system_tools(self) -> None:
         names = set(get_default_registry().names())
@@ -103,6 +104,9 @@ class TestSystemTools(unittest.TestCase):
             p.write_text("x\nx\n", encoding="utf-8")
 
             with bind_system_tool_context(project_root=root):
+                read_out = self._run(Read, file_path=str(p))
+                self.assertTrue(read_out["ok"])
+
                 out = self._run(Edit, file_path=str(p), old_string="x", new_string="y")
                 self.assertFalse(out["ok"])
                 self.assertEqual(out["error"]["code"], "CONFLICT")
@@ -126,10 +130,14 @@ class TestSystemTools(unittest.TestCase):
             p.write_text("hello\n", encoding="utf-8")
 
             with bind_system_tool_context(project_root=root):
+                read_out = self._run(Read, file_path="proj.txt")
+                self.assertTrue(read_out["ok"])
+
                 out = self._run(Edit, file_path="proj.txt", old_string="hello", new_string="hi")
                 self.assertTrue(out["ok"])
                 self.assertEqual(out["data"]["replacements"], 1)
                 self.assertEqual(p.read_text(encoding="utf-8"), "hi\n")
+                self.assertEqual(out["data"]["relpath"], "proj.txt")
 
     def test_glob_returns_relative_paths(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -167,16 +175,72 @@ class TestSystemTools(unittest.TestCase):
                 self.assertIsNone(m["line_number"])
                 self.assertEqual(m["after_context"], ["b"])
 
-    def test_bash_runs_and_returns_exit_code(self) -> None:
+    def test_grep_content_uses_streaming_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "e.txt"
+            p.write_text("a\nfoo\nb\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                with mock.patch.object(
+                    system_tools_module,
+                    "_run_subprocess",
+                    side_effect=AssertionError("content mode should not call _run_subprocess"),
+                ):
+                    out = self._run(
+                        Grep,
+                        pattern="foo",
+                        path=str(root),
+                        output_mode="content",
+                    )
+                    self.assertTrue(out["ok"])
+                    self.assertEqual(out["data"]["total_matches"], 1)
+
+    def test_bash_denies_banned_commands(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "x.txt").write_text("ok", encoding="utf-8")
 
             with bind_system_tool_context(project_root=root):
                 out = self._run(Bash, args=["cat", "x.txt"])
+                self.assertFalse(out["ok"])
+                self.assertEqual(out["error"]["code"], "POLICY_DENIED")
+
+    def test_bash_rg_requires_max_count(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "x.txt").write_text("ok", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(
+                    Bash,
+                    args=["rg", "--line-number", "--no-heading", "--color=never", "ok", str(root)],
+                )
+                self.assertFalse(out["ok"])
+                self.assertEqual(out["error"]["code"], "POLICY_DENIED")
+
+    def test_bash_rg_with_strict_flags_and_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "x.txt").write_text("ok", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(
+                    Bash,
+                    args=[
+                        "rg",
+                        "--line-number",
+                        "--no-heading",
+                        "--color=never",
+                        "--max-count",
+                        "5",
+                        "ok",
+                        str(root),
+                    ],
+                )
                 self.assertTrue(out["ok"])
                 self.assertEqual(out["data"]["exit_code"], 0)
-                self.assertIn("ok", out["data"]["stdout"])
+                self.assertIn("x.txt", out["data"]["stdout"])
 
     def test_multiedit_creates_new_file_with_first_empty_old_string(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -212,6 +276,93 @@ class TestSystemTools(unittest.TestCase):
                 self.assertIn("a.txt", names)
                 self.assertIn("d", names)
                 self.assertNotIn("b.txt", names)
+
+    def test_ls_returns_invalid_argument_when_path_is_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            file_path = root / "only.txt"
+            file_path.write_text("x", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(LS, path=str(file_path))
+                self.assertFalse(out["ok"])
+                self.assertEqual(out["error"]["code"], "INVALID_ARGUMENT")
+
+    def test_read_before_modify_is_enforced_for_existing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "sessions" / "s1"
+            workspace = root / ".agent_workspace"
+            target = workspace / "existing.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("hello\nhello\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root, session_id="s1", session_root=session_root):
+                out_write = self._run(Write, file_path=str(target), content="new\n")
+                self.assertFalse(out_write["ok"])
+                self.assertEqual(out_write["error"]["code"], "PRECONDITION_FAILED")
+
+                out_edit = self._run(Edit, file_path=str(target), old_string="hello", new_string="hi")
+                self.assertFalse(out_edit["ok"])
+                self.assertEqual(out_edit["error"]["code"], "PRECONDITION_FAILED")
+
+                out_multiedit = self._run(
+                    MultiEdit,
+                    file_path=str(target),
+                    edits=[{"old_string": "hello", "new_string": "hi", "replace_all": False}],
+                )
+                self.assertFalse(out_multiedit["ok"])
+                self.assertEqual(out_multiedit["error"]["code"], "PRECONDITION_FAILED")
+
+                read_out = self._run(Read, file_path=str(target))
+                self.assertTrue(read_out["ok"])
+
+                ok_edit = self._run(
+                    Edit,
+                    file_path=str(target),
+                    old_string="hello",
+                    new_string="hi",
+                    replace_all=True,
+                )
+                self.assertTrue(ok_edit["ok"])
+                self.assertEqual(target.read_text(encoding="utf-8"), "hi\nhi\n")
+
+    def test_read_registry_persists_to_session_root(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "sessions" / "s1"
+            p = root / "a.txt"
+            p.write_text("l1\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root, session_id="s1", session_root=session_root):
+                out = self._run(Read, file_path=str(p))
+                self.assertTrue(out["ok"])
+
+            idx_path = session_root / "read_index.json"
+            self.assertTrue(idx_path.exists())
+            payload = json.loads(idx_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("schema_version"), 1)
+            self.assertIn(str(p.resolve()), payload.get("files", []))
+
+    def test_grep_content_marks_lower_bound_when_truncated(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            line = "foo " + ("x" * 240)
+            # Multi-file setup to exceed both per-file --max-count and global match-event limit.
+            for i in range(8):
+                p = root / f"huge_{i}.txt"
+                p.write_text("\n".join([line] * 1200), encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(
+                    Grep,
+                    pattern="foo",
+                    path=str(root),
+                    output_mode="content",
+                )
+                self.assertTrue(out["ok"])
+                self.assertTrue(out["data"]["truncated"])
+                self.assertTrue(out["data"]["total_matches_is_lower_bound"])
 
     def test_todowrite_persists_to_session_root(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -122,6 +122,8 @@ def _conversation_item_to_dict(*, item: ContextItem, offload_root: Path) -> dict
         "cache_hint": item.cache_hint,
         "offload_path": item.offload_path,
         "offloaded": item.offloaded,
+        "is_tool_error": item.is_tool_error,
+        "created_turn": item.created_turn,
     }
 
 
@@ -158,6 +160,8 @@ def _conversation_item_dict_to_item(*, data: dict, offload_root: Path) -> Contex
         cache_hint=bool(data.get("cache_hint", False)),
         offload_path=data.get("offload_path"),
         offloaded=bool(data.get("offloaded", False)),
+        is_tool_error=bool(data.get("is_tool_error", False)),
+        created_turn=int(data.get("created_turn", 0)),
     )
 
 

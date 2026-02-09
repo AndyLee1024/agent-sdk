@@ -140,6 +140,7 @@ class SelectiveCompactionPolicy:
     preview_tokens: int = 200
     dialogue_rounds_keep_min: int = 15
     summary_retry_attempts: int = 2
+    error_item_max_turns: int = 10  # 失败工具项最大保留轮次
 
     meta_records: list[CompactionMetaRecord] = field(default_factory=list, init=False)
 
@@ -153,6 +154,16 @@ class SelectiveCompactionPolicy:
         """执行选择性压缩 + 全量摘要（事务化）。"""
         if self.threshold <= 0:
             return False
+
+        # 在选择性压缩前先清理过期的失败工具调用
+        if self.error_item_max_turns > 0:
+            removed_error_ids = context.cleanup_stale_error_items(
+                max_turns=self.error_item_max_turns
+            )
+            if removed_error_ids:
+                logger.info(
+                    f"清理过期失败工具项: 移除 {len(removed_error_ids)} 条"
+                )
 
         self.meta_records = []
         initial_tokens = context.total_tokens

@@ -109,6 +109,8 @@ class ContextItem:
     cache_hint: bool = False
     offload_path: str | None = None  # 卸载文件路径（相对路径）
     offloaded: bool = False          # 是否已卸载
+    is_tool_error: bool = False      # 是否是失败的工具调用
+    created_turn: int = 0            # 创建时的轮次号
 
 
 class SegmentName(Enum):

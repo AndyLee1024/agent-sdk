@@ -10,9 +10,10 @@ import subprocess
 import tempfile
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -29,6 +30,10 @@ from comate_agent_sdk.system_tools.description import (
     TODO_USAGE_RULES,
     WEBFETCH_USAGE_RULES,
     WRITE_USAGE_RULES,
+)
+from comate_agent_sdk.system_tools.policy_engine import (
+    BASH_COMMAND_POLICY,
+    READ_REGISTRY_POLICY,
 )
 from comate_agent_sdk.system_tools.path_guard import (
     PathGuardError,
@@ -62,6 +67,9 @@ _TEXT_SPILL_CHARS = 10_000
 _BYTES_SPILL_LIMIT = 16 * 1024
 _LIST_SPILL_LIMIT = 100
 _ARTIFACT_TTL_SECONDS = 3600
+_GREP_CONTENT_PER_FILE_MAX_COUNT = 1000
+_GREP_CONTENT_PARSE_MAX_CHARS = 200_000
+_GREP_CONTENT_MATCH_EVENT_LIMIT = 5000
 
 _EXCLUDED_WALK_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".agent"}
 
@@ -69,6 +77,8 @@ _BASH_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
 _FILE_LOCKS_BY_LOOP: dict[int, dict[str, asyncio.Lock]] = defaultdict(dict)
 
 _WEBFETCH_CACHE: dict[str, dict[str, Any]] = {}
+# Backward-compatible alias for existing tests/introspection.
+_READ_REGISTRY_MEMORY = READ_REGISTRY_POLICY.memory
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -159,7 +169,23 @@ def _file_lock(path: Path) -> asyncio.Lock:
 
 
 async def _io_call(func, /, *args, **kwargs):
-    return func(*args, **kwargs)
+    return await asyncio.to_thread(func, *args, **kwargs)
+
+
+async def _mark_read(ctx: SystemToolContext, path: Path) -> None:
+    await READ_REGISTRY_POLICY.mark_read(
+        session_root=_session_root_from_ctx(ctx),
+        session_id=ctx.session_id,
+        path=path,
+    )
+
+
+async def _require_read(ctx: SystemToolContext, path: Path) -> bool:
+    return await READ_REGISTRY_POLICY.has_read(
+        session_root=_session_root_from_ctx(ctx),
+        session_id=ctx.session_id,
+        path=path,
+    )
 
 
 async def _read_text(path: Path, *, encoding: str = "utf-8") -> str:
@@ -267,6 +293,22 @@ def _invalid_argument(message: str, *, field: str | None = None) -> dict[str, An
     if field:
         field_errors.append({"field": field, "message": message})
     return err("INVALID_ARGUMENT", message, field_errors=field_errors)
+
+
+def _validate_bash_command(
+    params: BashInput,
+    *,
+    cwd: Path,
+    ctx: SystemToolContext,
+) -> dict[str, Any] | None:
+    violation = BASH_COMMAND_POLICY.validate(
+        args=params.args,
+        cwd=cwd,
+        allowed_roots=_allowed_roots(ctx),
+    )
+    if violation is None:
+        return None
+    return err(violation.code, violation.message)
 
 
 async def _spill_text(
@@ -477,6 +519,122 @@ async def _run_subprocess(args: list[str], *, cwd: Path | None = None) -> subpro
     )
 
 
+def _append_bounded_text(
+    chunks: list[str],
+    text: str,
+    *,
+    current_chars: int,
+    max_chars: int,
+) -> tuple[int, bool]:
+    if max_chars <= 0:
+        return current_chars, True
+    if current_chars >= max_chars:
+        return current_chars, True
+
+    remain = max_chars - current_chars
+    if len(text) <= remain:
+        chunks.append(text)
+        return current_chars + len(text), False
+
+    chunks.append(text[:remain])
+    return max_chars, True
+
+
+@dataclass
+class _StreamingSubprocessResult:
+    returncode: int
+    stdout_capture: str
+    stderr_capture: str
+    stdout_capture_truncated: bool
+    stderr_capture_truncated: bool
+    stopped_early: bool
+
+
+async def _run_subprocess_streaming_lines(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    on_stdout_line: Callable[[str], bool] | None = None,
+    stdout_capture_max_chars: int = _GREP_CONTENT_PARSE_MAX_CHARS,
+    stderr_capture_max_chars: int = _TEXT_SPILL_CHARS,
+) -> _StreamingSubprocessResult:
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=str(cwd) if cwd is not None else None,
+    )
+
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+
+    stdout_chunks: list[str] = []
+    stderr_chunks: list[str] = []
+    stdout_chars = 0
+    stderr_chars = 0
+    stdout_capture_truncated = False
+    stderr_capture_truncated = False
+    stopped_early = False
+
+    async def _consume_stdout() -> None:
+        nonlocal stdout_chars, stdout_capture_truncated, stopped_early
+
+        while True:
+            raw = await proc.stdout.readline()
+            if not raw:
+                break
+            text = raw.decode("utf-8", errors="replace")
+
+            stdout_chars, clipped = _append_bounded_text(
+                stdout_chunks,
+                text,
+                current_chars=stdout_chars,
+                max_chars=stdout_capture_max_chars,
+            )
+            stdout_capture_truncated = stdout_capture_truncated or clipped
+
+            if stopped_early:
+                continue
+            if on_stdout_line is None:
+                continue
+
+            row = text.rstrip("\n")
+            should_continue = bool(on_stdout_line(row))
+            if not should_continue:
+                stopped_early = True
+                if proc.returncode is None:
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
+
+    async def _consume_stderr() -> None:
+        nonlocal stderr_chars, stderr_capture_truncated
+        while True:
+            raw = await proc.stderr.read(4096)
+            if not raw:
+                break
+            text = raw.decode("utf-8", errors="replace")
+            stderr_chars, clipped = _append_bounded_text(
+                stderr_chunks,
+                text,
+                current_chars=stderr_chars,
+                max_chars=stderr_capture_max_chars,
+            )
+            stderr_capture_truncated = stderr_capture_truncated or clipped
+
+    await asyncio.gather(_consume_stdout(), _consume_stderr())
+    returncode = await proc.wait()
+    return _StreamingSubprocessResult(
+        returncode=int(returncode),
+        stdout_capture="".join(stdout_chunks),
+        stderr_capture="".join(stderr_chunks),
+        stdout_capture_truncated=stdout_capture_truncated,
+        stderr_capture_truncated=stderr_capture_truncated,
+        stopped_early=stopped_early,
+    )
+
+
 def _walk_candidates(
     *,
     search_path: Path,
@@ -551,6 +709,10 @@ async def Bash(
             cwd = _project_root(ctx)
     except PathGuardError as exc:
         return _path_error_result(exc)
+
+    validation_err = _validate_bash_command(params, cwd=cwd, ctx=ctx)
+    if validation_err is not None:
+        return validation_err
 
     env = os.environ.copy()
     if params.env:
@@ -650,6 +812,7 @@ async def Read(
         return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
 
     text = await _read_text(path)
+    await _mark_read(ctx, path)
     lines = text.splitlines()
     total_lines = len(lines)
 
@@ -687,7 +850,6 @@ async def Read(
         "meta": {
             "encoding": "utf-8",
             "file_bytes": int((await _stat(path)).st_size),
-            "sha256": _sha256_text(text),
         },
     }
 
@@ -719,13 +881,15 @@ async def Write(
     except PathGuardError as exc:
         return _path_error_result(exc)
 
-    workspace_root = _workspace_root(ctx)
+    root_refs = _allowed_roots(ctx)
     async with _file_lock(path):
         existed = await _exists(path)
         if existed and await _is_dir(path):
             return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
         if existed and not await _is_file(path):
             return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+        if existed and not await _require_read(ctx, path):
+            return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
 
         if params.mode == "append" and existed:
             original = await _read_text(path, encoding=params.encoding)
@@ -739,7 +903,7 @@ async def Write(
 
     final_bytes = len(final_content.encode(params.encoding, errors="replace"))
     op_bytes = len(params.content.encode(params.encoding, errors="replace"))
-    relpath = to_safe_relpath(path, roots=[workspace_root])
+    relpath = to_safe_relpath(path, roots=root_refs)
     return ok(
         data={
             "bytes_written": op_bytes,
@@ -764,7 +928,7 @@ async def Edit(
     except PathGuardError as exc:
         return _path_error_result(exc)
 
-    workspace_root = _workspace_root(ctx)
+    root_refs = _allowed_roots(ctx)
     async with _file_lock(path):
         if not await _exists(path):
             return err("NOT_FOUND", f"File not found: {params.file_path}")
@@ -772,6 +936,8 @@ async def Edit(
             return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
         if not await _is_file(path):
             return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+        if not await _require_read(ctx, path):
+            return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
 
         before = await _read_text(path)
         count = before.count(params.old_string)
@@ -798,7 +964,7 @@ async def Edit(
             "replacements": replacements,
             "before_sha256": _sha256_text(before),
             "after_sha256": _sha256_text(after),
-            "relpath": to_safe_relpath(path, roots=[workspace_root]),
+            "relpath": to_safe_relpath(path, roots=root_refs),
         }
     )
 
@@ -817,7 +983,7 @@ async def MultiEdit(
     except PathGuardError as exc:
         return _path_error_result(exc)
 
-    workspace_root = _workspace_root(ctx)
+    root_refs = _allowed_roots(ctx)
     async with _file_lock(path):
         exists = await _exists(path)
 
@@ -826,6 +992,8 @@ async def MultiEdit(
                 return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
             if not await _is_file(path):
                 return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
+            if not await _require_read(ctx, path):
+                return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
             content = await _read_text(path)
             before_hash = _sha256_text(content)
             edits = params.edits
@@ -884,7 +1052,7 @@ async def MultiEdit(
             "before_sha256": before_hash,
             "after_sha256": _sha256_text(content),
             "bytes": len(content.encode("utf-8")),
-            "relpath": to_safe_relpath(path, roots=[workspace_root]),
+            "relpath": to_safe_relpath(path, roots=root_refs),
         }
     )
 
@@ -1161,27 +1329,30 @@ async def Grep(
         return ok(data=data)
 
     before, after = _compute_context_window(params)
-    cmd = _build_rg_base_args(params) + ["--json", params.pattern, str(search_path)]
-    result = await _run_subprocess(cmd)
-    if result.returncode == 2:
-        return err("INVALID_ARGUMENT", (result.stderr or result.stdout).strip() or "rg failed")
-    if result.returncode == 1:
-        return ok(data={"matches": [], "total_matches": 0, "truncated": False})
-
+    cmd = _build_rg_base_args(params) + [
+        "--json",
+        "--max-count",
+        str(_GREP_CONTENT_PER_FILE_MAX_COUNT),
+        params.pattern,
+        str(search_path),
+    ]
     matches: list[dict[str, Any]] = []
     line_refs: list[tuple[str, int]] = []
     total_matches = 0
+    lower_bound = False
 
-    for raw in result.stdout.splitlines():
-        row = raw.strip()
+    def _on_rg_json_line(raw_line: str) -> bool:
+        nonlocal total_matches, lower_bound
+        row = raw_line.strip()
         if not row:
-            continue
+            return True
+
         try:
             evt = json.loads(row)
         except json.JSONDecodeError:
-            continue
+            return True
         if evt.get("type") != "match":
-            continue
+            return True
 
         data = evt.get("data", {})
         path_text = ((data.get("path") or {}).get("text") or "").strip()
@@ -1189,8 +1360,11 @@ async def Grep(
         line_text = ((data.get("lines") or {}).get("text") or "").rstrip("\n")
 
         total_matches += 1
+        if total_matches >= _GREP_CONTENT_MATCH_EVENT_LIMIT:
+            lower_bound = True
+            return False
         if len(matches) >= params.head_limit:
-            continue
+            return True
 
         abs_path = str(Path(path_text).resolve()) if path_text else ""
         rel_file = to_safe_relpath(Path(abs_path), roots=root_refs) if abs_path else ""
@@ -1206,6 +1380,24 @@ async def Grep(
             }
         )
         line_refs.append((abs_path, ln))
+        return True
+
+    stream = await _run_subprocess_streaming_lines(
+        cmd,
+        on_stdout_line=_on_rg_json_line,
+        stdout_capture_max_chars=_GREP_CONTENT_PARSE_MAX_CHARS,
+        stderr_capture_max_chars=_TEXT_SPILL_CHARS,
+    )
+
+    if stream.returncode == 2:
+        return err("INVALID_ARGUMENT", (stream.stderr_capture or stream.stdout_capture).strip() or "rg failed")
+    if stream.returncode == 1 and total_matches == 0:
+        return ok(data={"matches": [], "total_matches": 0, "truncated": False})
+    if stream.returncode not in {0, 1} and not stream.stopped_early:
+        return err("INTERNAL", (stream.stderr_capture or stream.stdout_capture).strip() or "rg failed", retryable=True)
+
+    if stream.stopped_early:
+        lower_bound = True
 
     if (before > 0 or after > 0) and matches:
         by_file: dict[str, list[tuple[int, int]]] = defaultdict(list)
@@ -1228,24 +1420,28 @@ async def Grep(
                 matches[idx]["before_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0:ln0]]
                 matches[idx]["after_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[ln0 + 1 : a1]]
 
-    truncated = total_matches > len(matches)
+    truncated = total_matches > len(matches) or lower_bound
     data = {
         "matches": matches,
         "total_matches": total_matches,
         "truncated": truncated,
+        "total_matches_is_lower_bound": lower_bound,
     }
 
-    if truncated or len(result.stdout.encode("utf-8")) > _BYTES_SPILL_LIMIT:
+    raw_capture = stream.stdout_capture
+    if truncated or stream.stdout_capture_truncated or len(raw_capture.encode("utf-8")) > _BYTES_SPILL_LIMIT:
         artifact = await _spill_text(
             ctx=ctx,
             namespace="grep_content",
-            text=result.stdout,
+            text=raw_capture,
             mime="text/plain",
         )
         data["artifact"] = artifact
         data["read_hint"] = (
             f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
         )
+        if stream.stdout_capture_truncated:
+            data["raw_output_truncated"] = True
 
     return ok(data=data)
 
@@ -1267,7 +1463,7 @@ async def LS(
     if not await _exists(p):
         return err("NOT_FOUND", f"Path not found: {params.path or str(p)}")
     if not await _is_dir(p):
-        return err("IS_DIRECTORY", f"Path is not a directory: {params.path or str(p)}")
+        return err("INVALID_ARGUMENT", f"Path is not a directory: {params.path or str(p)}")
 
     ignore = params.ignore or []
 
