@@ -123,7 +123,56 @@ class TestTokenCost(unittest.TestCase):
         self.assertAlmostEqual(summary.by_model["dummy"].cost, 182.5, places=6)
         self.assertAlmostEqual(summary.by_level["MID"].cost, 182.5, places=6)
 
+    def test_usage_summary_source_prefix(self) -> None:
+        token_cost = TokenCost(include_cost=False)
+        token_cost.add_usage(
+            "m-main",
+            ChatInvokeUsage(
+                prompt_tokens=20,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=10,
+                total_tokens=30,
+            ),
+            level="MID",
+            source="agent",
+        )
+        token_cost.add_usage(
+            "m-sub",
+            ChatInvokeUsage(
+                prompt_tokens=12,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=8,
+                total_tokens=20,
+            ),
+            level="MID",
+            source="subagent:Explorer",
+        )
+        token_cost.add_usage(
+            "m-sub-low",
+            ChatInvokeUsage(
+                prompt_tokens=7,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=5,
+                total_tokens=12,
+            ),
+            level="LOW",
+            source="subagent:Explorer:webfetch",
+        )
+
+        summary = asyncio.run(
+            token_cost.get_usage_summary(source_prefix="subagent:Explorer")
+        )
+        self.assertEqual(summary.entry_count, 2)
+        self.assertEqual(summary.total_prompt_tokens, 19)
+        self.assertEqual(summary.total_completion_tokens, 13)
+        self.assertEqual(summary.total_tokens, 32)
+
 
 if __name__ == "__main__":
     unittest.main()
-

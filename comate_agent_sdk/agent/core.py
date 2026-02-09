@@ -504,8 +504,16 @@ class AgentRuntime:
 
         return None
 
-    async def get_usage(self) -> UsageSummary:
-        return await self._token_cost.get_usage_summary()
+    async def get_usage(
+        self,
+        *,
+        model: str | None = None,
+        source_prefix: str | None = None,
+    ) -> UsageSummary:
+        return await self._token_cost.get_usage_summary(
+            model=model,
+            source_prefix=source_prefix,
+        )
 
     async def get_context_info(self):
         from comate_agent_sdk.context.info import ContextInfo, _build_categories

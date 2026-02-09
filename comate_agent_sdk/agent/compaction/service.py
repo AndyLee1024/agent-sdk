@@ -60,6 +60,7 @@ class CompactionService:
     config: CompactionConfig = field(default_factory=CompactionConfig)
     llm: BaseChatModel | None = None
     token_cost: TokenCost | None = None
+    usage_source: str = "compaction"
 
     # Internal state
     _last_usage: TokenUsage = field(default_factory=TokenUsage, repr=False)
@@ -188,7 +189,7 @@ class CompactionService:
                 model.model,
                 response.usage,
                 level=level,
-                source="compaction",
+                source=self.usage_source,
             )
 
         summary_text = response.content or ""

@@ -45,6 +45,33 @@ class EventRenderer:
         self._assistant.start_turn()
         self._stop_thinking()
 
+    def update_usage_tokens(
+        self,
+        total_tokens: int,
+        source_totals: dict[str, int] | None = None,
+    ) -> None:
+        self._tools.update_usage_tokens(total_tokens, source_totals)
+
+    def get_running_subagent_source_prefixes(self) -> set[str]:
+        return self._tools.running_subagent_source_prefixes()
+
+    def set_task_source_baseline(self, tool_call_id: str, source_total_tokens: int) -> None:
+        self._tools.set_task_source_baseline(
+            tool_call_id=tool_call_id,
+            source_total_tokens=source_total_tokens,
+        )
+
+    def has_running_tasks(self) -> bool:
+        return self._tools.has_running_tasks()
+
+    def tick_progress(self) -> None:
+        self._tools.tick_progress()
+
+    def interrupt_turn(self) -> None:
+        self._stop_thinking()
+        self._assistant.finalize_markdown()
+        self._tools.interrupt_running()
+
     def _update_thinking(self, content: str) -> None:
         if self._thinking_live is None:
             self._thinking_live = Live(

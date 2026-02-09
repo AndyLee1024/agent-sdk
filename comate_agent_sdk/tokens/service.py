@@ -297,7 +297,10 @@ class TokenCost:
         )
 
     async def get_usage_summary(
-        self, model: str | None = None, since: datetime | None = None
+        self,
+        model: str | None = None,
+        since: datetime | None = None,
+        source_prefix: str | None = None,
     ) -> UsageSummary:
         """Get summary of token usage and costs (costs calculated on-the-fly)"""
         filtered_usage = self.usage_history
@@ -307,6 +310,12 @@ class TokenCost:
 
         if since:
             filtered_usage = [u for u in filtered_usage if u.timestamp >= since]
+
+        if source_prefix:
+            filtered_usage = [
+                u for u in filtered_usage
+                if (u.source or "").startswith(source_prefix)
+            ]
 
         if not filtered_usage:
             return UsageSummary(

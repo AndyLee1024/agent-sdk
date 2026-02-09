@@ -188,6 +188,13 @@ async def check_and_compact(
 
     # 创建选择性压缩策略
     compaction_llm = agent._compaction_service.llm or agent.llm
+    is_subagent = bool(getattr(agent, "_is_subagent", False))
+    agent_name = getattr(agent, "name", None)
+    source_prefix = (
+        f"subagent:{agent_name}"
+        if is_subagent and agent_name
+        else None
+    )
     policy = SelectiveCompactionPolicy(
         threshold=threshold,
         llm=compaction_llm,
@@ -196,6 +203,7 @@ async def check_and_compact(
         offload_policy=offload_policy,
         token_cost=agent._token_cost,
         level=agent._effective_level,
+        source_prefix=source_prefix,
     )
 
     compacted = await agent._context.auto_compact(
@@ -276,6 +284,13 @@ async def precheck_and_compact(
         )
 
     compaction_llm = agent._compaction_service.llm or agent.llm
+    is_subagent = bool(getattr(agent, "_is_subagent", False))
+    agent_name = getattr(agent, "name", None)
+    source_prefix = (
+        f"subagent:{agent_name}"
+        if is_subagent and agent_name
+        else None
+    )
     policy = SelectiveCompactionPolicy(
         threshold=threshold,
         llm=compaction_llm,
@@ -284,6 +299,7 @@ async def precheck_and_compact(
         offload_policy=offload_policy,
         token_cost=agent._token_cost,
         level=agent._effective_level,
+        source_prefix=source_prefix,
     )
 
     compacted = await agent._context.auto_compact(

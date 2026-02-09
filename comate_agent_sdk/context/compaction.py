@@ -132,6 +132,7 @@ class SelectiveCompactionPolicy:
     offload_policy: OffloadPolicy | None = None
     token_cost: TokenCost | None = None
     level: LLMLevel | None = None
+    source_prefix: str | None = None
 
     tool_blocks_keep_recent: int = 8
     tool_call_threshold: int = 500
@@ -643,7 +644,15 @@ class SelectiveCompactionPolicy:
         if not conversation_messages:
             return False, "no_messages"
 
-        service = CompactionService(llm=self.llm, token_cost=self.token_cost)
+        usage_source = "compaction"
+        if self.source_prefix:
+            usage_source = f"{self.source_prefix}:compaction"
+
+        service = CompactionService(
+            llm=self.llm,
+            token_cost=self.token_cost,
+            usage_source=usage_source,
+        )
         try:
             result = await service.compact(
                 conversation_messages,

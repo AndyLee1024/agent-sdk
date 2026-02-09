@@ -29,6 +29,7 @@ class SystemToolContext:
     project_root: Path
     session_id: str = "default"
     session_root: Path | None = None
+    subagent_name: str | None = None
     token_cost: TokenCost | None = None
     llm_levels: dict[str, "BaseChatModel"] | None = None
     agent_context: "ContextIR | None" = None
@@ -61,6 +62,7 @@ def bind_system_tool_context(
     project_root: Path,
     session_id: str = "default",
     session_root: Path | None = None,
+    subagent_name: str | None = None,
     token_cost: TokenCost | None = None,
     llm_levels: dict[str, "BaseChatModel"] | None = None,
     agent_context: "ContextIR | None" = None,
@@ -72,6 +74,7 @@ def bind_system_tool_context(
             project_root=root,
             session_id=session_id,
             session_root=session_root,
+            subagent_name=subagent_name,
             token_cost=token_cost,
             llm_levels=llm_levels,
             agent_context=agent_context,

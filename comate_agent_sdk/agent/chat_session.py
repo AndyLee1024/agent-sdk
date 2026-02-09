@@ -630,8 +630,17 @@ class ChatSession:
             message_source=message_source,
         )
 
-    async def get_usage(self) -> UsageSummary:
+    async def get_usage(
+        self,
+        *,
+        model: str | None = None,
+        source_prefix: str | None = None,
+    ) -> UsageSummary:
         """获取会话的 token 使用统计。
+
+        Args:
+            model: 可选，仅统计指定模型
+            source_prefix: 可选，仅统计 source 以该前缀开头的记录
 
         Returns:
             UsageSummary: Token 使用统计，包含总 tokens、成本、按模型/档位的统计
@@ -640,7 +649,10 @@ class ChatSession:
             - 即使 session 已关闭，仍可调用此方法获取最终统计
             - 统计包括主 Agent 和所有 Subagent 的 token 使用
         """
-        return await self._agent.get_usage()
+        return await self._agent.get_usage(
+            model=model,
+            source_prefix=source_prefix,
+        )
 
     async def get_context_info(self):
         """获取当前会话的上下文使用情况

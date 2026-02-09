@@ -942,11 +942,14 @@ async def WebFetch(
             timeout=_WEBFETCH_LLM_TIMEOUT_SECONDS,
         )
         if completion.usage:
+            source = "webfetch"
+            if ctx.subagent_name:
+                source = f"subagent:{ctx.subagent_name}:webfetch"
             ctx.token_cost.add_usage(
                 str(llm.model),
                 completion.usage,
                 level="LOW",
-                source="webfetch",
+                source=source,
             )
         return completion.text
     except asyncio.TimeoutError:

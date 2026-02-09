@@ -347,10 +347,14 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
 
     compaction_config = runtime.compaction if runtime.compaction is not None else CompactionConfig()
     compaction_llm = _resolve_compaction_llm(runtime, compaction_config)
+    compaction_usage_source = "compaction"
+    if runtime._is_subagent and runtime.name:
+        compaction_usage_source = f"subagent:{runtime.name}:compaction"
     runtime._compaction_service = CompactionService(
         config=compaction_config,
         llm=compaction_llm,
         token_cost=runtime._token_cost,
+        usage_source=compaction_usage_source,
     )
 
     runtime._setup_tool_strategy()
