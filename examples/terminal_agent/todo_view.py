@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from rich.console import Console
+from rich.console import Group, RenderableType
+from rich.text import Text
 
 from terminal_agent.models import TodoItemState
 
 _ALLOWED_STATUS = {"pending", "in_progress", "completed"}
 _ALLOWED_PRIORITY = {"high", "medium", "low"}
+_MAX_VISIBLE_ITEMS = 6
 
 
 def _as_todos(args: dict[str, Any]) -> list[dict[str, Any]] | None:
@@ -63,10 +65,26 @@ def _priority_style(priority: str) -> str:
     return "white"
 
 
-class TodoDiffView:
-    def __init__(self, console: Console) -> None:
-        self._console = console
+def _status_label(status: str) -> str:
+    if status == "completed":
+        return "completed"
+    if status == "in_progress":
+        return "in_progress"
+    return "pending"
+
+
+def _priority_label(priority: str) -> str:
+    if priority in _ALLOWED_PRIORITY:
+        return priority
+    return "medium"
+
+
+class TodoStateStore:
+    """Track latest todo snapshot and expose a renderable bottom layer."""
+
+    def __init__(self) -> None:
         self._current: list[TodoItemState] = []
+        self._last_change: str = ""
 
     def maybe_render_update(self, tool_name: str, args: dict[str, Any]) -> bool:
         if tool_name != "TodoWrite":
@@ -74,33 +92,82 @@ class TodoDiffView:
         todos = extract_todos(args)
         if todos is None:
             return False
-        self.render_update(todos)
+        self.update(todos)
         return True
 
-    def render_update(self, todos: list[TodoItemState]) -> None:
+    def update(self, todos: list[TodoItemState]) -> None:
         previous_by_content = {todo.content: todo for todo in self._current}
-        counts = Counter(todo.status for todo in todos)
-        summary = (
-            f"pending={counts.get('pending', 0)} | "
-            f"in_progress={counts.get('in_progress', 0)} | "
-            f"completed={counts.get('completed', 0)}"
-        )
-        self._console.print(f"[cyan]🗂 TODO Updated ({summary})[/]")
+        self._last_change = self._compute_last_change(previous_by_content, todos)
+        self._current = list(todos)
+
+    def _compute_last_change(
+        self,
+        previous_by_content: dict[str, TodoItemState],
+        todos: list[TodoItemState],
+    ) -> str:
         for todo in todos:
             prev = previous_by_content.get(todo.content)
-            change = "[green]+ new[/]"
-            if prev is not None and prev.status != todo.status:
-                change = f"[yellow]~ {prev.status} -> {todo.status}[/]"
-            elif prev is not None and prev.priority != todo.priority:
-                change = f"[yellow]~ priority {prev.priority} -> {todo.priority}[/]"
-            elif prev is not None:
-                change = "[dim]= unchanged[/]"
+            if prev is None:
+                return f"+ 新增: {todo.content} ({_status_label(todo.status)})"
+            if prev.status != todo.status:
+                return (
+                    f"~ 状态: {todo.content} "
+                    f"{_status_label(prev.status)} -> {_status_label(todo.status)}"
+                )
+            if prev.priority != todo.priority:
+                return (
+                    f"~ 优先级: {todo.content} "
+                    f"{_priority_label(prev.priority)} -> {_priority_label(todo.priority)}"
+                )
+        if previous_by_content and not todos:
+            return "~ 清空 todo 列表"
+        return "= 无变化"
 
-            content = todo.content
-            if todo.status == "completed":
-                content = f"[strike]{content}[/strike]"
-            self._console.print(
-                f"  {_status_chip(todo.status)} {content} "
-                f"[{_priority_style(todo.priority)}]({todo.priority})[/] {change}"
-            )
-        self._current = list(todos)
+    def _summary_counts(self) -> Counter[str]:
+        return Counter(todo.status for todo in self._current)
+
+    def has_open_todos(self) -> bool:
+        counts = self._summary_counts()
+        return counts.get("pending", 0) > 0 or counts.get("in_progress", 0) > 0
+
+    def renderable(self) -> RenderableType | None:
+        if not self._current:
+            return None
+        if not self.has_open_todos():
+            return None
+
+        counts = self._summary_counts()
+        summary = Text.assemble(
+            ("🗂 TODO  ", "bold cyan"),
+            ("pending=", "cyan"),
+            (str(counts.get("pending", 0)), "bold cyan"),
+            (" | in_progress=", "cyan"),
+            (str(counts.get("in_progress", 0)), "bold cyan"),
+            (" | completed=", "cyan"),
+            (str(counts.get("completed", 0)), "bold cyan"),
+        )
+
+        open_items = [todo for todo in self._current if todo.status != "completed"]
+        done_items = [todo for todo in self._current if todo.status == "completed"]
+        display_items = (open_items + done_items)[:_MAX_VISIBLE_ITEMS]
+
+        lines: list[RenderableType] = [summary]
+        for todo in display_items:
+            line = Text()
+            line.append("  ")
+            line.append_text(Text.from_markup(_status_chip(todo.status)))
+            line.append(" ")
+            content_style = "strike" if todo.status == "completed" else ""
+            line.append(todo.content, style=content_style)
+            line.append(" ")
+            line.append(f"({_priority_label(todo.priority)})", style=_priority_style(todo.priority))
+            lines.append(line)
+
+        hidden = len(self._current) - len(display_items)
+        if hidden > 0:
+            lines.append(Text(f"  （还有 {hidden} 项未显示）", style="dim"))
+
+        if self._last_change:
+            lines.append(Text(f"最近变更: {self._last_change}", style="dim"))
+
+        return Group(*lines)

@@ -11,40 +11,13 @@ Guiding principle:
 # Bash
 # -----------------------------
 
-BASH_USAGE_RULES = """Executes non-interactive shell commands with argv-style args and optional timeout/cwd/env.
+BASH_USAGE_RULES = """Execute shell command. Returns stdout, stderr, exit_code (0 means success).
 
-Core policy:
-1) Prefer specialized tools over Bash:
-   - Search: Grep / Glob / Task
-   - List dirs: LS
-   - Read files: Read
-   - Modify files: Edit / MultiEdit / Write
+Critical: Use args as list: ['git', 'status'] NOT string 'git status'
+For shell features (pipes, &&, etc): use ['sh', '-c', 'command here']
 
-2) Hard bans inside Bash (do NOT use these as substitutes for tools):
-   - grep, find
-   - cat, head, tail
-   - ls
-
-3) Quoting & paths:
-   - Always quote paths with spaces using double quotes.
-   - Prefer absolute paths; avoid 'cd' unless the user explicitly asks.
-
-4) Output & safety:
-   - Design commands to be concise; large outputs may be truncated.
-   - When issuing multiple commands, separate with ';' or '&&' (no newlines).
-   - Standardized output includes a short summary; when truncated/error, follow "Recommended next step".
-
-EXCEPTION: You MAY use ripgrep `rg` in Bash ONLY if ALL conditions are met:
-A) Scope is already narrowed to specific files/dirs (via Glob/LS). Do NOT run `rg` blindly at repo root.
-B) Output is bounded: MUST include --max-count (or an equivalent hard bound).
-C) Stable, parseable format: MUST include --line-number --no-heading --color=never
-D) `rg` is for locating matches only (file + line numbers). Use Read to view content.
-E) If you expect many matches (broad terms like "TODO", "error"), do NOT use `rg`; use Grep tool instead.
-
-Good:
-  rg --line-number --no-heading --color=never --max-count 50 "foo|bar" src/
-Bad:
-  rg "TODO" .
+Set cwd to run command in specific directory (default: project root).
+Set timeout_ms to prevent hanging commands (default: 30000ms).
 """
 
 
@@ -52,79 +25,34 @@ Bad:
 # Read / Write / Edit
 # -----------------------------
 
-READ_USAGE_RULES = """Reads a file from the local filesystem (text, images, PDFs, notebooks).
+READ_USAGE_RULES = """Read text file with line numbers. Use to understand file content before editing.
 
-Policy:
-- Assume file paths provided by the user are valid. If the file does not exist, an error is returned.
-- file_path supports absolute and relative paths (relative resolves against workspace first, then project root).
+For large files: automatically returns has_more=true and next_offset_line for pagination.
 
-Required parameters:
-- ALWAYS provide offset_line and limit_lines (do NOT use offset/limit).
-- offset_line >= 0
-- limit_lines in [1, 5000] (default 500)
-
-Best practices:
-- Default read: offset_line=0, limit_lines=500
-- For large/unfamiliar codebases: prefer Grep → Read (use Grep line numbers to choose offset_line).
-- Batch reads when multiple files are likely relevant.
-
-Output characteristics:
-- Returned with line numbers (cat -n style), starting at 1.
-- Lines longer than 2000 chars may be truncated.
-- PDFs are processed page-by-page; images are presented visually.
-- Response is standardized as title + line-range summary + body.
-- When truncated or error, a "Recommended next step (token-efficient)" footer is included; prefer those actions.
+format='line_numbers': shows line numbers (recommended for code)
+format='raw': plain text without line numbers
 """
 
 
-WRITE_USAGE_RULES = """Writes a file to the local filesystem (overwrites if exists).
+WRITE_USAGE_RULES = """Create new file or overwrite/append to existing file.
 
-Rules:
-- If the target file already exists, you MUST Read it earlier in the conversation before Write.
-- Prefer editing existing files; do not create new files unless explicitly required by the user.
-- Do NOT create documentation (*.md/README) unless explicitly requested.
-- Avoid emojis in files unless the user explicitly asks.
-- Output includes concise write receipt (operation/bytes/hash/path).
-- Use Read immediately after write when validation is needed.
+For existing files: Must Read first.
+mode='overwrite' (default): replaces entire file
+mode='append': adds content to end of file
 """
 
 
-EDIT_USAGE_RULES = """Performs an exact string replacement in a file.
+EDIT_USAGE_RULES = """Replace exact string in file. Must Read file first.
 
-Preconditions:
-- You MUST have used Read at least once in this conversation; otherwise Edit must fail.
-
-Matching rules:
-- old_string must match file content EXACTLY (including whitespace/indentation).
-- Do NOT include any line-number prefix from Read output in old_string/new_string.
-- If old_string is not unique, either enlarge context to make it unique or use replace_all.
-
-Policy:
-- Prefer editing existing files; do not create new files unless explicitly required.
-- Avoid emojis unless the user explicitly asks.
-- Output includes replacement summary and file hashes for verification.
+Critical: old_string must match EXACTLY (including whitespace/indentation).
+If string appears multiple times: either add more context to old_string OR use replace_all=true.
 """
 
 
-MULTIEDIT_USAGE_RULES = """Applies multiple exact string replacements to a single file atomically.
+MULTIEDIT_USAGE_RULES = """Make multiple replacements in one file atomically (all succeed or all fail). Must Read first.
 
-When to use:
-- Prefer MultiEdit over Edit when you need multiple changes in one file.
-
-Preconditions:
-- Read the file first (same conversation), otherwise MultiEdit must fail.
-- file_path MUST be an absolute path (starts with '/').
-
-Edits behavior:
-- Edits apply sequentially; each edit sees the result of the previous edit.
-- Atomic: if any edit fails, none are applied.
-- Each edit requires exact match rules identical to Edit.
-
-Tips:
-- Use replace_all for systematic renames.
-- Ensure earlier edits do not invalidate later matches.
-- Avoid emojis unless the user explicitly asks.
-- Output includes aggregate replacement summary and before/after hashes.
+Each old_string must be unique in the file OR set replace_all=true.
+To create new file: first edit with old_string='', new_string='full content'
 """
 
 
@@ -132,53 +60,35 @@ Tips:
 # Search / List
 # -----------------------------
 
-GLOB_USAGE_RULES = """Fast file pattern matching across any codebase size.
+GLOB_USAGE_RULES = """Find files by name/path pattern. Use when you need to LOCATE files, not search their content.
 
-Usage:
-- Provide glob patterns like "**/*.py" or "src/**/*.ts"
-- Returns matching file paths (sorted by modification time)
+When to use:
+- Finding files by name: 'config.json', 'test_*.py'
+- Listing all files of a type: '**/*.ts' (recursive), '*.md' (current dir)
+- Exploring project structure
 
-Guidance:
-- Use Glob when you know name/path patterns.
-- For content search use Grep.
-- For open-ended multi-round exploration, use Task (if available).
-- Batch multiple globs together when useful.
-- Large results are truncated; use footer suggestions (pagination/artifact Read) instead of full dumps.
+Don't use for: Searching file content (use Grep instead)
 """
 
 
-GREP_USAGE_RULES = """Content search tool built on ripgrep (preferred default for searching).
+GREP_USAGE_RULES = """Search file CONTENT using regex patterns. Use when you need to find WHERE code/text appears.
 
-Default policy:
-- Use Grep for searches. Do NOT use `grep` or `find` in Bash.
-- Do NOT use `rg` in Bash by default.
+When to use:
+- Finding function definitions, class names, API calls
+- Locating error messages, TODO comments, specific logic
+- Understanding where a concept is implemented
 
-Exception:
-- `rg` in Bash is allowed ONLY under the strict conditions defined in BASH_USAGE_RULES.
+Key practice: Combine variations with '|' for better coverage
+Example: 'cache|缓存|cached|caching' not just 'cache'
 
-Capabilities:
-- Regex supported (ripgrep syntax)
-- Filter scope with glob or type
-- Output modes: files_with_matches (default), content, count
-- Multiline: set multiline=true for cross-line patterns (e.g. struct blocks)
-
-Search strategy (performance-critical):
-- Prefer ONE Grep call with regex alternation (|) over many sequential calls.
-- Include naming variants (PascalCase|snake_case|camelCase) and nearby synonyms when relevant.
-- When output is truncated or lower-bound, follow footer suggestions (refine pattern/path/mode or Read artifact).
+Don't use for: Finding files by name (use Glob instead)
 """
 
 
-LS_USAGE_RULES = """Lists files/directories under a path.
+LS_USAGE_RULES = """List files and directories in a path (like 'ls' command). Returns name, type, size, mtime.
 
-Rules:
-- path MUST be an absolute path (starts with '/').
-- Use ignore (glob patterns) to exclude noisy paths if needed.
-
-Guidance:
-- Prefer Glob/Grep when you know what you're looking for.
-- Use LS for quick directory shape confirmation and parent-dir verification before creating files/dirs.
-- For large directories, use truncated output + footer guidance; avoid repeatedly requesting huge listings.
+Use for: Exploring what's inside a specific directory
+Don't use for: Finding files by pattern across subdirectories (use Glob instead)
 """
 
 
@@ -186,7 +96,7 @@ Guidance:
 # Todo / Task list
 # -----------------------------
 
-TODO_USAGE_RULES = """Creates and updates a structured todo list for the current session.
+TODO_USAGE_RULES = """Create or update task list for current session to track your work progress.
 
 When to use:
 - Multi-step work (>= 3 distinct actions), non-trivial refactors, or multi-file changes.
@@ -197,18 +107,8 @@ When to use:
 When NOT to use:
 - Single trivial step, purely informational answers, or a one-off command the user requested.
 
-Operational rules:
-- States: pending, in_progress, completed
-- Keep ONLY ONE task in_progress at a time.
-- Mark tasks completed immediately when truly done.
-- If blocked, keep task in_progress and add a new task describing the blocker/resolution.
-- Remove tasks that become irrelevant.
-
-Task schema:
-- id: string (unique)
-- content: string (actionable)
-- status: pending|in_progress|completed
-- priority: high|medium|low (default medium)
+Workflow: Set status to 'in_progress' when starting a task, 'completed' when done.
+Update the list after completing each task to stay organized.
 """
 
 
@@ -216,20 +116,12 @@ Task schema:
 # Web Fetch
 # -----------------------------
 
-WEBFETCH_USAGE_RULES = """Fetches content from a URL, converts HTML to markdown, and processes it with an AI model.
+WEBFETCH_USAGE_RULES = """Fetch webpage, convert to markdown, and summarize with small LLM based on your prompt.
 
-Usage:
-- Inputs: url + prompt (what to extract/summarize)
-- Read-only; does not modify files.
-- Results may be summarized if content is very large.
+Returns summary_text (LLM's response to your prompt) + artifact (full markdown).
+Result is cached for 1 hour.
 
-Rules:
-- Prefer MCP-provided web fetch tools (named like "mcp__*") if available.
-- URL must be valid; http is upgraded to https automatically.
-- If redirected to a different host, re-run WebFetch with the redirected URL when instructed.
-
-Caching:
-- Includes a short-lived cache to speed up repeated fetches.
+Use when: You need webpage content analyzed or specific info extracted.
 """
 
 

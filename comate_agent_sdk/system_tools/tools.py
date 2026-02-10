@@ -696,7 +696,7 @@ def _sort_ls(entries: list[dict[str, Any]], sort_by: str) -> list[dict[str, Any]
 
 
 @tool(
-    "Executes a command using argv args with optional timeout. Returns stdout/stderr and exit code.",
+    "Run command. args as list: ['git', 'status'] NOT string. exit_code 0=success. Set cwd if needed. For pipes: ['sh', '-c', 'cmd1 | cmd2']",
     name="Bash",
     usage_rules=BASH_USAGE_RULES,
 )
@@ -818,7 +818,7 @@ async def Bash(
     )
 
 
-@tool("Reads a text file with line numbers.", name="Read", usage_rules=READ_USAGE_RULES)
+@tool("Read file with line numbers. For large files: use offset_line/limit_lines to read in chunks.", name="Read", usage_rules=READ_USAGE_RULES)
 async def Read(
     params: ReadInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -911,7 +911,7 @@ async def Read(
     )
 
 
-@tool("Writes content to a file.", name="Write", usage_rules=WRITE_USAGE_RULES)
+@tool("Create file or overwrite/append. Existing files: MUST Read first. mode='append' to add, 'overwrite' to replace all.", name="Write", usage_rules=WRITE_USAGE_RULES)
 async def Write(
     params: WriteInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1035,7 +1035,7 @@ async def Edit(
 
 
 @tool(
-    "Make multiple edits to a single file atomically (all succeed or none).",
+    "Make multiple find-replace edits to one file atomically (all or nothing). Must Read file first. Each old_string must be unique (or set replace_all=true). Create file: first edit with old_string='', new_string='content'",
     name="MultiEdit",
     usage_rules=MULTIEDIT_USAGE_RULES,
 )
@@ -1133,7 +1133,7 @@ async def MultiEdit(
     )
 
 
-@tool("Find files matching a glob pattern.", name="Glob", usage_rules=GLOB_USAGE_RULES)
+@tool("Find files by name (not content). Use '**/*.ext' for recursive search.", name="Glob", usage_rules=GLOB_USAGE_RULES)
 async def Glob(
     params: GlobInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1325,7 +1325,7 @@ def _grep_fallback(
     )
 
 
-@tool("Search file contents with regex (ripgrep).", name="Grep", usage_rules=GREP_USAGE_RULES)
+@tool("Search files with regex. Always use '|' for variations: 'cache|缓存|cached' not 'cache'.Params: pattern, path, glob, type, A/B (context lines), output_mode, head_limit.", name="Grep", usage_rules=GREP_USAGE_RULES)
 async def Grep(
     params: GrepInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1575,7 +1575,7 @@ async def Grep(
     return ok(data=data, meta=_grep_meta())
 
 
-@tool("Lists files and directories in a given path.", name="LS", usage_rules=LS_USAGE_RULES)
+@tool("List directory contents (like 'ls'). Use Glob for finding files by pattern.", name="LS", usage_rules=LS_USAGE_RULES)
 async def LS(
     params: LSInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1658,7 +1658,7 @@ async def LS(
     )
 
 
-@tool("Create and manage a structured task list for the current session.", name="TodoWrite", usage_rules=TODO_USAGE_RULES)
+@tool("Track tasks. Status: pending → in_progress → completed. Update after each task.", name="TodoWrite", usage_rules=TODO_USAGE_RULES)
 async def TodoWrite(
     params: TodoWriteInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1734,7 +1734,7 @@ async def TodoWrite(
         return err("INTERNAL", f"TodoWrite failed: {exc}")
 
 
-@tool("Fetch a URL, convert to markdown, and process with a small model.", name="WebFetch", usage_rules=WEBFETCH_USAGE_RULES)
+@tool("Fetch webpage → markdown → LLM summary. Returns summary + full markdown artifact. Cached 1hr. Prefer MCP-provided web fetch(or scrape) tools (named like \"mcp__*\") if available.", name="WebFetch", usage_rules=WEBFETCH_USAGE_RULES)
 async def WebFetch(
     params: WebFetchInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1881,7 +1881,7 @@ async def WebFetch(
 
 
 @tool(
-    "Use this tool when you need to ask the user questions during execution.",
+    "Use this tool ONLY during active task execution when you need structured input (requirements, choices, clarification). Never use for: greetings, casual chat, or when no task has been assigned. If uncertain, respond conversationally instead.",
     name="AskUserQuestion",
     usage_rules=ASK_USER_QUESTION_USAGE_RULES,
 )

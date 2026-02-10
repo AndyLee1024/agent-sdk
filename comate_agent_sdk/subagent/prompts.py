@@ -7,7 +7,9 @@ from comate_agent_sdk.subagent.models import AgentDefinition
 SUBAGENT_STRATEGY_PROMPT = """
 <subagent>
 {subagent_list}
-</subagent>"""
+</subagent>
+
+"""
 
 
 def generate_subagent_prompt(agents: list[AgentDefinition]) -> str:

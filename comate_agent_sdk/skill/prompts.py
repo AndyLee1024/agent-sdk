@@ -6,8 +6,7 @@
 
 from comate_agent_sdk.skill.models import SkillDefinition
 
-SKILL_STRATEGY_PROMPT = """
-<skills>
+SKILL_STRATEGY_PROMPT = """<skills>
 {skill_list}
 </skills>
 
@@ -28,8 +27,7 @@ SKILL_STRATEGY_PROMPT = """
   - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.
   - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue.
-</skill_use>
-"""
+</skill_use>"""
 
 
 def generate_skill_prompt(skills: list[SkillDefinition]) -> str:

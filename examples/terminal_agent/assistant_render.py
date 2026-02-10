@@ -4,13 +4,11 @@ import re
 import unicodedata
 from typing import Literal
 
-from rich.console import Group
-from rich.console import Console
-from rich.live import Live
+from rich.console import Group, RenderableType
 from rich.markdown import Markdown
 from rich.text import Text
 
-from terminal_agent.message_style import ASSISTANT_PREFIX, ASSISTANT_PREFIX_STYLE, print_assistant_gap
+from terminal_agent.message_style import ASSISTANT_PREFIX, ASSISTANT_PREFIX_STYLE
 
 _LEADING_NOISE_CHARS = frozenset(
     {
@@ -88,15 +86,15 @@ def _is_ambiguous_block_start(first_line: str) -> bool:
 
 
 class AssistantStreamRenderer:
-    """Render assistant output with segment-aware real-time markdown."""
+    """Turn-scoped assistant renderer that exposes renderables for a parent Live layout."""
 
-    def __init__(self, console: Console) -> None:
-        self._console = console
+    def __init__(self) -> None:
         self._trim_segment_leading_noise_pending = True
-        self._has_turn_output = False
         self._segment_chunks: list[str] = []
         self._segment_mode: _SegmentMode | None = None
-        self._live: Live | None = None
+        self._blocks: list[RenderableType] = []
+        self._last_block_external = False
+        self._pending_gap_before_next_segment = False
 
     def _reset_segment_state(self) -> None:
         self._trim_segment_leading_noise_pending = True
@@ -104,14 +102,10 @@ class AssistantStreamRenderer:
         self._segment_mode = None
 
     def start_turn(self) -> None:
-        self._stop_live_segment(reset_segment=True)
-        self._has_turn_output = False
-
-    def _ensure_live_segment(self) -> None:
-        if self._live is not None:
-            return
-        self._live = Live(Text(""), console=self._console, refresh_per_second=12)
-        self._live.start()
+        self._blocks = []
+        self._last_block_external = False
+        self._pending_gap_before_next_segment = False
+        self._reset_segment_state()
 
     def _resolve_segment_mode(self, content: str) -> _SegmentMode | None:
         first_line = _first_visible_line(content)
@@ -123,8 +117,9 @@ class AssistantStreamRenderer:
             return "markdown_only"
         return "prefixed_plain_first_line"
 
-    def _build_renderable(self, content: str):
-        if self._segment_mode == "markdown_only":
+    @staticmethod
+    def _build_segment_renderable(mode: _SegmentMode, content: str) -> RenderableType:
+        if mode == "markdown_only":
             return Markdown(content, code_theme="monokai", hyperlinks=True)
 
         first_line, remainder = _split_first_line(content)
@@ -139,11 +134,13 @@ class AssistantStreamRenderer:
             Markdown(remainder, code_theme="monokai", hyperlinks=True),
         )
 
-    def _render_segment(self) -> None:
-        if self._live is None:
-            return
-        content = "".join(self._segment_chunks)
-        self._live.update(self._build_renderable(content), refresh=True)
+    @staticmethod
+    def _is_gap_block(renderable: RenderableType) -> bool:
+        return isinstance(renderable, Text) and not renderable.plain
+
+    def _append_gap_if_needed(self) -> None:
+        if self._blocks and not self._is_gap_block(self._blocks[-1]):
+            self._blocks.append(Text(""))
 
     def _render_unresolved_segment_if_needed(self) -> None:
         if not self._segment_chunks or self._segment_mode is not None:
@@ -151,31 +148,30 @@ class AssistantStreamRenderer:
         # Segment ended before ambiguous markdown prefix was disambiguated.
         # Fall back to visible plain-text prefixed rendering to avoid content loss.
         self._segment_mode = "prefixed_plain_first_line"
-        self._ensure_live_segment()
-        self._render_segment()
-        self._has_turn_output = True
 
     def _flush_active_segment(self, *, inter_block_gap: bool) -> bool:
         self._render_unresolved_segment_if_needed()
         content = "".join(self._segment_chunks)
-        self._stop_live_segment(reset_segment=True)
-        if not content:
+        mode = self._segment_mode
+        self._reset_segment_state()
+        if not content or mode is None:
             return False
-        if not content.endswith("\n"):
-            self._console.print()
+
+        self._blocks.append(self._build_segment_renderable(mode, content))
+        self._last_block_external = False
         if inter_block_gap:
-            print_assistant_gap(self._console)
+            self._append_gap_if_needed()
         return True
 
-    def _stop_live_segment(self, *, reset_segment: bool) -> None:
-        if self._live is None:
-            if reset_segment:
-                self._reset_segment_state()
+    def append_external_lines(self, lines: list[tuple[str, str]]) -> None:
+        if not lines:
             return
-        self._live.stop()
-        self._live = None
-        if reset_segment:
-            self._reset_segment_state()
+        self._flush_active_segment(inter_block_gap=True)
+        if not self._last_block_external:
+            self._append_gap_if_needed()
+        for content, style in lines:
+            self._blocks.append(Text(content, style=style))
+        self._last_block_external = True
 
     def append_text(self, text: str) -> None:
         if self._trim_segment_leading_noise_pending:
@@ -186,28 +182,35 @@ class AssistantStreamRenderer:
         if not text:
             return
 
+        if not self._segment_chunks and self._pending_gap_before_next_segment:
+            self._append_gap_if_needed()
+            self._pending_gap_before_next_segment = False
+
         self._segment_chunks.append(text)
         content = "".join(self._segment_chunks)
         if self._segment_mode is None:
             self._segment_mode = self._resolve_segment_mode(content)
-            if self._segment_mode is None:
-                return
-
-        self._ensure_live_segment()
-        self._render_segment()
-        self._has_turn_output = True
+        self._last_block_external = False
 
     def insert_gap_before_next_segment(self) -> None:
-        if self._live is not None or self._segment_chunks:
+        if self._segment_chunks:
             return
-        print_assistant_gap(self._console)
+        if not self._blocks:
+            return
+        self._pending_gap_before_next_segment = True
 
     def flush_line_for_external_event(self) -> None:
         self._flush_active_segment(inter_block_gap=True)
 
     def finalize_turn(self) -> None:
         self._flush_active_segment(inter_block_gap=False)
-        if not self._has_turn_output:
-            return
-        print_assistant_gap(self._console)
-        self._has_turn_output = False
+        self._pending_gap_before_next_segment = False
+
+    def renderable(self) -> RenderableType:
+        blocks = list(self._blocks)
+        content = "".join(self._segment_chunks)
+        if content and self._segment_mode is not None:
+            blocks.append(self._build_segment_renderable(self._segment_mode, content))
+        if not blocks:
+            return Text("")
+        return Group(*blocks)

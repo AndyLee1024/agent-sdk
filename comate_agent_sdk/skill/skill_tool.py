@@ -30,10 +30,21 @@ def create_skill_tool(skills: list[SkillDefinition]) -> Tool:
     active_skills = [s for s in skills if not s.disable_model_invocation]
     logger.debug(f"Creating Skill tool with {len(active_skills)} active skill(s)")
 
-    # 简洁的工具描述（详细使用规则在 system_prompt 中）
-    description = "Execute a skill by name. Invoke with skill_name to load its full instructions. See system prompt for available skills and usage rules."
+    skill_usage_rule = """Load best practices for specific task types before execution.
 
-    @tool(description, name="Skill")
+When to use:
+- Before creating documents (docx, pptx, xlsx, pdf)
+- Before complex operations where domain-specific guidance exists
+- When available skills are listed in system prompt
+
+Workflow: Call Skill first → read returned instructions → execute task following best practices
+Available skills are listed in the system prompt under <skills>.
+    """
+
+    # 简洁的工具描述（详细使用规则在 system_prompt 中）
+    description = "Load task-specific best practices before execution. Check <skills> for list. "
+
+    @tool(description, name="Skill", usage_rules=skill_usage_rule)
     async def Skill(skill_name: str) -> str:
         """调用 Skill
 

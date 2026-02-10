@@ -1,18 +1,16 @@
 from __future__ import annotations
 
 import json
-import logging
 import time
+from collections import deque
 from typing import Any
 
-from rich.console import Console
-from rich.live import Live
+from rich.console import RenderableType
+from rich.panel import Panel
 from rich.text import Text
 
 from terminal_agent.models import ToolRunState
 from terminal_agent.todo_view import extract_todos
-
-logger = logging.getLogger("terminal_agent.tool_view")
 
 _PULSE_GLYPHS: tuple[str, ...] = ("◐", "◓", "◑", "◒")
 _HIDDEN_ARG_TOOLS: frozenset[str] = frozenset({"askuserquestion"})
@@ -20,7 +18,7 @@ _TASK_PROMPT_FALLBACK_LEN = 40
 _SWEEP_SPEED_MULTIPLIER = 2
 _MAX_FANCY_TASKS = 2
 _MAX_FANCY_LINE_LEN = 100
-_DEFAULT_TARGET_FPS = 8
+_MAX_ACTIVITY_LINES = 8
 
 
 def _truncate(content: str, max_len: int = 280) -> str:
@@ -184,42 +182,35 @@ def summarize_tool_args(tool_name: str, args: dict[str, Any]) -> str:
 
 
 class ToolEventView:
+    """Tool state tracker for loading layer + tool activity lines."""
+
     def __init__(
         self,
-        console: Console,
         *,
         fancy_progress_effect: bool = True,
-        target_fps: int = _DEFAULT_TARGET_FPS,
     ) -> None:
-        self._console = console
         self._state_by_id: dict[str, ToolRunState] = {}
         self._frame = 0
         self._latest_total_tokens = 0
         self._latest_tokens_by_source_prefix: dict[str, int] = {}
-        self._progress_live: Live | None = None
-        self._live_disabled = False
         self._live_suspended = False
         self._fancy_progress_effect = fancy_progress_effect
-        normalized_fps = max(4, min(int(target_fps), 24))
-        self._target_fps = normalized_fps
-        self._min_render_interval_seconds = 1.0 / float(normalized_fps)
-        self._last_render_monotonic = 0.0
-        self._render_dirty = False
+        self._activity_lines: deque[tuple[str, str]] = deque(maxlen=_MAX_ACTIVITY_LINES)
+
+    def reset_turn(self) -> None:
+        self._state_by_id.clear()
+        self._activity_lines.clear()
 
     def set_live_suspended(self, suspended: bool) -> None:
-        if self._live_suspended == suspended:
-            return
         self._live_suspended = suspended
-        if suspended:
-            self._stop_progress_live()
-        else:
-            self._mark_render_dirty()
-            self._render_if_needed(force=True)
 
-    def _next_pulse(self) -> str:
-        pulse = _PULSE_GLYPHS[self._frame % len(_PULSE_GLYPHS)]
-        self._frame += 1
-        return pulse
+    def _record_activity(self, content: str, style: str = "dim") -> None:
+        self._activity_lines.append((content, style))
+
+    def consume_activity_lines(self) -> list[tuple[str, str]]:
+        lines = list(self._activity_lines)
+        self._activity_lines.clear()
+        return lines
 
     @staticmethod
     def _task_title(state: ToolRunState) -> str:
@@ -228,63 +219,7 @@ class ToolEventView:
         return state.subagent_name or "Task"
 
     def _running_states(self) -> list[ToolRunState]:
-        return [
-            state
-            for state in self._state_by_id.values()
-            if state.status == "running"
-        ]
-
-    def _ensure_progress_live(self) -> None:
-        if self._live_disabled:
-            return
-        if self._progress_live is not None:
-            return
-        try:
-            self._progress_live = Live(
-                Text(""),
-                console=self._console,
-                transient=True,
-                refresh_per_second=self._target_fps,
-            )
-            self._progress_live.start()
-        except Exception as exc:
-            self._progress_live = None
-            self._live_disabled = True
-            logger.warning(f"工具进度 Live 启动失败，回退为普通输出: {exc}")
-
-    def _stop_progress_live(self) -> None:
-        if self._progress_live is None:
-            return
-        self._progress_live.stop()
-        self._progress_live = None
-
-    def _mark_render_dirty(self) -> None:
-        self._render_dirty = True
-
-    def _render_if_needed(self, *, force: bool = False, animate: bool = False) -> None:
-        if self._live_suspended:
-            return
-
-        should_try_render = force or self._render_dirty or animate
-        if not should_try_render:
-            return
-
-        now = time.monotonic()
-        if not force and (now - self._last_render_monotonic) < self._min_render_interval_seconds:
-            return
-
-        self._refresh_progress_live()
-        self._last_render_monotonic = now
-        self._render_dirty = False
-
-    def _should_use_fancy_effect(self, lines: list[str]) -> bool:
-        if not self._fancy_progress_effect:
-            return False
-        if len(lines) > _MAX_FANCY_TASKS:
-            return False
-        if any(len(line) > _MAX_FANCY_LINE_LEN for line in lines):
-            return False
-        return True
+        return [state for state in self._state_by_id.values() if state.status == "running"]
 
     def _running_line(self, state: ToolRunState, pulse: str, now: float) -> str:
         elapsed = _format_duration(now - state.started_at_monotonic)
@@ -297,45 +232,14 @@ class ToolEventView:
         )
         return f"{pulse} {state.tool_name}{summary_suffix} · 运行中 · {elapsed}"
 
-    def _render_progress_fallback(self, running_states: list[ToolRunState]) -> None:
-        now = time.monotonic()
-        for state in running_states:
-            pulse = self._next_pulse()
-            line = self._running_line(state, pulse, now)
-            self._console.print(f"[dim]{line}[/]")
-
-    def _refresh_progress_live(self) -> None:
-        if self._live_suspended:
-            self._stop_progress_live()
-            return
-        running_states = self._running_states()
-        if not running_states:
-            self._stop_progress_live()
-            return
-
-        self._ensure_progress_live()
-        if self._progress_live is None:
-            self._render_progress_fallback(running_states)
-            return
-
-        now = time.monotonic()
-        lines: list[str] = []
-        for idx, state in enumerate(running_states):
-            pulse = _PULSE_GLYPHS[(self._frame + idx) % len(_PULSE_GLYPHS)]
-            lines.append(self._running_line(state, pulse, now))
-
-        composed = Text()
-        use_fancy_effect = self._should_use_fancy_effect(lines)
-        phase = self._frame * _SWEEP_SPEED_MULTIPLIER
-        for idx, line in enumerate(lines):
-            if use_fancy_effect:
-                composed.append_text(_sweep_gradient_text(line, frame=phase + idx * 5))
-            else:
-                composed.append(line, style="dim")
-            if idx < len(lines) - 1:
-                composed.append("\n")
-        self._frame += 1
-        self._progress_live.update(composed)
+    def _should_use_fancy_effect(self, lines: list[str]) -> bool:
+        if not self._fancy_progress_effect:
+            return False
+        if len(lines) > _MAX_FANCY_TASKS:
+            return False
+        if any(len(line) > _MAX_FANCY_LINE_LEN for line in lines):
+            return False
+        return True
 
     def has_running_tasks(self) -> bool:
         return any(state.status == "running" for state in self._state_by_id.values())
@@ -345,7 +249,7 @@ class ToolEventView:
             return
         if not self.has_running_tasks():
             return
-        self._render_if_needed(animate=True)
+        self._frame += 1
 
     def running_subagent_source_prefixes(self) -> set[str]:
         return {
@@ -364,8 +268,6 @@ class ToolEventView:
         state.task_tokens = 0
         state.last_progress_tokens = 0
         self._latest_tokens_by_source_prefix[state.subagent_source_prefix] = normalized
-        self._mark_render_dirty()
-        self._render_if_needed()
 
     def update_task_progress(
         self,
@@ -387,9 +289,6 @@ class ToolEventView:
             normalized_elapsed = max(float(elapsed_ms), 0.0)
             state.started_at_monotonic = time.monotonic() - (normalized_elapsed / 1000)
 
-        self._mark_render_dirty()
-        self._render_if_needed()
-
     def _task_token_text(self, state: ToolRunState) -> str:
         if state.subagent_source_prefix:
             return _format_tokens(state.task_tokens)
@@ -403,9 +302,7 @@ class ToolEventView:
         self._latest_total_tokens = max(int(total_tokens), 0)
         if source_totals:
             for source_prefix, source_tokens in source_totals.items():
-                self._latest_tokens_by_source_prefix[source_prefix] = max(
-                    int(source_tokens), 0
-                )
+                self._latest_tokens_by_source_prefix[source_prefix] = max(int(source_tokens), 0)
 
         for state in self._state_by_id.values():
             if state.status != "running" or not state.is_task or not state.subagent_source_prefix:
@@ -417,35 +314,25 @@ class ToolEventView:
             state.task_tokens = task_tokens
             state.last_progress_tokens = task_tokens
 
-        self._mark_render_dirty()
-        self._render_if_needed()
-
     def interrupt_running(self) -> None:
-        running_states = [
-            state for state in self._state_by_id.values() if state.status == "running"
-        ]
+        running_states = [state for state in self._state_by_id.values() if state.status == "running"]
         if not running_states:
-            self._stop_progress_live()
             self._state_by_id.clear()
             return
-
-        self._stop_progress_live()
         now = time.monotonic()
-
         for state in running_states:
             if state.is_task:
                 elapsed = _format_duration(now - state.started_at_monotonic)
                 token_text = self._task_token_text(state)
-                self._console.print(
-                    f"[yellow]⏹ {self._task_title(state)} · 已中断 · {elapsed} · {token_text}[/]"
+                self._record_activity(
+                    f"⏹ {self._task_title(state)} · 已中断 · {elapsed} · {token_text}",
+                    style="yellow",
                 )
             else:
                 summary_suffix = (
-                    f" {state.args_summary}"
-                    if state.args_summary and state.args_summary != "hidden"
-                    else ""
+                    f" {state.args_summary}" if state.args_summary and state.args_summary != "hidden" else ""
                 )
-                self._console.print(f"[yellow]⏹ {state.tool_name}{summary_suffix} 已中断[/]")
+                self._record_activity(f"⏹ {state.tool_name}{summary_suffix} 已中断", style="yellow")
         self._state_by_id.clear()
 
     def render_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
@@ -460,13 +347,8 @@ class ToolEventView:
         baseline_source_tokens = 0
         if is_task:
             subagent_name, task_desc = _extract_task_identity(args)
-            subagent_source_prefix = (
-                f"subagent:{subagent_name}:{tool_call_id}" if subagent_name else ""
-            )
-            baseline_source_tokens = self._latest_tokens_by_source_prefix.get(
-                subagent_source_prefix,
-                0,
-            )
+            subagent_source_prefix = f"subagent:{subagent_name}:{tool_call_id}" if subagent_name else ""
+            baseline_source_tokens = self._latest_tokens_by_source_prefix.get(subagent_source_prefix, 0)
 
         state = ToolRunState(
             tool_call_id=tool_call_id,
@@ -485,8 +367,9 @@ class ToolEventView:
             last_progress_tokens=0 if is_task else self._latest_total_tokens,
         )
         self._state_by_id[tool_call_id] = state
-        self._mark_render_dirty()
-        self._render_if_needed(force=True)
+
+        summary_suffix = f" {state.args_summary}" if state.args_summary and state.args_summary != "hidden" else ""
+        self._record_activity(f"→ {tool_name}{summary_suffix}", style="dim")
 
     def render_result(
         self,
@@ -498,32 +381,63 @@ class ToolEventView:
         state = self._state_by_id.pop(tool_call_id, None)
 
         if state and state.is_task:
-            self._mark_render_dirty()
-            self._render_if_needed(force=True)
             elapsed = _format_duration(time.monotonic() - state.started_at_monotonic)
             token_text = self._task_token_text(state)
             if is_error:
-                self._console.print(
-                    f"[red]✖ {self._task_title(state)} · 失败 · {elapsed} · {token_text}[/]"
-                )
                 preview = _truncate(str(result), 200)
-                self._console.print(f"[dim]  错误: {preview}[/]")
+                self._record_activity(
+                    f"✖ {self._task_title(state)} · 失败 · {elapsed} · {token_text}",
+                    style="red",
+                )
+                self._record_activity(f"  错误: {preview}", style="dim")
                 return
-            self._console.print(
-                f"[green]✓ {self._task_title(state)} · 完成 · {elapsed} · {token_text}[/]"
+            self._record_activity(
+                f"✓ {self._task_title(state)} · 完成 · {elapsed} · {token_text}",
+                style="green",
             )
             return
 
-        self._mark_render_dirty()
-        self._render_if_needed(force=True)
-
         args_summary = state.args_summary if state else ""
         summary_suffix = f" {args_summary}" if args_summary and args_summary != "hidden" else ""
-
         if is_error:
             preview = _truncate(str(result), 200)
-            self._console.print(f"[red]✖ {tool_name}{summary_suffix}[/]")
-            self._console.print(f"[dim]  错误: {preview}[/]")
+            self._record_activity(f"✖ {tool_name}{summary_suffix}", style="red")
+            self._record_activity(f"  错误: {preview}", style="dim")
             return
+        self._record_activity(f"✓ {tool_name}{summary_suffix}", style="green")
 
-        self._console.print(f"[green]✓ {tool_name}{summary_suffix}[/]")
+    def renderable(self) -> RenderableType | None:
+        if self._live_suspended:
+            return None
+
+        running_states = self._running_states()
+        if not running_states:
+            return None
+
+        now = time.monotonic()
+        lines = [
+            self._running_line(
+                state,
+                _PULSE_GLYPHS[(self._frame + idx) % len(_PULSE_GLYPHS)],
+                now,
+            )
+            for idx, state in enumerate(running_states)
+        ]
+
+        composed = Text()
+        use_fancy_effect = self._should_use_fancy_effect(lines)
+        phase = self._frame * _SWEEP_SPEED_MULTIPLIER
+        for idx, line in enumerate(lines):
+            if use_fancy_effect:
+                composed.append_text(_sweep_gradient_text(line, frame=phase + idx * 5))
+            else:
+                composed.append(line, style="dim")
+            if idx < len(lines) - 1:
+                composed.append("\n")
+
+        return Panel(
+            composed,
+            title="⏳ Loading",
+            border_style="blue",
+            padding=(0, 1),
+        )

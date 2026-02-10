@@ -314,75 +314,78 @@ async def run() -> None:
     )
     animator = SubmissionAnimator(animation_console)
 
-    while True:
-        try:
-            user_input = await prompt_session.prompt_async([("class:prompt", "❯ ")])
-        except (EOFError, KeyboardInterrupt):
-            break
+    try:
+        while True:
+            try:
+                user_input = await prompt_session.prompt_async([("class:prompt", "❯ ")])
+            except (EOFError, KeyboardInterrupt):
+                break
 
-        text = user_input.strip()
-        if not text:
-            continue
+            text = user_input.strip()
+            if not text:
+                continue
 
-        if text == "/help":
-            _help_text()
-            continue
-        if text == "/exit":
-            break
-        if text == "/session":
-            console.print(f"[bold]Session ID:[/] [cyan]{session.session_id}[/]")
-            continue
-        if text == "/usage":
-            await _show_usage(session)
-            continue
-        if text == "/context":
-            await _show_context(session)
-            continue
-        if text.startswith("/"):
-            console.print(f"[red]Unknown command:[/] {text}")
-            continue
-
-        console.print()
-        stream_result = await _stream_message_with_interrupt(
-            session,
-            text,
-            renderer,
-            animator,
-        )
-        if stream_result is None:
-            continue
-        waiting_for_input, questions = stream_result
-
-        while waiting_for_input:
-            if questions:
-                dialog_result = await _interactive_question_dialog(questions)
-                if dialog_result["action"] == "reject":
-                    answer_text = "用户拒绝回答问题。"
-                else:
-                    answer_text = _format_answers_as_text(dialog_result["answers"])
-            else:
-                try:
-                    answer_text = await prompt_session.prompt_async([("class:prompt", "❯ ")])
-                except (EOFError, KeyboardInterrupt):
-                    answer_text = ""
-                answer_text = answer_text.strip()
-                if not answer_text:
-                    continue
+            if text == "/help":
+                _help_text()
+                continue
+            if text == "/exit":
+                break
+            if text == "/session":
+                console.print(f"[bold]Session ID:[/] [cyan]{session.session_id}[/]")
+                continue
+            if text == "/usage":
+                await _show_usage(session)
+                continue
+            if text == "/context":
+                await _show_context(session)
+                continue
+            if text.startswith("/"):
+                console.print(f"[red]Unknown command:[/] {text}")
+                continue
 
             console.print()
             stream_result = await _stream_message_with_interrupt(
                 session,
-                answer_text,
+                text,
                 renderer,
                 animator,
             )
             if stream_result is None:
-                waiting_for_input = False
-                questions = None
-                break
+                continue
             waiting_for_input, questions = stream_result
 
-    await session.close()
+            while waiting_for_input:
+                if questions:
+                    dialog_result = await _interactive_question_dialog(questions)
+                    if dialog_result["action"] == "reject":
+                        answer_text = "用户拒绝回答问题。"
+                    else:
+                        answer_text = _format_answers_as_text(dialog_result["answers"])
+                else:
+                    try:
+                        answer_text = await prompt_session.prompt_async([("class:prompt", "❯ ")])
+                    except (EOFError, KeyboardInterrupt):
+                        answer_text = ""
+                    answer_text = answer_text.strip()
+                    if not answer_text:
+                        continue
+
+                console.print()
+                stream_result = await _stream_message_with_interrupt(
+                    session,
+                    answer_text,
+                    renderer,
+                    animator,
+                )
+                if stream_result is None:
+                    waiting_for_input = False
+                    questions = None
+                    break
+                waiting_for_input, questions = stream_result
+    finally:
+        renderer.close()
+        await session.close()
+
     console.print(
         f"[dim]Goodbye. Resume with: [bold cyan]comate resume {session.session_id}[/][/]"
     )

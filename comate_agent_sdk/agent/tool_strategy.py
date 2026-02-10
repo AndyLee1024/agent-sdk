@@ -10,11 +10,10 @@ from comate_agent_sdk.agent.tool_visibility import visible_tools
 from comate_agent_sdk.tools.decorator import Tool
 
 TOOL_STRATEGY_TEMPLATE = """
-[SYSTEM_TOOLS_DEFINITION]
+<tools>
 You have access to the following built-in tools for interacting with the environment:
 {tool_overview} 
-
-"""
+</tools>"""
 
 
 def generate_tool_strategy(tools: list[Tool], *, is_subagent: bool = False) -> str:

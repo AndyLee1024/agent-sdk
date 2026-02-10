@@ -19,60 +19,28 @@ logger = logging.getLogger("comate_agent_sdk.subagent.task_tool")
 _INTERNAL_TASK_TOOL_MARKER_ATTR = "_comate_agent_sdk_internal"
 _INTERNAL_TASK_TOOL_MARKER_VALUE = True
 
-_TASK_USAGE_RULES = """Launch a new agent to handle complex, multi-step tasks autonomously.
+_TASK_USAGE_RULES = """Launch a subagent to autonomously handle complex, multi-step tasks.
 
-When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+When to use:
+- Complex tasks requiring multiple tool calls and reasoning steps
+- Tasks that need autonomous decision-making (e.g., code review, research, refactoring)
+- When you want to delegate a self-contained subtask
 
-When NOT to use the Agent tool:
-- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
-- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly
-- Other tasks that are not related to the agent descriptions above
+When NOT to use (use specific tools instead):
+- Reading a specific file → use Read
+- Finding files by name → use Glob
+- Searching for code in 2-3 known files → use Grep + Read
+- Simple single-step operations
 
+Critical usage notes:
+1. Must specify subagent_type parameter (e.g., "code-reviewer", "researcher")
+2. Write detailed prompt - subagent is stateless and returns only ONE final message
+3. Specify what the subagent should return (code? analysis? file list?)
+4. Clearly state: write code OR do research (subagent can't infer user's intent)
+5. Subagent's result is NOT visible to user - you must summarize it for the user
+6. Launch multiple subagents concurrently when possible (use single message with multiple tool calls)
 
-Usage notes:
-1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
-3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
-4. The agent's outputs should generally be trusted
-5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
-6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-
-Example usage:
-
-<example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a signficant piece of code
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
-</example_agent_description>
-
-<example>
-user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the Write tool to write a function that checks if a number is prime
-assistant: I'm going to use the Write tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
-<commentary>
-Since a signficant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
-</commentary>
-assistant: Now let me use the code-reviewer agent to review the code
-assistant: Uses the Task tool to launch the with the code-reviewer agent 
-</example>
-
-<example>
-user: "Hello"
-<commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
-</commentary>
-assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
-</example>
+The subagent has access to the same tools you do (Read, Write, Grep, Glob, Bash, etc).
 """
 
 
@@ -131,7 +99,7 @@ def create_task_tool(
         return resolved, missing
 
     @tool(
-        "Launch a new agent to handle complex, multi-step tasks autonomously.",
+        "Launch subagent for complex multi-step tasks. Must specify subagent_type. Write detailed prompt (stateless, one reply only). Result NOT visible to user, you must summarize. Don't use for simple Read/Grep/Glob operations.",
         usage_rules=_TASK_USAGE_RULES,
     )
     async def Task(
