@@ -242,6 +242,17 @@ class TestSystemTools(unittest.TestCase):
                 self.assertEqual(out["data"]["exit_code"], 0)
                 self.assertIn("x.txt", out["data"]["stdout"])
 
+    def test_bash_cwd_string_null_is_treated_as_none(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(Bash, args=["pwd"], cwd="null")
+                self.assertTrue(out["ok"])
+                self.assertEqual(out["data"]["exit_code"], 0)
+                self.assertEqual(out["meta"]["cwd"], str(root.resolve()))
+                self.assertIn(str(root.resolve()), out["data"]["stdout"])
+
     def test_multiedit_creates_new_file_with_first_empty_old_string(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

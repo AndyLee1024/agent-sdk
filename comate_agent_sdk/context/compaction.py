@@ -14,6 +14,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 from comate_agent_sdk.context.items import DEFAULT_PRIORITIES, ItemType
+from comate_agent_sdk.context.truncation import TruncationRecord
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.llm_levels import LLMLevel
@@ -366,6 +367,8 @@ class SelectiveCompactionPolicy:
         tool_results_truncated = 0
 
         assistant_item = context.conversation.items[block.start_idx]
+        if assistant_item.destroyed:
+            return 0, 0
         assistant_msg = assistant_item.message
         if isinstance(assistant_msg, AssistantMessage) and assistant_msg.tool_calls:
             truncation_details: list[dict[str, object]] = []
@@ -394,9 +397,24 @@ class SelectiveCompactionPolicy:
                 self._refresh_assistant_item_tokens(context, assistant_item)
 
         for result_item in block.tool_result_items:
+            if result_item.destroyed:
+                continue
+
             result_msg = result_item.message
             if not isinstance(result_msg, ToolMessage):
                 continue
+
+            if (
+                result_item.truncation_record is not None
+                and result_item.truncation_record.is_formatter_truncated
+            ):
+                logger.debug(
+                    "跳过已被 OutputFormatter 截断的 tool_result: "
+                    f"tool_call_id={result_msg.tool_call_id}, "
+                    f"reason={result_item.truncation_record.formatter_reason}"
+                )
+                continue
+
             result_text = result_msg.text
             result_tokens = context.token_counter.count(result_text)
             if result_tokens <= self.tool_result_threshold:
@@ -475,21 +493,13 @@ class SelectiveCompactionPolicy:
         item: "ContextItem",
         details: list[dict[str, object]],
     ) -> None:
-        existing = item.metadata.get("truncation")
-        detail_list: list[dict[str, object]]
-        if isinstance(existing, dict):
-            old_details = existing.get("details")
-            if isinstance(old_details, list):
-                detail_list = [d for d in old_details if isinstance(d, dict)]
-            else:
-                detail_list = []
-        else:
-            detail_list = []
+        if item.truncation_record is None:
+            item.truncation_record = TruncationRecord()
+        item.truncation_record.compaction_details.extend(details)
 
-        detail_list.extend(details)
         item.metadata["truncated"] = True
         item.metadata["truncation"] = {
-            "details": detail_list,
+            "details": item.truncation_record.compaction_details,
         }
 
     def _collect_recent_round_protected_ids(self, context: "ContextIR") -> set[str]:

@@ -3,9 +3,9 @@ This implementation is based on the OpenAI types, while removing all the parts t
 """
 
 # region - Content parts
-from typing import Literal, Union
+from typing import Any, Literal, Union
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 def _truncate(text: str, max_length: int = 50) -> str:
@@ -398,6 +398,15 @@ class ToolMessage(_MessageBase):
 
 	offload_path: str | None = None
 	"""Path to the offloaded content file (if offloaded)."""
+
+	raw_envelope: dict | None = Field(default=None, exclude=True)
+	"""Raw tool result envelope before formatting (if available)."""
+
+	execution_meta: dict | None = Field(default=None, exclude=True)
+	"""Structured execution metadata produced by output formatter."""
+
+	truncation_record: Any | None = Field(default=None, exclude=True)
+	"""Structured truncation record from output formatter (runtime-only)."""
 
 	@property
 	def text(self) -> str:

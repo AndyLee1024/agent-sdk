@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, TYPE_CHECKING
 
+from comate_agent_sdk.context.truncation import TruncationRecord
+
 if TYPE_CHECKING:
     from comate_agent_sdk.llm.messages import BaseMessage
 
@@ -92,6 +94,9 @@ class ContextItem:
         tool_name: 工具名称（仅 TOOL_RESULT 类型使用）
         created_at: 创建时间戳
         metadata: 附加元数据
+            - tool_execution_meta: 工具执行结构化信息（status/truncation/file_ops/retrieval_hints 等）
+            - tool_raw_envelope: 工具原始返回信封（ok/data/error/meta/schema_version）
+        truncation_record: 三层共享的结构化截断记录
         cache_hint: 是否建议缓存（如 Anthropic prompt cache）
     """
 
@@ -106,6 +111,7 @@ class ContextItem:
     tool_name: str | None = None
     created_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    truncation_record: TruncationRecord | None = None
     cache_hint: bool = False
     offload_path: str | None = None  # 卸载文件路径（相对路径）
     offloaded: bool = False          # 是否已卸载

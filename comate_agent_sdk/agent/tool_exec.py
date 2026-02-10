@@ -13,6 +13,7 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
 )
 from comate_agent_sdk.observability import Laminar
+from comate_agent_sdk.system_tools.output_formatter import OutputFormatter
 from comate_agent_sdk.system_tools.tool_result import is_tool_result_envelope
 
 logger = logging.getLogger("comate_agent_sdk.agent")
@@ -35,6 +36,30 @@ def _detect_tool_error(result: str | list[ContentPartTextParam | ContentPartImag
             return not bool(payload.get("ok", False))
 
     return text.lower().startswith("error:")
+
+
+def _extract_tool_envelope(
+    result: str | list[ContentPartTextParam | ContentPartImageParam] | dict,
+) -> dict | None:
+    """从工具返回值中提取标准 envelope。"""
+    if isinstance(result, dict) and is_tool_result_envelope(result):
+        return result
+
+    if not isinstance(result, str):
+        return None
+
+    text = result.strip()
+    if not text or not text.startswith("{"):
+        return None
+
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+
+    if is_tool_result_envelope(payload):
+        return payload
+    return None
 
 
 async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolMessage:
@@ -94,6 +119,7 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
         project_root=project_root,
         session_id=agent._session_id,
         session_root=session_root,
+        workspace_root=project_root,  # CLI 场景：新文件直接写入 project_root
         subagent_name=agent.name if agent._is_subagent else None,
         tool_call_id=tool_call.id,
         subagent_source_prefix=agent._subagent_source_prefix,
@@ -108,7 +134,29 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
             # Execute the tool (with dependency overrides if configured)
             result = await tool.execute(_overrides=agent.dependency_overrides, **args)
 
-            is_error = _detect_tool_error(result)
+            raw_envelope = _extract_tool_envelope(result)
+            execution_meta = None
+            formatted_content = result
+            is_error = False
+            truncation_record = None
+
+            if raw_envelope is not None:
+                formatted = OutputFormatter.format(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call.id,
+                    result_dict=raw_envelope,
+                )
+                formatted_content = formatted.text
+                execution_meta = formatted.meta.to_dict()
+                truncation_record = formatted.meta.truncation
+                is_error = formatted.meta.status == "error"
+            else:
+                if isinstance(result, (str, list)):
+                    is_error = _detect_tool_error(result)
+                    formatted_content = result
+                else:
+                    formatted_content = str(result)
+                    is_error = False
 
             # Check if the tool is marked as ephemeral (can be bool or int for keep count)
             is_ephemeral = bool(tool.ephemeral)  # Convert int to bool (2 -> True)
@@ -116,9 +164,12 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
             tool_message = ToolMessage(
                 tool_call_id=tool_call.id,
                 tool_name=tool_name,
-                content=result,
+                content=formatted_content,
                 is_error=is_error,
                 ephemeral=is_ephemeral,
+                raw_envelope=raw_envelope,
+                execution_meta=execution_meta,
+                truncation_record=truncation_record,
             )
 
             # Set span output
@@ -126,15 +177,17 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                 if is_error:
                     Laminar.set_span_output(
                         {
-                            "error": result[:500]
-                            if isinstance(result, str)
-                            else str(result)[:500]
+                            "error": formatted_content[:500]
+                            if isinstance(formatted_content, str)
+                            else str(formatted_content)[:500]
                         }
                     )
                     return tool_message
                 Laminar.set_span_output(
                     {
-                        "result": result[:500] if isinstance(result, str) else str(result)[:500]
+                        "result": formatted_content[:500]
+                        if isinstance(formatted_content, str)
+                        else str(formatted_content)[:500]
                     }
                 )
 

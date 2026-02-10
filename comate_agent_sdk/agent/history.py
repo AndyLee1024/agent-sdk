@@ -7,6 +7,7 @@ from comate_agent_sdk.llm.messages import AssistantMessage, BaseMessage, ToolMes
 from comate_agent_sdk.tools.decorator import Tool
 
 logger = logging.getLogger("comate_agent_sdk.agent")
+_EPHEMERAL_TRUNCATED_PROTECT_THRESHOLD = 300
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.core import AgentRuntime
@@ -114,11 +115,26 @@ def destroy_ephemeral_messages(agent: "AgentRuntime") -> None:
 
         # 卸载需要销毁的（不是最后 N 个的）
         if keep <= 0:
-            items_to_destroy = same_tool_items
+            destroy_count = len(same_tool_items)
         elif len(same_tool_items) > keep:
-            items_to_destroy = same_tool_items[:-keep]
+            destroy_count = len(same_tool_items) - keep
         else:
-            items_to_destroy = []
+            destroy_count = 0
+
+        items_to_destroy: list = []
+        if destroy_count > 0:
+            normal_candidates = []
+            protected_candidates = []
+            for item in same_tool_items:
+                if (
+                    item.truncation_record is not None
+                    and item.truncation_record.is_formatter_truncated
+                    and item.token_count < _EPHEMERAL_TRUNCATED_PROTECT_THRESHOLD
+                ):
+                    protected_candidates.append(item)
+                else:
+                    normal_candidates.append(item)
+            items_to_destroy = (normal_candidates + protected_candidates)[:destroy_count]
 
         if items_to_destroy:
             for item in items_to_destroy:

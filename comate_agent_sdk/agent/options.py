@@ -85,6 +85,7 @@ class AgentConfig:
     # LLM levels + session
     llm_levels: Mapping[LLMLevel, BaseChatModel] | None = None
     session_id: str | None = None
+    role: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", _freeze_value(self.tools))
@@ -154,6 +155,7 @@ class RuntimeAgentOptions:
     # LLM levels + session
     llm_levels: dict[LLMLevel, BaseChatModel] | None = None
     session_id: str | None = None
+    role: str | None = None
 
 
 def _thaw_mapping(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -206,4 +208,5 @@ def build_runtime_options(
         mcp_servers=config.mcp_servers,
         llm_levels=dict(resolved_llm_levels) if resolved_llm_levels is not None else None,
         session_id=session_id,
+        role=config.role,
     )

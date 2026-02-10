@@ -32,6 +32,7 @@ Core policy:
 4) Output & safety:
    - Design commands to be concise; large outputs may be truncated.
    - When issuing multiple commands, separate with ';' or '&&' (no newlines).
+   - Standardized output includes a short summary; when truncated/error, follow "Recommended next step".
 
 EXCEPTION: You MAY use ripgrep `rg` in Bash ONLY if ALL conditions are met:
 A) Scope is already narrowed to specific files/dirs (via Glob/LS). Do NOT run `rg` blindly at repo root.
@@ -71,6 +72,8 @@ Output characteristics:
 - Returned with line numbers (cat -n style), starting at 1.
 - Lines longer than 2000 chars may be truncated.
 - PDFs are processed page-by-page; images are presented visually.
+- Response is standardized as title + line-range summary + body.
+- When truncated or error, a "Recommended next step (token-efficient)" footer is included; prefer those actions.
 """
 
 
@@ -81,6 +84,8 @@ Rules:
 - Prefer editing existing files; do not create new files unless explicitly required by the user.
 - Do NOT create documentation (*.md/README) unless explicitly requested.
 - Avoid emojis in files unless the user explicitly asks.
+- Output includes concise write receipt (operation/bytes/hash/path).
+- Use Read immediately after write when validation is needed.
 """
 
 
@@ -97,6 +102,7 @@ Matching rules:
 Policy:
 - Prefer editing existing files; do not create new files unless explicitly required.
 - Avoid emojis unless the user explicitly asks.
+- Output includes replacement summary and file hashes for verification.
 """
 
 
@@ -118,6 +124,7 @@ Tips:
 - Use replace_all for systematic renames.
 - Ensure earlier edits do not invalidate later matches.
 - Avoid emojis unless the user explicitly asks.
+- Output includes aggregate replacement summary and before/after hashes.
 """
 
 
@@ -136,6 +143,7 @@ Guidance:
 - For content search use Grep.
 - For open-ended multi-round exploration, use Task (if available).
 - Batch multiple globs together when useful.
+- Large results are truncated; use footer suggestions (pagination/artifact Read) instead of full dumps.
 """
 
 
@@ -157,6 +165,7 @@ Capabilities:
 Search strategy (performance-critical):
 - Prefer ONE Grep call with regex alternation (|) over many sequential calls.
 - Include naming variants (PascalCase|snake_case|camelCase) and nearby synonyms when relevant.
+- When output is truncated or lower-bound, follow footer suggestions (refine pattern/path/mode or Read artifact).
 """
 
 
@@ -169,6 +178,7 @@ Rules:
 Guidance:
 - Prefer Glob/Grep when you know what you're looking for.
 - Use LS for quick directory shape confirmation and parent-dir verification before creating files/dirs.
+- For large directories, use truncated output + footer guidance; avoid repeatedly requesting huge listings.
 """
 
 

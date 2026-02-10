@@ -18,6 +18,7 @@ from rich.table import Table
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig, ChatSession
+from comate_agent_sdk.context import EnvOptions
 from comate_agent_sdk.tools import tool
 
 from terminal_agent.animations import AnimationPhase, StreamAnimationController, SubmissionAnimator
@@ -55,10 +56,12 @@ async def add(a: int, b: int) -> int:
 def _build_agent() -> Agent:
     return Agent(
         config=AgentConfig(
+            role="software_engineering",
+            env_options=EnvOptions(system_env=True, git_env=True),
             mcp_servers={
                 "exa_search": {
                     "type": "http",
-                    "url": "https://mcp.exa.ai/mcp?exaApiKey=2ac4b289-8f68-473b-8cfd-3f8cb11595b7",
+                    "url": "https://mcp.exa.ai/mcp?exaApiKey=084b86e8-c227-4ef0-9f6d-e248594839f4&tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa",
                 }
             }
         )

@@ -69,6 +69,10 @@ class AgentTemplate:
         return self.config.system_prompt
 
     @property
+    def role(self) -> str | None:
+        return self.config.role
+
+    @property
     def max_iterations(self) -> int:
         return self.config.max_iterations
 
@@ -233,6 +237,14 @@ class AgentRuntime:
     @system_prompt.setter
     def system_prompt(self, value: SystemPromptType) -> None:
         self.options.system_prompt = value
+
+    @property
+    def role(self) -> str | None:
+        return self.options.role
+
+    @role.setter
+    def role(self, value: str | None) -> None:
+        self.options.role = value
 
     @property
     def max_iterations(self) -> int:
@@ -556,7 +568,7 @@ class AgentRuntime:
         )
 
     def _resolve_system_prompt(self) -> str:
-        return resolve_system_prompt(self.system_prompt)
+        return resolve_system_prompt(self.system_prompt, role=self.role)
 
     def clear_history(self):
         from comate_agent_sdk.agent.history import clear_history

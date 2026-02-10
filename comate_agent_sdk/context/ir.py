@@ -538,10 +538,17 @@ class ContextIR:
 
         # ToolMessage 特殊属性
         is_tool_error = False
+        item_metadata = dict(metadata or {})
+        truncation_record = None
         if isinstance(message, ToolMessage):
             ephemeral = ephemeral or message.ephemeral
             tool_name = tool_name or message.tool_name
             is_tool_error = message.is_error
+            if message.execution_meta:
+                item_metadata["tool_execution_meta"] = message.execution_meta
+            if message.raw_envelope:
+                item_metadata["tool_raw_envelope"] = message.raw_envelope
+            truncation_record = getattr(message, "truncation_record", None)
 
         item = ContextItem(
             item_type=item_type,
@@ -551,7 +558,8 @@ class ContextIR:
             priority=DEFAULT_PRIORITIES.get(item_type, 50),
             ephemeral=ephemeral,
             tool_name=tool_name,
-            metadata=metadata or {},
+            metadata=item_metadata,
+            truncation_record=truncation_record,
             cache_hint=cache_hint,
             is_tool_error=is_tool_error,
             created_turn=self._turn_number,

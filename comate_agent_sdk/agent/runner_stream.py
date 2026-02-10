@@ -479,16 +479,24 @@ async def query_stream(
                 # Check if this was AskUserQuestion - if so, yield UserQuestionEvent and stop
                 if tool_name == "AskUserQuestion" and not tool_result.is_error:
                     questions: list[dict] = []
-                    try:
-                        payload = json.loads(tool_result.text)
-                        if is_tool_result_envelope(payload):
-                            data = payload.get("data", {})
-                            if isinstance(data, dict):
-                                raw_questions = data.get("questions", [])
-                                if isinstance(raw_questions, list):
-                                    questions = [q for q in raw_questions if isinstance(q, dict)]
-                    except Exception:
-                        questions = []
+                    payload = tool_result.raw_envelope
+                    if is_tool_result_envelope(payload):
+                        data = payload.get("data", {})
+                        if isinstance(data, dict):
+                            raw_questions = data.get("questions", [])
+                            if isinstance(raw_questions, list):
+                                questions = [q for q in raw_questions if isinstance(q, dict)]
+                    else:
+                        try:
+                            parsed_payload = json.loads(tool_result.text)
+                            if is_tool_result_envelope(parsed_payload):
+                                data = parsed_payload.get("data", {})
+                                if isinstance(data, dict):
+                                    raw_questions = data.get("questions", [])
+                                    if isinstance(raw_questions, list):
+                                        questions = [q for q in raw_questions if isinstance(q, dict)]
+                        except Exception:
+                            questions = []
 
                     if not questions and isinstance(args, dict):
                         # fallback for legacy behavior

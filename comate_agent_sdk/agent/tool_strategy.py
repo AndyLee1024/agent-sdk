@@ -2,24 +2,17 @@
 
 参考 subagent/prompts.py 和 skill/prompts.py 的架构模式。
 
-动态生成 <system_tools_definition> 段，包含：
-1. <tool_overview>: 所有工具的概览列表
-2. 每个工具的详细使用规则（从 Tool.usage_rules 获取）
+动态生成 SYSTEM_TOOLS_DEFINITION 段，包含：
+所有工具的概览列表
 """
 
 from comate_agent_sdk.tools.decorator import Tool
 
 TOOL_STRATEGY_TEMPLATE = """
-<system_tools_definition>
-
-<tool_overview>
+[SYSTEM_TOOLS_DEFINITION]
 You have access to the following built-in tools for interacting with the environment:
-{tool_overview}
-</tool_overview>
+{tool_overview} 
 
-{tool_details}
-
-</system_tools_definition>
 """
 
 

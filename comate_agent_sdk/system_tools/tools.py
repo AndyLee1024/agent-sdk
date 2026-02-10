@@ -15,7 +15,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from comate_agent_sdk.llm.messages import UserMessage
 from comate_agent_sdk.system_tools.artifact_store import ArtifactStore
@@ -347,6 +347,17 @@ class BashInput(BaseModel):
     max_output_chars: int = Field(default=_BASH_OUTPUT_DEFAULT_MAX_CHARS, ge=200, le=200_000)
 
     model_config = {"extra": "forbid"}
+
+    @field_validator("cwd", mode="before")
+    @classmethod
+    def _normalize_cwd(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"", "null", "none"}:
+                return None
+        return value
 
 
 class ReadInput(BaseModel):
@@ -780,14 +791,30 @@ async def Bash(
         )
 
     if timed_out:
+        exec_meta = {
+            "args": params.args,
+            "cwd": str(cwd),
+            "timeout_ms": params.timeout_ms,
+            "max_output_chars": params.max_output_chars,
+            "duration_ms": duration_ms,
+        }
         return err(
             "TIMEOUT",
             f"Command timed out after {params.timeout_ms}ms",
             retryable=True,
-            meta=data,
+            meta={**data, **exec_meta},
         )
 
-    return ok(data=data)
+    return ok(
+        data=data,
+        meta={
+            "args": params.args,
+            "cwd": str(cwd),
+            "timeout_ms": params.timeout_ms,
+            "max_output_chars": params.max_output_chars,
+            "duration_ms": duration_ms,
+        },
+    )
 
 
 @tool("Reads a text file with line numbers.", name="Read", usage_rules=READ_USAGE_RULES)
@@ -840,6 +867,7 @@ async def Read(
 
     has_more = end < total_lines
     output_too_large = len(content) > _TEXT_SPILL_CHARS or len(content.encode("utf-8")) > _BYTES_SPILL_LIMIT
+    file_bytes = int((await _stat(path)).st_size)
 
     data: dict[str, Any] = {
         "content": _truncate_text(content, _TEXT_SPILL_CHARS),
@@ -849,7 +877,7 @@ async def Read(
         "truncated": bool(line_truncated or output_too_large),
         "meta": {
             "encoding": "utf-8",
-            "file_bytes": int((await _stat(path)).st_size),
+            "file_bytes": file_bytes,
         },
     }
 
@@ -868,7 +896,18 @@ async def Read(
     if has_more:
         data["next_offset_line"] = end
 
-    return ok(data=data)
+    return ok(
+        data=data,
+        meta={
+            "file_path": params.file_path,
+            "offset_line": params.offset_line,
+            "limit_lines": params.limit_lines,
+            "format": params.format,
+            "max_line_chars": params.max_line_chars,
+            "encoding": "utf-8",
+            "file_bytes": file_bytes,
+        },
+    )
 
 
 @tool("Writes content to a file.", name="Write", usage_rules=WRITE_USAGE_RULES)
@@ -882,6 +921,7 @@ async def Write(
         return _path_error_result(exc)
 
     root_refs = _allowed_roots(ctx)
+    before_content: str | None = None
     async with _file_lock(path):
         existed = await _exists(path)
         if existed and await _is_dir(path):
@@ -891,10 +931,12 @@ async def Write(
         if existed and not await _require_read(ctx, path):
             return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
 
-        if params.mode == "append" and existed:
-            original = await _read_text(path, encoding=params.encoding)
-            final_content = original + params.content
-        elif params.mode == "append" and not existed:
+        if existed:
+            before_content = await _read_text(path, encoding=params.encoding)
+
+        if params.mode == "append" and before_content is not None:
+            final_content = before_content + params.content
+        elif params.mode == "append" and before_content is None:
             final_content = params.content
         else:
             final_content = params.content
@@ -904,14 +946,25 @@ async def Write(
     final_bytes = len(final_content.encode(params.encoding, errors="replace"))
     op_bytes = len(params.content.encode(params.encoding, errors="replace"))
     relpath = to_safe_relpath(path, roots=root_refs)
+    sha256_before = _sha256_text(before_content) if before_content is not None else None
+    sha256_after = _sha256_text(final_content)
+    operation = "create" if not existed else ("append" if params.mode == "append" else "overwrite")
     return ok(
         data={
             "bytes_written": op_bytes,
             "file_bytes": final_bytes,
             "created": not existed,
-            "sha256": _sha256_text(final_content),
+            "sha256": sha256_after,
             "relpath": relpath,
-        }
+        },
+        meta={
+            "file_path": params.file_path,
+            "operation": operation,
+            "sha256_before": sha256_before,
+            "sha256_after": sha256_after,
+            "encoding": params.encoding,
+            "mode": params.mode,
+        },
     )
 
 
@@ -959,13 +1012,24 @@ async def Edit(
 
         await _atomic_write_text(path, after)
 
+    before_sha = _sha256_text(before)
+    after_sha = _sha256_text(after)
+    relpath = to_safe_relpath(path, roots=root_refs)
     return ok(
         data={
             "replacements": replacements,
-            "before_sha256": _sha256_text(before),
-            "after_sha256": _sha256_text(after),
-            "relpath": to_safe_relpath(path, roots=root_refs),
-        }
+            "before_sha256": before_sha,
+            "after_sha256": after_sha,
+            "relpath": relpath,
+        },
+        meta={
+            "file_path": params.file_path,
+            "operation": "replace",
+            "replace_all": params.replace_all,
+            "replacements": replacements,
+            "sha256_before": before_sha,
+            "sha256_after": after_sha,
+        },
     )
 
 
@@ -1045,15 +1109,26 @@ async def MultiEdit(
 
         await _atomic_write_text(path, content)
 
+    after_hash = _sha256_text(content)
+    relpath = to_safe_relpath(path, roots=root_refs)
     return ok(
         data={
             "total_replacements": total_replacements,
             "created": created,
             "before_sha256": before_hash,
-            "after_sha256": _sha256_text(content),
+            "after_sha256": after_hash,
             "bytes": len(content.encode("utf-8")),
-            "relpath": to_safe_relpath(path, roots=root_refs),
-        }
+            "relpath": relpath,
+        },
+        meta={
+            "file_path": params.file_path,
+            "operation": "multi_edit",
+            "created": created,
+            "edit_count": len(params.edits),
+            "total_replacements": total_replacements,
+            "sha256_before": before_hash,
+            "sha256_after": after_hash,
+        },
     )
 
 
@@ -1112,7 +1187,16 @@ async def Glob(
             f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
         )
 
-    return ok(data=data)
+    return ok(
+        data=data,
+        meta={
+            "pattern": params.pattern,
+            "path": params.path,
+            "search_path": data["search_path"],
+            "include_dirs": params.include_dirs,
+            "head_limit": params.head_limit,
+        },
+    )
 
 
 def _grep_fallback(
@@ -1142,6 +1226,19 @@ def _grep_fallback(
         max_files=params.max_files,
     )
     files = [p for p in files if p.is_file()]
+    search_path_rel = to_safe_relpath(search_path.resolve(), roots=[project_root])
+    base_meta = {
+        "engine": "python",
+        "pattern": params.pattern,
+        "path": params.path,
+        "search_path": search_path_rel,
+        "glob": params.glob,
+        "type": params.type,
+        "output_mode": params.output_mode,
+        "head_limit": params.head_limit,
+        "max_files": params.max_files,
+        "multiline": params.multiline,
+    }
 
     if params.output_mode == "files_with_matches":
         matched: list[str] = []
@@ -1154,7 +1251,10 @@ def _grep_fallback(
                 matched.append(to_safe_relpath(f.resolve(), roots=[project_root]))
         total = len(matched)
         preview = matched[: params.head_limit]
-        return ok(data={"files": preview, "count": total, "truncated": total > len(preview)})
+        return ok(
+            data={"files": preview, "count": total, "truncated": total > len(preview)},
+            meta=base_meta,
+        )
 
     if params.output_mode == "count":
         counts: list[dict[str, Any]] = []
@@ -1177,7 +1277,8 @@ def _grep_fallback(
                 "counts": preview,
                 "total_matches": total_matches,
                 "truncated": total > len(preview),
-            }
+            },
+            meta=base_meta,
         )
 
     matches: list[dict[str, Any]] = []
@@ -1218,7 +1319,8 @@ def _grep_fallback(
             "matches": matches,
             "total_matches": total_matches,
             "truncated": total_matches > len(matches),
-        }
+        },
+        meta=base_meta,
     )
 
 
@@ -1249,6 +1351,23 @@ async def Grep(
         )
 
     root_refs = _allowed_roots(ctx)
+    search_path_rel = to_safe_relpath(search_path.resolve(), roots=root_refs)
+
+    def _grep_meta(**extra: Any) -> dict[str, Any]:
+        meta = {
+            "engine": "rg",
+            "pattern": params.pattern,
+            "path": params.path,
+            "search_path": search_path_rel,
+            "glob": params.glob,
+            "type": params.type,
+            "output_mode": params.output_mode,
+            "head_limit": params.head_limit,
+            "max_files": params.max_files,
+            "multiline": params.multiline,
+        }
+        meta.update(extra)
+        return meta
 
     if params.output_mode == "files_with_matches":
         cmd = _build_rg_base_args(params) + ["-l", params.pattern, str(search_path)]
@@ -1256,7 +1375,10 @@ async def Grep(
         if result.returncode == 2:
             return err("INVALID_ARGUMENT", (result.stderr or result.stdout).strip() or "rg failed")
         if result.returncode == 1:
-            return ok(data={"files": [], "count": 0, "truncated": False})
+            return ok(
+                data={"files": [], "count": 0, "truncated": False},
+                meta=_grep_meta(),
+            )
 
         rel_files = [
             to_safe_relpath(Path(line.strip()).resolve(), roots=root_refs)
@@ -1280,7 +1402,7 @@ async def Grep(
             data["read_hint"] = (
                 f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
             )
-        return ok(data=data)
+        return ok(data=data, meta=_grep_meta())
 
     if params.output_mode == "count":
         cmd = _build_rg_base_args(params) + ["--count-matches", params.pattern, str(search_path)]
@@ -1288,7 +1410,10 @@ async def Grep(
         if result.returncode == 2:
             return err("INVALID_ARGUMENT", (result.stderr or result.stdout).strip() or "rg failed")
         if result.returncode == 1:
-            return ok(data={"counts": [], "total_matches": 0, "truncated": False})
+            return ok(
+                data={"counts": [], "total_matches": 0, "truncated": False},
+                meta=_grep_meta(),
+            )
 
         counts: list[dict[str, Any]] = []
         total_matches = 0
@@ -1326,7 +1451,7 @@ async def Grep(
             data["read_hint"] = (
                 f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
             )
-        return ok(data=data)
+        return ok(data=data, meta=_grep_meta())
 
     before, after = _compute_context_window(params)
     cmd = _build_rg_base_args(params) + [
@@ -1392,7 +1517,10 @@ async def Grep(
     if stream.returncode == 2:
         return err("INVALID_ARGUMENT", (stream.stderr_capture or stream.stdout_capture).strip() or "rg failed")
     if stream.returncode == 1 and total_matches == 0:
-        return ok(data={"matches": [], "total_matches": 0, "truncated": False})
+        return ok(
+            data={"matches": [], "total_matches": 0, "truncated": False},
+            meta=_grep_meta(),
+        )
     if stream.returncode not in {0, 1} and not stream.stopped_early:
         return err("INTERNAL", (stream.stderr_capture or stream.stdout_capture).strip() or "rg failed", retryable=True)
 
@@ -1443,7 +1571,7 @@ async def Grep(
         if stream.stdout_capture_truncated:
             data["raw_output_truncated"] = True
 
-    return ok(data=data)
+    return ok(data=data, meta=_grep_meta())
 
 
 @tool("Lists files and directories in a given path.", name="LS", usage_rules=LS_USAGE_RULES)
@@ -1516,7 +1644,17 @@ async def LS(
             f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
         )
 
-    return ok(data=data)
+    return ok(
+        data=data,
+        meta={
+            "path": params.path,
+            "resolved_path": data["path"],
+            "ignore": ignore,
+            "head_limit": params.head_limit,
+            "include_hidden": params.include_hidden,
+            "sort_by": params.sort_by,
+        },
+    )
 
 
 @tool("Create and manage a structured task list for the current session.", name="TodoWrite", usage_rules=TODO_USAGE_RULES)
@@ -1580,8 +1718,15 @@ async def TodoWrite(
                 "active_count": active_count,
                 "persisted": persisted,
                 "todo_path": todo_path_rel,
+                "todos": todos_data,  # 新增：完整的 todos 数组供 formatter 使用
             },
             message=reminder_text,
+            meta={
+                "count": len(todos_data),
+                "active_count": active_count,
+                "persisted": persisted,
+                "todo_path": todo_path_rel,
+            },
         )
     except Exception as exc:
         logger.error(f"TodoWrite failed: {exc}", exc_info=True)
@@ -1721,7 +1866,16 @@ async def WebFetch(
             "read_hint": (
                 f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
             ),
-        }
+        },
+        meta={
+            "url": url,
+            "prompt_length": len(prompt),
+            "final_url": final_url,
+            "status": status,
+            "cached": cached_hit,
+            "truncated_for_llm": truncated_for_llm,
+            "model_used": str(llm.model),
+        },
     )
 
 
@@ -1742,6 +1896,10 @@ async def AskUserQuestion(
                 "questions": questions_data,
             },
             message=f"Prepared {len(questions_data)} question(s) for user",
+            meta={
+                "status": "waiting_for_input",
+                "question_count": len(questions_data),
+            },
         )
     except Exception as exc:
         logger.error(f"AskUserQuestion failed: {exc}", exc_info=True)
