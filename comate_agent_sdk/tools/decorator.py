@@ -169,7 +169,7 @@ class Tool:
     ephemeral: int | bool = False
     """How many outputs to keep in context. False=not ephemeral, True=keep 1, int=keep N."""
     usage_rules: str | None = field(default=None, repr=False)
-    """Detailed usage rules for system prompt layer (cached via prompt cache). If None, won't appear in <system_tools_definition>."""
+    """Detailed usage rules for tool API layer. If provided, it overrides ToolDefinition.description."""
     _definition: ToolDefinition | None = field(default=None, repr=False)
     _dependencies: dict[str, Depends] = field(default_factory=dict, repr=False)
     _param_types: dict[str, type] = field(default_factory=dict, repr=False)
@@ -229,6 +229,17 @@ class Tool:
                 continue
             self._param_types[param_name] = hint
 
+    def _build_tool_definition_description(self) -> str:
+        """Resolve description sent to model tool definition.
+
+        Priority:
+        1) usage_rules (detailed and actionable policy)
+        2) description (short summary fallback)
+        """
+        if self.usage_rules and self.usage_rules.strip():
+            return self.usage_rules.strip()
+        return self.description
+
     @property
     def definition(self) -> ToolDefinition:
         """Generate the ToolDefinition for this tool."""
@@ -249,7 +260,7 @@ class Tool:
                 schema = SchemaOptimizer.create_optimized_json_schema(param_type)
                 self._definition = ToolDefinition(
                     name=self.name,
-                    description=self.description,
+                    description=self._build_tool_definition_description(),
                     parameters=schema,
                     strict=True,
                 )
@@ -279,7 +290,7 @@ class Tool:
 
         self._definition = ToolDefinition(
             name=self.name,
-            description=self.description,
+            description=self._build_tool_definition_description(),
             parameters=schema,
             strict=True,
         )
@@ -375,7 +386,7 @@ def tool(
     Decorator to create a tool from an async function.
 
     Args:
-        description: Description of what the tool does. This is sent to the LLM.
+        description: Short overview used in system prompt tool overview.
         name: Optional custom name for the tool. Defaults to function name.
         registry: Optional ToolRegistry to register the tool to.
                   If None, the tool is NOT registered globally. The caller must
@@ -383,8 +394,8 @@ def tool(
                   register it into a registry.
         ephemeral: How many outputs to keep in context before older ones are removed.
                    False = not ephemeral (keep all), True = keep last 1, int = keep last N.
-        usage_rules: Detailed usage rules for system prompt layer (injected into <system_tools_definition>).
-                     If None, the tool won't appear in the system tools definition block.
+        usage_rules: Detailed usage rules for tool JSON schema/function description.
+                     If provided, ToolDefinition.description uses usage_rules.
 
     Returns:
         A Tool instance wrapping the decorated function.

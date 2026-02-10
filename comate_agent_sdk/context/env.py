@@ -44,14 +44,14 @@ class EnvProvider:
 
         lines = [
             "<system_env>",
-            f"工作目录: {normalized_dir}",
-            f"该目录是否为git仓库: {'是' if is_git_repo else '否'}",
-            f"平台: {sys.platform}",
-            f"操作系统版本: {platform.system()} {platform.release()}",
-            f"今天日期: {date.today().isoformat()}",
+            f"Project Dir: {normalized_dir}",
+            f"Is Git Repo: {'Yes' if is_git_repo else 'No'}",
+            f"Platform: {sys.platform}",
+            f"OS Version: {platform.system()} {platform.release()}",
+            f"Today's Date: {date.today().isoformat()}",
             f"User Timezone: {tz_name}",
-            f"Python 版本: {platform.python_version()}",
-            "</system_env>",
+            f"Python Version: {platform.python_version()}",
+            "</system_env> \n",
         ]
         return "\n".join(lines)
 
@@ -70,15 +70,15 @@ class EnvProvider:
 
         lines = [
             "<git_env>",
-            "git_env: 这是会话开始时的 git 状态快照。请注意，该状态不会在会话期间自动更新。",
-            f"当前分支: {branch}",
+            "git_env: this is a snapshot of the git status at the start of the session. Please note that this status will not be automatically updated during the session.",
+            f"Current Branch: {branch}",
             "",
-            "状态:",
+            "Status:",
             status_text,
             "",
-            "最近提交:",
+            "Recent Commits:",
             log_text,
-            "</git_env>",
+            "</git_env> \n",
         ]
         return "\n".join(lines)
 

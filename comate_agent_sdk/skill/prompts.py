@@ -7,11 +7,11 @@
 from comate_agent_sdk.skill.models import SkillDefinition
 
 SKILL_STRATEGY_PROMPT = """
-<avaliable_skills>
+<skills>
 {skill_list}
-</avaliable_skills>
+</skills>
 
-<skill_usage_rules>
+<skill_use>
 - Discovery: The list above is the skills available in this session (name + description + file path). Skill bodies live on disk at the listed paths.
 - Trigger rules: If the user names a skill (with `$SkillName` or plain text) OR the task clearly matches a skill's description shown above, you must use that skill for that turn. Multiple mentions mean use them all. Do not carry skills across turns unless re-mentioned.
 - Missing/blocked: If a named skill isn't in the list or the path can't be read, say so briefly and continue with the best fallback.
@@ -28,7 +28,7 @@ SKILL_STRATEGY_PROMPT = """
   - Avoid deep reference-chasing: prefer opening only files directly linked from `SKILL.md` unless you're blocked.
   - When variants exist (frameworks, providers, domains), pick only the relevant reference file(s) and note that choice.
 - Safety and fallback: If a skill can't be applied cleanly (missing files, unclear instructions), state the issue, pick the next-best approach, and continue.
-</skill_usage_rules>
+</skill_use>
 """
 
 

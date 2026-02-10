@@ -50,14 +50,14 @@ class LoweringPipeline:
         """
         messages: list[BaseMessage] = []
 
-        # --- Step 1: Header → SystemMessage ---
+        # Step 1: Header → SystemMessage
         header_text = LoweringPipeline._build_header_text(context)
         if header_text:
             # 判断是否需要 cache hint
             cache = any(item.cache_hint for item in context.header.items)
             messages.append(SystemMessage(content=header_text, cache=cache))
 
-        # --- Step 2: Conversation items → BaseMessage ---
+        # Step 2: Conversation items → BaseMessage
         for item in context.conversation.items:
             if item.destroyed:
                 # 已销毁的条目仍然需要保留在列表中（serializer 会用 placeholder）
@@ -68,7 +68,7 @@ class LoweringPipeline:
             if item.message is not None:
                 messages.append(item.message)
 
-        # --- Step 3: 注入 system-reminders ---
+        # Step 3: 注入 system-reminders
         messages = LoweringPipeline._inject_reminders(messages, context.reminders)
 
         return messages
@@ -99,7 +99,7 @@ class LoweringPipeline:
             if item and item.content_text:
                 parts.append(item.content_text)
 
-        return "\n\n".join(parts) if parts else ""
+        return "\n".join(parts) if parts else ""
 
     @staticmethod
     def _inject_reminders(

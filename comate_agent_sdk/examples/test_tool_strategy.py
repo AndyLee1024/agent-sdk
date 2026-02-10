@@ -37,10 +37,10 @@ def test_tool_strategy_generation():
 
     # 验证内容包含关键元素
     content = tool_strategy_item.content_text
-    assert "<system_tools_definition>" in content, "缺少 <system_tools_definition> 标签"
-    assert "<tool_overview>" in content, "缺少 <tool_overview> 标签"
-    assert "Bash" in content, "缺少 Bash 工具"
-    assert "Read" in content, "缺少 Read 工具"
+    assert "[SYSTEM_TOOLS_DEFINITION]" in content, "缺少 [SYSTEM_TOOLS_DEFINITION] 段"
+    assert "- **Bash**:" in content, "缺少 Bash 工具概览"
+    assert "- **Read**:" in content, "缺少 Read 工具概览"
+    assert '<tool name="' not in content, "SYSTEM_TOOLS_DEFINITION 不应包含详细说明块"
     logger.info("✓ 内容验证通过")
 
 
@@ -58,6 +58,7 @@ def test_custom_tools_no_usage_rules():
         config=AgentConfig(
             system_prompt="Agent with custom tool",
             tools=[custom_tool],
+            agents=(),
         ),
     )
     agent = template.create_runtime()
@@ -95,7 +96,7 @@ def test_system_message_order():
     positions = {
         "SYSTEM_PROMPT": content.find("TEST_SYSTEM_PROMPT"),
         "MEMORY": content.find("TEST_MEMORY"),
-        "TOOL_STRATEGY": content.find("<system_tools_definition>"),
+        "TOOL_STRATEGY": content.find("[SYSTEM_TOOLS_DEFINITION]"),
     }
 
     assert (

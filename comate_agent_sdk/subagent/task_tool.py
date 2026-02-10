@@ -19,6 +19,62 @@ logger = logging.getLogger("comate_agent_sdk.subagent.task_tool")
 _INTERNAL_TASK_TOOL_MARKER_ATTR = "_comate_agent_sdk_internal"
 _INTERNAL_TASK_TOOL_MARKER_VALUE = True
 
+_TASK_USAGE_RULES = """Launch a new agent to handle complex, multi-step tasks autonomously.
+
+When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+
+When NOT to use the Agent tool:
+- If you want to read a specific file path, use the Read or Glob tool instead of the Agent tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
+- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Agent tool, to find the match more quickly
+- Other tasks that are not related to the agent descriptions above
+
+
+Usage notes:
+1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+3. Each agent invocation is stateless. You will not be able to send additional messages to the agent, nor will the agent be able to communicate with you outside of its final report. Therefore, your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
+4. The agent's outputs should generally be trusted
+5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
+6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+
+Example usage:
+
+<example_agent_descriptions>
+"code-reviewer": use this agent after you are done writing a signficant piece of code
+"greeting-responder": use this agent when to respond to user greetings with a friendly joke
+</example_agent_description>
+
+<example>
+user: "Please write a function that checks if a number is prime"
+assistant: Sure let me write a function that checks if a number is prime
+assistant: First let me use the Write tool to write a function that checks if a number is prime
+assistant: I'm going to use the Write tool to write the following code:
+<code>
+function isPrime(n) {
+  if (n <= 1) return false
+  for (let i = 2; i * i <= n; i++) {
+    if (n % i === 0) return false
+  }
+  return true
+}
+</code>
+<commentary>
+Since a signficant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+</commentary>
+assistant: Now let me use the code-reviewer agent to review the code
+assistant: Uses the Task tool to launch the with the code-reviewer agent 
+</example>
+
+<example>
+user: "Hello"
+<commentary>
+Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
+</commentary>
+assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+</example>
+"""
+
 
 def create_task_tool(
     agents: list[AgentDefinition],
@@ -51,16 +107,18 @@ def create_task_tool(
         - agent_def.tools is None：继承父 Agent 工具（禁止 Task，避免嵌套 subagent）
         - agent_def.tools 是列表：按名称解析（优先从 parent_tools 解析动态工具；再从 registry 解析）
         """
+        from comate_agent_sdk.agent.tool_visibility import SUBAGENT_HIDDEN_TOOL_NAMES
+
         parent_map = {t.name: t for t in parent_tools}
 
         if agent_def.tools is None:
-            tools = [t for t in parent_tools if t.name not in ("Task", "AskUserQuestion")]
+            tools = [t for t in parent_tools if t.name not in SUBAGENT_HIDDEN_TOOL_NAMES]
             return tools, []
 
         resolved: list[Tool] = []
         missing: list[str] = []
         for name in agent_def.tools or []:
-            if name in ("Task", "AskUserQuestion"):
+            if name in SUBAGENT_HIDDEN_TOOL_NAMES:
                 continue
             if name in parent_map:
                 resolved.append(parent_map[name])
@@ -72,7 +130,10 @@ def create_task_tool(
 
         return resolved, missing
 
-    @tool("Launch a subagent to handle a specific task.")
+    @tool(
+        "Launch a new agent to handle complex, multi-step tasks autonomously.",
+        usage_rules=_TASK_USAGE_RULES,
+    )
     async def Task(
         subagent_type: str,
         prompt: str,

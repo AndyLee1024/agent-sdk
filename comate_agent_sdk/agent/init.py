@@ -229,6 +229,7 @@ def _resolve_compaction_llm(
 
 def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     """运行态初始化：只初始化可变状态，不做模板发现。"""
+    from comate_agent_sdk.agent.tool_visibility import hidden_tool_names, visible_tools
     from comate_agent_sdk.tools import ToolRegistry, get_default_registry
 
     # ====== 自动推断 tools 和 tool_registry ======
@@ -306,6 +307,14 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     if runtime._is_subagent and runtime.agents:
         raise ValueError("Subagent 不能再定义 agents（不支持嵌套）")
 
+    if runtime._is_subagent:
+        blocked_names = hidden_tool_names(runtime.tools, is_subagent=True)
+        runtime.tools = visible_tools(runtime.tools, is_subagent=True)
+        if blocked_names:
+            logger.info(
+                f"Subagent 隐藏受限工具: {blocked_names}"
+            )
+
     for t in runtime.tools:
         assert isinstance(t, Tool), (
             f"Expected Tool instance, got {type(t).__name__}. Did you forget to use the @tool decorator?"
@@ -366,13 +375,13 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         usage_source=compaction_usage_source,
     )
 
-    runtime._setup_tool_strategy()
     runtime._setup_agent_loop()
 
     if runtime.agents:
         runtime._setup_subagents()
 
     runtime._setup_skills()
+    runtime._setup_tool_strategy()
 
     resolved_prompt = runtime._resolve_system_prompt()
     if resolved_prompt:

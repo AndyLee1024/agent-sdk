@@ -231,4 +231,29 @@ Rules:
 Caching:
 - Includes a short-lived cache to speed up repeated fetches.
 """
+
+
+# -----------------------------
+# AskUserQuestion
+# -----------------------------
+
+ASK_USER_QUESTION_USAGE_RULES = """Use this tool ONLY when executing a specific task and you need structured input from the user to proceed. This is for task execution workflow, NOT for casual conversation.
+
+Use this tool when:
+1. User has given you a task, and you need to gather specific requirements/preferences before implementation
+2. You encounter ambiguous instructions during task execution that require clarification
+3. You need the user to make implementation choices (e.g., framework selection, design options)
+4. You need to offer multiple approaches and let user decide
+
+DO NOT use this tool when:
+- Having casual conversation or greetings (just respond naturally)
+- The user hasn't given you a specific task yet
+- You can reasonably infer the answer from context
+- Asking meta questions about whether to start working (just start or ask naturally in your response)
+
+Usage notes:
+- Set multiSelect: true to allow multiple selections
+- Put recommended options first and add "(Recommended)" to the label
+- In plan mode: Use this ONLY to clarify requirements or choose approaches BEFORE finalizing the plan. Use ExitPlanMode for plan approval, NOT this tool.
+"""
  

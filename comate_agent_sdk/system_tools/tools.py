@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, field_validator
 from comate_agent_sdk.llm.messages import UserMessage
 from comate_agent_sdk.system_tools.artifact_store import ArtifactStore
 from comate_agent_sdk.system_tools.description import (
+    ASK_USER_QUESTION_USAGE_RULES,
     BASH_USAGE_RULES,
     EDIT_USAGE_RULES,
     GLOB_USAGE_RULES,
@@ -1882,6 +1883,7 @@ async def WebFetch(
 @tool(
     "Use this tool when you need to ask the user questions during execution.",
     name="AskUserQuestion",
+    usage_rules=ASK_USER_QUESTION_USAGE_RULES,
 )
 async def AskUserQuestion(
     params: AskUserQuestionInput,

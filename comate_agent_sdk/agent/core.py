@@ -496,7 +496,13 @@ class AgentRuntime:
 
     @property
     def tool_definitions(self) -> list[ToolDefinition]:
-        return [t.definition for t in self.tools]
+        from comate_agent_sdk.agent.tool_visibility import visible_tools
+
+        visible = visible_tools(
+            self.tools,
+            is_subagent=bool(self._is_subagent),
+        )
+        return [t.definition for t in visible]
 
     @property
     def messages(self) -> list[BaseMessage]:
@@ -545,7 +551,7 @@ class AgentRuntime:
             import json
 
             tool_defs_json = json.dumps(
-                [t.definition.model_dump() for t in self.tools],
+                [d.model_dump() for d in self.tool_definitions],
                 ensure_ascii=False,
             )
             tool_defs_tokens = self._context.token_counter.count(tool_defs_json)

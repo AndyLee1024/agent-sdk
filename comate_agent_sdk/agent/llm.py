@@ -30,10 +30,11 @@ async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
                     raise
                 logger.warning(f"MCP tools 加载失败（已降级继续）：{e}")
 
+            tool_definitions = agent.tool_definitions
             response = await agent.llm.ainvoke(
                 messages=agent._context.lower(),
-                tools=agent.tool_definitions if agent.tools else None,
-                tool_choice=agent.tool_choice if agent.tools else None,
+                tools=tool_definitions or None,
+                tool_choice=agent.tool_choice if tool_definitions else None,
             )
 
             # Track token usage

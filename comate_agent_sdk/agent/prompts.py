@@ -9,11 +9,11 @@ You are operating in an *agent loop*, iteratively completing tasks through these
 5. Receive observation: The action result will be appended to the context as a new observation
 6. Iterate loop: Repeat the above steps patiently until the task is fully completed
 7. Deliver outcome: Send results and deliverables to the user via message
-</agent_loop>"""
+</agent_loop>
+"""
 
 # SDK 内置默认系统提示
-SDK_DEFAULT_SYSTEM_PROMPT = """
-SYSTEM_ROLE_PLACEHOLDER
+SDK_DEFAULT_SYSTEM_PROMPT = """SYSTEM_ROLE_PLACEHOLDER
 
 <language>
 - Use the language of the user's first message as the working language

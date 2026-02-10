@@ -16,7 +16,10 @@ def setup_tool_strategy(agent: "AgentRuntime") -> None:
     """设置工具策略提示（写入 ContextIR header）。"""
     from comate_agent_sdk.agent.tool_strategy import generate_tool_strategy
 
-    tool_strategy = generate_tool_strategy(agent.tools)
+    tool_strategy = generate_tool_strategy(
+        agent.tools,
+        is_subagent=bool(getattr(agent, "_is_subagent", False)),
+    )
     if tool_strategy:
         agent._context.set_tool_strategy(tool_strategy)
 

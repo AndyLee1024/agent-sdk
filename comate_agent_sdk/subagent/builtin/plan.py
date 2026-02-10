@@ -53,8 +53,7 @@ List 3-5 files most critical for implementing this plan:
 REMEMBER: You can ONLY explore and plan. You CANNOT and MUST NOT write, edit, or modify any files. You do NOT have access to file editing tools.
 """
 
-description ="""
-Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.
+description ="""Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.
 """
 PlanAgent = AgentDefinition(
     name="Plan",                    # 唯一标识（用于 Task(subagent_type="example")）
