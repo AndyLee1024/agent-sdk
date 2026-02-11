@@ -101,6 +101,7 @@ class ContextIR:
     _todo_state: dict[str, Any] = field(default_factory=dict)
     _turn_number: int = 0
     _todo_turn_number_at_update: int = 0
+    _todo_empty_reminder_start_turn: int = 0  # 空 todo 提醒开始的轮次
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
 
@@ -935,6 +936,8 @@ class ContextIR:
         # 根据状态注册新 reminder
         if not active_todos:
             # 如果 todo 为空，注册"空列表"提醒
+            # 每次进入空状态时，重置起始轮次（这样会在第一次立即提醒）
+            self._todo_empty_reminder_start_turn = self._turn_number
             self.register_reminder(SystemReminder(
                 name="todo_list_empty",
                 content=(
@@ -945,10 +948,13 @@ class ContextIR:
                     "Again do not mention this message to the user."
                 ),
                 position=ReminderPosition.END,
-                one_shot=False,  # 持续提醒直到创建 todo
+                one_shot=False,
+                condition=self._should_remind_empty_todo,  # 每 8 轮提醒一次
             ))
         else:
-            # 如果 todo 非空，注册"温和提醒"（不包含完整 JSON）
+            # 如果 todo 非空，重置空提醒起始轮次（下次变空时重新计时）
+            self._todo_empty_reminder_start_turn = 0
+            # 注册"温和提醒"（不包含完整 JSON）
             self.register_reminder(SystemReminder(
                 name="todo_gentle_reminder",
                 content=(
@@ -999,6 +1005,9 @@ class ContextIR:
         self.remove_reminder("todo_gentle_reminder")
 
         if not active_todos:
+            # 恢复时如果是空状态，设置起始轮次为当前轮次
+            if self._todo_empty_reminder_start_turn == 0:
+                self._todo_empty_reminder_start_turn = self._turn_number
             self.register_reminder(SystemReminder(
                 name="todo_list_empty",
                 content=(
@@ -1010,6 +1019,7 @@ class ContextIR:
                 ),
                 position=ReminderPosition.END,
                 one_shot=False,
+                condition=self._should_remind_empty_todo,  # 每 8 轮提醒一次
             ))
         else:
             self.register_reminder(SystemReminder(
@@ -1028,6 +1038,16 @@ class ContextIR:
             return False
         gap = self._turn_number - self._todo_turn_number_at_update
         return gap >= 3
+
+    def _should_remind_empty_todo(self) -> bool:
+        """判断是否应该提醒空 todo 列表
+
+        策略：第一次立即提醒（gap=0），之后每隔 8 轮提醒一次
+        """
+        if self.has_todos():
+            return False
+        gap = self._turn_number - self._todo_empty_reminder_start_turn
+        return gap % 8 == 0
 
     def get_todo_state(self) -> dict[str, Any]:
         """获取当前 TODO 状态"""
@@ -1054,6 +1074,9 @@ class ContextIR:
 
         # 如果还没有注册过空列表提醒
         if not any(r.name == "todo_list_empty" for r in self.reminders):
+            # 记录空提醒的起始轮次
+            if self._todo_empty_reminder_start_turn == 0:
+                self._todo_empty_reminder_start_turn = self._turn_number
             self.register_reminder(SystemReminder(
                 name="todo_list_empty",
                 content=(
@@ -1065,4 +1088,5 @@ class ContextIR:
                 ),
                 position=ReminderPosition.END,
                 one_shot=False,
+                condition=self._should_remind_empty_todo,  # 每 8 轮提醒一次
             ))

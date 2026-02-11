@@ -15,10 +15,10 @@ DEFAULT_AGENT_ROLE = GENERAL_ROLE
 
 _ROLE_OPENING_LINES: dict[str, str] = {
     GENERAL_ROLE: (
-        "You are Comate, an interactive CLI tool that helps users as a general AI agent."
+        "You are Comate CLI, an interactive general AI agent running on a user's computer that helps users as a general AI agent."
     ),
     SOFTWARE_ENGINEERING_ROLE: (
-        "You are Comate, an interactive CLI tool that helps users with software engineering tasks."
+        "You are Comate CLI, an interactive general AI agent running on a user's computer that helps users with software engineering tasks."
     ),
 }
 

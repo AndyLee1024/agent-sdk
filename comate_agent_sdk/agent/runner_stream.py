@@ -27,7 +27,7 @@ from comate_agent_sdk.agent.events import (
 from comate_agent_sdk.agent.history import destroy_ephemeral_messages
 from comate_agent_sdk.agent.llm import invoke_llm
 from comate_agent_sdk.agent.runner import check_and_compact, generate_max_iterations_summary, precheck_and_compact
-from comate_agent_sdk.agent.tool_exec import execute_tool_call, extract_screenshot
+from comate_agent_sdk.agent.tool_exec import _coerce_tool_arguments, execute_tool_call, extract_screenshot
 from comate_agent_sdk.llm.messages import (
     ContentPartImageParam,
     ContentPartTextParam,
@@ -77,6 +77,34 @@ def _resolve_task_metadata(
 
     source_prefix = f"subagent:{subagent_name}:{tool_call_id}"
     return subagent_name, description, source_prefix
+
+
+def _normalize_tool_call_event_args(
+    agent: "AgentRuntime",
+    *,
+    tool_name: str,
+    raw_args: object,
+) -> dict:
+    if not isinstance(raw_args, dict):
+        return {"_raw": str(raw_args)}
+
+    tool = agent._tool_map.get(tool_name)
+    if tool is None:
+        return raw_args
+
+    schema = tool.definition.parameters
+    if not isinstance(schema, dict):
+        return raw_args
+
+    try:
+        coerced = _coerce_tool_arguments(raw_args, schema)
+    except Exception as exc:
+        logger.debug(f"Failed to normalize ToolCallEvent args for {tool_name}: {exc}")
+        return raw_args
+
+    if isinstance(coerced, dict):
+        return coerced
+    return raw_args
 
 
 async def query_stream(
@@ -207,7 +235,11 @@ async def query_stream(
                             args = json.loads(tc.function.arguments)
                         except json.JSONDecodeError:
                             args = {"_raw": tc.function.arguments}
-                        args_by_id[tc.id] = args if isinstance(args, dict) else {"_raw": str(args)}
+                        args_by_id[tc.id] = _normalize_tool_call_event_args(
+                            agent,
+                            tool_name="Task",
+                            raw_args=args,
+                        )
                         task_args = args_by_id[tc.id]
 
                         subagent_name, description, source_prefix = _resolve_task_metadata(
@@ -355,7 +387,11 @@ async def query_stream(
                     args = json.loads(tool_call.function.arguments)
                 except json.JSONDecodeError:
                     args = {"_raw": tool_call.function.arguments}
-                args_dict = args if isinstance(args, dict) else {"_raw": str(args)}
+                args_dict = _normalize_tool_call_event_args(
+                    agent,
+                    tool_name=tool_name,
+                    raw_args=args,
+                )
 
                 is_task = tool_name == "Task"
                 task_subagent_name = "Task"
@@ -498,9 +534,9 @@ async def query_stream(
                         except Exception:
                             questions = []
 
-                    if not questions and isinstance(args, dict):
+                    if not questions:
                         # fallback for legacy behavior
-                        raw_questions = args.get("questions", [])
+                        raw_questions = args_dict.get("questions", [])
                         if isinstance(raw_questions, list):
                             questions = [q for q in raw_questions if isinstance(q, dict)]
 

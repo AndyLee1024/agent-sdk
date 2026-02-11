@@ -71,7 +71,7 @@ class ToolCallEvent:
 	"""The name of the tool being called."""
 
 	args: dict[str, Any]
-	"""The arguments passed to the tool."""
+	"""Schema-normalized arguments passed to the tool."""
 
 	tool_call_id: str
 	"""The unique ID of this tool call."""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from typing import Any
 
 from rich.console import Group, RenderableType
@@ -13,12 +14,29 @@ _ALLOWED_PRIORITY = {"high", "medium", "low"}
 _MAX_VISIBLE_ITEMS = 6
 
 
+def _parse_todos_value(value: Any) -> list[dict[str, Any]] | None:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(parsed, list):
+            return parsed
+    return None
+
+
 def _as_todos(args: dict[str, Any]) -> list[dict[str, Any]] | None:
-    if "todos" in args and isinstance(args["todos"], list):
-        return args["todos"]
+    if "todos" in args:
+        parsed = _parse_todos_value(args["todos"])
+        if parsed is not None:
+            return parsed
     params = args.get("params")
-    if isinstance(params, dict) and isinstance(params.get("todos"), list):
-        return params["todos"]
+    if isinstance(params, dict):
+        parsed = _parse_todos_value(params.get("todos"))
+        if parsed is not None:
+            return parsed
     return None
 
 
