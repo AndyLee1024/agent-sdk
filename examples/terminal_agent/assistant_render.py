@@ -8,7 +8,12 @@ from rich.console import Group, RenderableType
 from rich.markdown import Markdown
 from rich.text import Text
 
-from terminal_agent.message_style import ASSISTANT_PREFIX, ASSISTANT_PREFIX_STYLE
+from terminal_agent.message_style import (
+    ASSISTANT_PREFIX,
+    ASSISTANT_PREFIX_STYLE,
+    USER_PREFIX,
+    USER_PREFIX_STYLE,
+)
 
 _LEADING_NOISE_CHARS = frozenset(
     {
@@ -26,6 +31,7 @@ _BLOCK_MARKDOWN_PREFIX_RE = re.compile(
 )
 _AMBIGUOUS_BLOCK_PREFIX_RE = re.compile(r"^\s*(#{1,6}|[-*+]|>|\d+\.|`{1,2}|~{1,2})$")
 _SegmentMode = Literal["prefixed_plain_first_line", "markdown_only"]
+_Block = RenderableType | tuple[str, Text]
 
 
 def _is_noise_char(ch: str) -> bool:
@@ -92,7 +98,7 @@ class AssistantStreamRenderer:
         self._trim_segment_leading_noise_pending = True
         self._segment_chunks: list[str] = []
         self._segment_mode: _SegmentMode | None = None
-        self._blocks: list[RenderableType] = []
+        self._blocks: list[_Block] = []
         self._last_block_external = False
         self._pending_gap_before_next_segment = False
 
@@ -138,6 +144,12 @@ class AssistantStreamRenderer:
     def _is_gap_block(renderable: RenderableType) -> bool:
         return isinstance(renderable, Text) and not renderable.plain
 
+    @staticmethod
+    def _materialize_block(block: _Block) -> RenderableType:
+        if isinstance(block, tuple) and len(block) == 2 and block[0] == "tool_ref":
+            return block[1]
+        return block
+
     def _append_gap_if_needed(self) -> None:
         if self._blocks and not self._is_gap_block(self._blocks[-1]):
             self._blocks.append(Text(""))
@@ -171,6 +183,21 @@ class AssistantStreamRenderer:
             self._append_gap_if_needed()
         for content, style in lines:
             self._blocks.append(Text(content, style=style))
+        self._last_block_external = True
+
+    def append_tool_line(self, text_ref: Text) -> None:
+        self._flush_active_segment(inter_block_gap=True)
+        if not self._last_block_external:
+            self._append_gap_if_needed()
+        self._blocks.append(("tool_ref", text_ref))
+        self._last_block_external = True
+
+    def append_user_message(self, content: str) -> None:
+        text = Text()
+        text.append(f"{USER_PREFIX} ", style=USER_PREFIX_STYLE)
+        text.append(content)
+        self._blocks.append(text)
+        self._append_gap_if_needed()
         self._last_block_external = True
 
     def append_text(self, text: str) -> None:
@@ -207,7 +234,7 @@ class AssistantStreamRenderer:
         self._pending_gap_before_next_segment = False
 
     def renderable(self) -> RenderableType:
-        blocks = list(self._blocks)
+        blocks = [self._materialize_block(block) for block in self._blocks]
         content = "".join(self._segment_chunks)
         if content and self._segment_mode is not None:
             blocks.append(self._build_segment_renderable(self._segment_mode, content))

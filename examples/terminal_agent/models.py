@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 ToolStatus = Literal["running", "success", "error"]
+HistoryEntryType = Literal["user", "assistant", "tool_call", "tool_result", "system"]
 
 
 @dataclass
@@ -24,6 +25,13 @@ class ToolRunState:
     task_tokens: int = 0
     last_progress_render_ts: float = 0.0
     last_progress_tokens: int = 0
+
+
+@dataclass
+class HistoryEntry:
+    entry_type: HistoryEntryType
+    text: str
+    is_error: bool = False
 
 
 @dataclass(frozen=True)

@@ -104,6 +104,8 @@ DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
     ItemType.SYSTEM_PROMPT.value: TypeCompactionRule(
         strategy=CompactionStrategy.NONE
     ),
+    # 注意：Memory 现在存储在 ContextIR._memory_item 独立字段中，不在 conversation.items 中
+    # 该规则永远不会被匹配，保留仅为向后兼容
     ItemType.MEMORY.value: TypeCompactionRule(
         strategy=CompactionStrategy.NONE
     ),

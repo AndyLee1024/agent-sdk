@@ -49,13 +49,12 @@ logger = logging.getLogger("comate_agent_sdk.context.ir")
 _HEADER_ITEM_ORDER: dict[ItemType, int] = {
     ItemType.SYSTEM_PROMPT: 0,
     ItemType.AGENT_LOOP: 1,
-    ItemType.MEMORY: 2,
-    ItemType.TOOL_STRATEGY: 3,
-    ItemType.MCP_TOOL: 4,
-    ItemType.SUBAGENT_STRATEGY: 5,
-    ItemType.SKILL_STRATEGY: 6,
-    ItemType.SYSTEM_ENV: 7,
-    ItemType.GIT_ENV: 8,
+    ItemType.TOOL_STRATEGY: 2,
+    ItemType.MCP_TOOL: 3,
+    ItemType.SUBAGENT_STRATEGY: 4,
+    ItemType.SKILL_STRATEGY: 5,
+    ItemType.SYSTEM_ENV: 6,
+    ItemType.GIT_ENV: 7,
 }
 
 
@@ -76,8 +75,9 @@ class ContextIR:
     将 Agent 的上下文从扁平 list[BaseMessage] 提升为结构化 IR。
 
     Segments:
-        header: system_prompt + memory + subagent_strategy + skill_strategy
+        header: system_prompt + agent_loop + tool_strategy + subagent_strategy + skill_strategy
         conversation: 所有对话消息
+        memory: 独立字段，lowering 时作为 UserMessage(is_meta=True) 注入
 
     Attributes:
         budget: 预算配置
@@ -85,6 +85,7 @@ class ContextIR:
         event_bus: 事件总线
         reminders: 系统提醒列表
         _todo_state: TODO 状态存储 {todos: [...], updated_at: timestamp}
+        _memory_item: Memory 独立存储（不在 header 或 conversation 中）
     """
 
     header: Segment = field(
@@ -102,6 +103,7 @@ class ContextIR:
     _turn_number: int = 0
     _todo_turn_number_at_update: int = 0
     _todo_empty_reminder_start_turn: int = 0  # 空 todo 提醒开始的轮次
+    _memory_item: ContextItem | None = field(default=None, repr=False)
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
 
@@ -183,13 +185,12 @@ class ContextIR:
                 priority=DEFAULT_PRIORITIES[ItemType.AGENT_LOOP],
                 cache_hint=cache,
             )
-            # 在 SYSTEM_PROMPT 之后、MEMORY/TOOL_STRATEGY/SUBAGENT_STRATEGY/SKILL_STRATEGY 之前插入
+            # 在 SYSTEM_PROMPT 之后、TOOL_STRATEGY/SUBAGENT_STRATEGY/SKILL_STRATEGY 之前插入
             insert_idx = 0
             for i, existing_item in enumerate(self.header.items):
                 if existing_item.item_type == ItemType.SYSTEM_PROMPT:
                     insert_idx = i + 1
                 elif existing_item.item_type in (
-                    ItemType.MEMORY,
                     ItemType.TOOL_STRATEGY,
                     ItemType.SUBAGENT_STRATEGY,
                     ItemType.SKILL_STRATEGY,
@@ -207,45 +208,46 @@ class ContextIR:
     def set_memory(self, content: str, cache: bool = True) -> None:
         """设置 MEMORY 静态背景知识（幂等覆盖）
 
+        Memory 不进入 header，而是作为独立字段存储。
+        lowering 时会被注入为 UserMessage(is_meta=True, content="<instructions>...")，
+        位于 SystemMessage 之后、conversation items 之前。
+
         Args:
-            content: MEMORY 内容
+            content: MEMORY 内容（通常来自 CLAUDE.md / AGENTS.md 等仓库文件）
             cache: 是否建议缓存（如 Anthropic prompt cache）
         """
         # 延迟导入避免循环依赖
         from comate_agent_sdk.agent.prompts import MEMORY_NOTICE
 
-        # 包裹 <memory> 标签
-        wrapped_content = f"<memory>\n{content}\n {MEMORY_NOTICE}\n</memory>"
+        # 包裹 <instructions> 标签（替代 <memory>）
+        wrapped_content = f"<user_instructions>\n{content}\n</user_instructions> \n{MEMORY_NOTICE}"
 
-        existing = self.header.find_one_by_type(ItemType.MEMORY)
         token_count = self.token_counter.count(wrapped_content)
 
-        if existing:
-            existing.content_text = wrapped_content
-            existing.token_count = token_count
-            existing.cache_hint = cache
+        # 创建 UserMessage(is_meta=True)
+        message = UserMessage(content=wrapped_content, is_meta=True, cache=cache)
+
+        if self._memory_item:
+            # 幂等覆盖
+            self._memory_item.content_text = wrapped_content
+            self._memory_item.token_count = token_count
+            self._memory_item.cache_hint = cache
+            self._memory_item.message = message
         else:
-            item = ContextItem(
+            # 首次创建
+            self._memory_item = ContextItem(
                 item_type=ItemType.MEMORY,
+                message=message,
                 content_text=wrapped_content,
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.MEMORY],
                 cache_hint=cache,
             )
-            # 在 system_prompt/agent_loop 之后、tool_strategy/subagent_strategy 之前插入
-            insert_idx = len(self.header.items)  # 默认插入到末尾
-            for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP):
-                    insert_idx = i + 1
-                elif existing_item.item_type in (ItemType.TOOL_STRATEGY, ItemType.SUBAGENT_STRATEGY):
-                    insert_idx = i
-                    break
-            self.header.items.insert(insert_idx, item)
             self.event_bus.emit(ContextEvent(
                 event_type=EventType.ITEM_ADDED,
                 item_type=ItemType.MEMORY,
-                item_id=item.id,
-                detail="memory set",
+                item_id=self._memory_item.id,
+                detail="memory set (as independent UserMessage)",
             ))
 
     def set_subagent_strategy(self, prompt: str) -> None:
@@ -263,10 +265,10 @@ class ContextIR:
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.SUBAGENT_STRATEGY],
             )
-            # 在 system_prompt/agent_loop/memory/tool_strategy 之后、skill_strategy 之前插入
+            # 在 system_prompt/agent_loop/tool_strategy 之后、skill_strategy 之前插入
             insert_idx = 0
             for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP, ItemType.MEMORY, ItemType.TOOL_STRATEGY):
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP, ItemType.TOOL_STRATEGY):
                     insert_idx = i + 1
                 elif existing_item.item_type == ItemType.SKILL_STRATEGY:
                     break
@@ -281,7 +283,7 @@ class ContextIR:
     def set_tool_strategy(self, prompt: str) -> None:
         """设置 Tool 策略提示（幂等覆盖）
 
-        插入位置：MEMORY 之后、SUBAGENT_STRATEGY 之前
+        插入位置：AGENT_LOOP 之后、SUBAGENT_STRATEGY 之前
         """
         existing = self.header.find_one_by_type(ItemType.TOOL_STRATEGY)
         token_count = self.token_counter.count(prompt)
@@ -296,10 +298,10 @@ class ContextIR:
                 token_count=token_count,
                 priority=DEFAULT_PRIORITIES[ItemType.TOOL_STRATEGY],
             )
-            # 在 system_prompt/agent_loop/memory 之后、subagent_strategy/skill_strategy 之前插入
+            # 在 system_prompt/agent_loop 之后、subagent_strategy/skill_strategy 之前插入
             insert_idx = 0
             for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP, ItemType.MEMORY):
+                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP):
                     insert_idx = i + 1
                 elif existing_item.item_type in (ItemType.SUBAGENT_STRATEGY, ItemType.SKILL_STRATEGY):
                     break
@@ -798,7 +800,8 @@ class ContextIR:
     @property
     def total_tokens(self) -> int:
         """当前总 token 数（估算值）"""
-        return self.header.total_tokens + self.conversation.total_tokens
+        memory_tokens = self._memory_item.token_count if self._memory_item else 0
+        return self.header.total_tokens + self.conversation.total_tokens + memory_tokens
 
     def get_budget_status(self) -> BudgetStatus:
         """获取预算状态快照"""
@@ -811,10 +814,17 @@ class ContextIR:
                 current = tokens_by_type.get(item.item_type, 0)
                 tokens_by_type[item.item_type] = current + item.token_count
 
+        # 统计 memory_item
+        if self._memory_item and not self._memory_item.destroyed:
+            current = tokens_by_type.get(self._memory_item.item_type, 0)
+            tokens_by_type[self._memory_item.item_type] = current + self._memory_item.token_count
+
+        memory_tokens = self._memory_item.token_count if self._memory_item else 0
+
         return BudgetStatus(
             total_tokens=self.total_tokens,
             header_tokens=self.header.total_tokens,
-            conversation_tokens=self.conversation.total_tokens,
+            conversation_tokens=self.conversation.total_tokens + memory_tokens,
             tokens_by_type=tokens_by_type,
             total_limit=self.budget.total_limit,
             compact_threshold_ratio=self.budget.compact_threshold_ratio,
@@ -874,6 +884,7 @@ class ContextIR:
         self._pending_skill_items.clear()
         self.reminders.clear()
         self._todo_state.clear()
+        self._memory_item = None
 
         self.event_bus.emit(ContextEvent(
             event_type=EventType.CONTEXT_CLEARED,
@@ -905,6 +916,11 @@ class ContextIR:
     def is_empty(self) -> bool:
         """上下文是否为空（header 和 conversation 都没有内容）"""
         return not self.header.items and not self.conversation.items
+
+    @property
+    def memory_item(self) -> ContextItem | None:
+        """获取 Memory item（只读）"""
+        return self._memory_item
 
     # ===== TODO 状态管理 =====
 

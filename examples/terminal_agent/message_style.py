@@ -5,6 +5,15 @@ from rich.console import Console
 ASSISTANT_PREFIX = "⏺"
 ASSISTANT_PREFIX_STYLE = "bold cyan"
 ASSISTANT_MESSAGE_GAP_LINES = 1
+USER_PREFIX = "❯"
+USER_PREFIX_STYLE = "bold ansicyan"
+
+TOOL_RUNNING_STYLE = "bold blue"
+TOOL_SUCCESS_STYLE = "bold green"
+TOOL_ERROR_STYLE = "bold red"
+TOOL_RUNNING_PREFIX = "→"
+TOOL_SUCCESS_PREFIX = "✓"
+TOOL_ERROR_PREFIX = "✖"
 
 
 def print_assistant_prefix_line(console: Console, content: str) -> None:

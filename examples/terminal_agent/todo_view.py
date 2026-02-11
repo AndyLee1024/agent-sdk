@@ -148,44 +148,53 @@ class TodoStateStore:
         counts = self._summary_counts()
         return counts.get("pending", 0) > 0 or counts.get("in_progress", 0) > 0
 
-    def renderable(self) -> RenderableType | None:
+    def visible_lines(self, *, max_visible_items: int = _MAX_VISIBLE_ITEMS) -> list[str]:
         if not self._current:
-            return None
+            return []
         if not self.has_open_todos():
-            return None
+            return []
 
         counts = self._summary_counts()
-        summary = Text.assemble(
-            ("🗂 TODO  ", "bold cyan"),
-            ("pending=", "cyan"),
-            (str(counts.get("pending", 0)), "bold cyan"),
-            (" | in_progress=", "cyan"),
-            (str(counts.get("in_progress", 0)), "bold cyan"),
-            (" | completed=", "cyan"),
-            (str(counts.get("completed", 0)), "bold cyan"),
-        )
+        lines: list[str] = [
+            (
+                f"TODO  pending={counts.get('pending', 0)} | "
+                f"in_progress={counts.get('in_progress', 0)} | "
+                f"completed={counts.get('completed', 0)}"
+            )
+        ]
 
         open_items = [todo for todo in self._current if todo.status != "completed"]
         done_items = [todo for todo in self._current if todo.status == "completed"]
-        display_items = (open_items + done_items)[:_MAX_VISIBLE_ITEMS]
+        display_items = (open_items + done_items)[: max(max_visible_items, 0)]
 
-        lines: list[RenderableType] = [summary]
         for todo in display_items:
-            line = Text()
-            line.append("  ")
-            line.append_text(Text.from_markup(_status_chip(todo.status)))
-            line.append(" ")
-            content_style = "strike" if todo.status == "completed" else ""
-            line.append(todo.content, style=content_style)
-            line.append(" ")
-            line.append(f"({_priority_label(todo.priority)})", style=_priority_style(todo.priority))
-            lines.append(line)
+            marker = "✔" if todo.status == "completed" else ("◉" if todo.status == "in_progress" else "○")
+            content = todo.content
+            lines.append(f"  {marker} {content} ({_priority_label(todo.priority)})")
 
         hidden = len(self._current) - len(display_items)
         if hidden > 0:
-            lines.append(Text(f"  （还有 {hidden} 项未显示）", style="dim"))
+            lines.append(f"  （还有 {hidden} 项未显示）")
 
         if self._last_change:
-            lines.append(Text(f"最近变更: {self._last_change}", style="dim"))
+            lines.append(f"最近变更: {self._last_change}")
 
+        return lines
+
+    def renderable(self) -> RenderableType | None:
+        plain_lines = self.visible_lines(max_visible_items=_MAX_VISIBLE_ITEMS)
+        if not plain_lines:
+            return None
+
+        lines: list[RenderableType] = []
+        summary_line = plain_lines[0]
+        lines.append(Text(summary_line, style="bold cyan"))
+        for idx, content in enumerate(plain_lines[1:], 1):
+            if idx == len(plain_lines) - 1 and content.startswith("最近变更:"):
+                lines.append(Text(content, style="dim"))
+                continue
+            if content.startswith("  （还有 "):
+                lines.append(Text(content, style="dim"))
+                continue
+            lines.append(Text(content))
         return Group(*lines)

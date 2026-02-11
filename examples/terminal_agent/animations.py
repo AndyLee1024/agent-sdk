@@ -5,9 +5,7 @@ import time
 from collections.abc import Sequence
 from enum import Enum
 
-from rich.align import Align
-from rich.console import Console
-from rich.live import Live
+from rich.console import RenderableType
 from rich.text import Text
 
 from comate_agent_sdk.agent.events import StopEvent, TextEvent, ToolCallEvent, ToolResultEvent, UserQuestionEvent
@@ -92,24 +90,28 @@ class SubmissionAnimator:
 
     def __init__(
         self,
-        console: Console,
+        console: object | None = None,
         phrases: Sequence[str] | None = None,
         refresh_interval: float = 0.12,
         min_phrase_seconds: float = 2.4,
         max_phrase_seconds: float = 3.0,
     ) -> None:
-        self._console = console
+        del console
         self._phrases = tuple(phrases) if phrases else DEFAULT_STATUS_PHRASES
         self._refresh_interval = refresh_interval
         self._min_phrase_seconds = max(0.6, min_phrase_seconds)
         self._max_phrase_seconds = max(self._min_phrase_seconds, max_phrase_seconds)
         self._status_hint: str | None = None
-        self._live: Live | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
         self._frame = 0
+        self._phrase_idx = 0
+        self._phrase_started_at_monotonic = 0.0
+        self._phrase_duration_seconds = 0.0
+        self._dirty = False
+        self._is_active = False
 
-    def _phrase_duration(self, phrase_idx: int) -> float:
+    def _compute_phrase_duration(self, phrase_idx: int) -> float:
         # Deterministic per phrase, bounded by [min, max], and never exceeds 3s by default.
         span = self._max_phrase_seconds - self._min_phrase_seconds
         if span <= 0:
@@ -122,24 +124,25 @@ class SubmissionAnimator:
         if self._task is not None:
             return
         self._frame = 0
+        self._phrase_idx = 0
+        self._phrase_started_at_monotonic = time.monotonic()
+        self._phrase_duration_seconds = self._phrase_duration_for_idx(0)
+        self._is_active = True
+        self._dirty = True
         self._stop_event = asyncio.Event()
-        self._live = Live(
-            "",
-            console=self._console,
-            transient=True,
-            refresh_per_second=max(int(1 / self._refresh_interval), 1),
-            redirect_stdout=False,
-            redirect_stderr=False,
-        )
-        self._live.start()
         self._task = asyncio.create_task(self._run(), name="submission-animator")
 
     def set_status_hint(self, hint: str | None) -> None:
         if hint is None:
+            if self._status_hint is not None:
+                self._dirty = True
             self._status_hint = None
             return
         normalized = hint.strip()
-        self._status_hint = normalized or None
+        new_value = normalized or None
+        if new_value != self._status_hint:
+            self._dirty = True
+        self._status_hint = new_value
 
     async def stop(self) -> None:
         if self._task is None:
@@ -151,35 +154,48 @@ class SubmissionAnimator:
         finally:
             self._task = None
             self._stop_event = None
-            if self._live is not None:
-                self._live.stop()
-            self._live = None
+            self._is_active = False
+            self._dirty = True
+
+    @property
+    def is_active(self) -> bool:
+        return self._is_active
+
+    def consume_dirty(self) -> bool:
+        dirty = self._dirty
+        self._dirty = False
+        return dirty
+
+    def renderable(self) -> RenderableType:
+        if not self._is_active:
+            return Text("")
+
+        pulse_idx = self._frame % len(PULSE_COLORS)
+        phrase = self._status_hint if self._status_hint else self._phrases[self._phrase_idx]
+        dot = Text(
+            f"{PULSE_GLYPHS[pulse_idx]} ",
+            style=f"bold {PULSE_COLORS[pulse_idx]}",
+        )
+        sweep = _cyan_sweep_text(phrase, frame=self._frame)
+        return Text.assemble(dot, sweep)
 
     async def _run(self) -> None:
         assert self._stop_event is not None
-        phrase_idx = 0
-        phrase_started_at = time.monotonic()
-        phrase_duration = self._phrase_duration(phrase_idx)
-
         while not self._stop_event.is_set():
             now = time.monotonic()
-            if now - phrase_started_at >= phrase_duration:
-                phrase_idx = (phrase_idx + 1) % len(self._phrases)
-                phrase_started_at = now
-                phrase_duration = self._phrase_duration(phrase_idx)
-
-            pulse_idx = self._frame % len(PULSE_COLORS)
-            phrase = self._status_hint if self._status_hint else self._phrases[phrase_idx]
-            dot = Text(
-                f"{PULSE_GLYPHS[pulse_idx]} ",
-                style=f"bold {PULSE_COLORS[pulse_idx]}",
-            )
-            sweep = _cyan_sweep_text(phrase, frame=self._frame)
-            line = Text.assemble(dot, sweep)
-            if self._live is not None:
-                self._live.update(Align.left(line))
+            if now - self._phrase_started_at_monotonic >= self._phrase_duration_seconds:
+                self._phrase_idx = (self._phrase_idx + 1) % len(self._phrases)
+                self._phrase_started_at_monotonic = now
+                self._phrase_duration_seconds = self._phrase_duration_for_idx(self._phrase_idx)
             self._frame += 1
-            await asyncio.sleep(self._refresh_interval)
+            self._dirty = True
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=self._refresh_interval)
+            except TimeoutError:
+                continue
+
+    def _phrase_duration_for_idx(self, phrase_idx: int) -> float:
+        return self._compute_phrase_duration(phrase_idx)
 
 
 class AnimationPhase(str, Enum):

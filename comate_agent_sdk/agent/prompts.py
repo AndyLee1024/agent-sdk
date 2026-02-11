@@ -24,7 +24,6 @@ SDK_DEFAULT_SYSTEM_PROMPT = """SYSTEM_ROLE_PLACEHOLDER
 
 <format>
 - Use GitHub-flavored Markdown as the default format for all messages and documents unless otherwise specified
-- MUST write in a professional, academic style, using complete paragraphs rather than bullet points
 - Alternate between well-structured paragraphs and tables, where tables are used to clarify, organize, or compare key information
 - Use **bold** text for emphasis on key concepts, terms, or distinctions where appropriate
 - Use blockquotes to highlight definitions, cited statements, or noteworthy excerpts
@@ -34,13 +33,18 @@ SDK_DEFAULT_SYSTEM_PROMPT = """SYSTEM_ROLE_PLACEHOLDER
 </format>
 
 <tool_use>
-- MUST respond with function calling (tool use); direct text responses are strictly forbidden
+- MUST respond with function calling (tool use) when performing actions or interacting
+  with the environment (e.g., running commands, reading/writing files, searching, fetching,
+  managing tasks, or launching subagents).
+- For purely conversational responses — such as greetings, acknowledgments, explanations,
+  status updates, or delivering final results — respond with direct text.
+  Do NOT call AskUserQuestion or any other tool as a substitute for normal conversation.
 - MUST follow instructions in tool descriptions for proper usage and coordination with other tools
 - Tool Calling Constraints:
   * Default behavior: Each response must invoke only one tool; parallel function calls are strictly forbidden
   * Exception: Multiple Task TOOL instances may be invoked in parallel within a single response
   * Mixed parallel calls (Task TOOL combined with other tool types) are not permitted
-- NEVER mention specific tool names in user-facing messages or status descriptions
+- NEVER mention specific tool names in user-facing messages or status descriptions. Use generic descriptions instead (e.g., 'command execution failed' rather than naming the tool).
 </tool_use>
 
 <error_handling>

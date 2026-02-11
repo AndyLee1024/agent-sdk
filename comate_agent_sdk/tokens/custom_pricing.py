@@ -45,4 +45,40 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
         "input_cost_per_token": 4e-07,
         "output_cost_per_token": 2e-06,
     },
+    "moonshotai/Kimi-K2.5": {
+        "max_input_tokens": 262144,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
+    "Kimi-K2.5": {
+        "max_input_tokens": 262144,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
+    "deepseek-chat": {
+        "max_input_tokens": 128000,
+        "max_output_tokens": 8000,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
+    "deepseek-reasoner": {
+        "max_input_tokens": 128000,
+        "max_output_tokens": 64000,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
+    "MiniMax-M2.1": {
+        "max_input_tokens": 204800,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
+    "MiniMaxAI/MiniMax-M2.1": {
+        "max_input_tokens": 204800,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
 }

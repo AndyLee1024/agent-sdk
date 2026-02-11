@@ -57,6 +57,10 @@ class LoweringPipeline:
             cache = any(item.cache_hint for item in context.header.items)
             messages.append(SystemMessage(content=header_text, cache=cache))
 
+        # Step 1.5: Memory → UserMessage (在 SystemMessage 之后、conversation 之前)
+        if context.memory_item and context.memory_item.message:
+            messages.append(context.memory_item.message)
+
         # Step 2: Conversation items → BaseMessage
         for item in context.conversation.items:
             if item.destroyed:
@@ -77,7 +81,8 @@ class LoweringPipeline:
     def _build_header_text(context: ContextIR) -> str:
         """拼接 header 段的各部分文本
 
-        顺序：system_prompt → agent_loop → memory → tool_strategy → subagent_strategy → skill_strategy → system_env → git_env
+        顺序：system_prompt → agent_loop → tool_strategy → subagent_strategy → skill_strategy → system_env → git_env
+        注意：memory 不再在 header 中，而是作为独立 UserMessage 注入
         """
         parts: list[str] = []
 
@@ -85,7 +90,6 @@ class LoweringPipeline:
         type_order = [
             ItemType.SYSTEM_PROMPT,
             ItemType.AGENT_LOOP,
-            ItemType.MEMORY,
             ItemType.TOOL_STRATEGY,
             ItemType.MCP_TOOL,
             ItemType.SUBAGENT_STRATEGY,

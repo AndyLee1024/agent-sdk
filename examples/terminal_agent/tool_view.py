@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import json
 import time
-from collections import deque
 from typing import Any
 
 from rich.console import RenderableType
 from rich.panel import Panel
 from rich.text import Text
 
+from terminal_agent.message_style import (
+    TOOL_ERROR_PREFIX,
+    TOOL_ERROR_STYLE,
+    TOOL_RUNNING_PREFIX,
+    TOOL_RUNNING_STYLE,
+    TOOL_SUCCESS_PREFIX,
+    TOOL_SUCCESS_STYLE,
+)
 from terminal_agent.models import ToolRunState
 from terminal_agent.todo_view import extract_todos
 
@@ -18,7 +25,6 @@ _TASK_PROMPT_FALLBACK_LEN = 40
 _SWEEP_SPEED_MULTIPLIER = 2
 _MAX_FANCY_TASKS = 2
 _MAX_FANCY_LINE_LEN = 100
-_MAX_ACTIVITY_LINES = 8
 
 
 def _truncate(content: str, max_len: int = 280) -> str:
@@ -182,7 +188,7 @@ def summarize_tool_args(tool_name: str, args: dict[str, Any]) -> str:
 
 
 class ToolEventView:
-    """Tool state tracker for loading layer + tool activity lines."""
+    """Tool state tracker for loading layer + in-message mutable tool lines."""
 
     def __init__(
         self,
@@ -190,27 +196,15 @@ class ToolEventView:
         fancy_progress_effect: bool = True,
     ) -> None:
         self._state_by_id: dict[str, ToolRunState] = {}
+        self._tool_text_refs: dict[str, Text] = {}
         self._frame = 0
         self._latest_total_tokens = 0
         self._latest_tokens_by_source_prefix: dict[str, int] = {}
-        self._live_suspended = False
         self._fancy_progress_effect = fancy_progress_effect
-        self._activity_lines: deque[tuple[str, str]] = deque(maxlen=_MAX_ACTIVITY_LINES)
 
     def reset_turn(self) -> None:
         self._state_by_id.clear()
-        self._activity_lines.clear()
-
-    def set_live_suspended(self, suspended: bool) -> None:
-        self._live_suspended = suspended
-
-    def _record_activity(self, content: str, style: str = "dim") -> None:
-        self._activity_lines.append((content, style))
-
-    def consume_activity_lines(self) -> list[tuple[str, str]]:
-        lines = list(self._activity_lines)
-        self._activity_lines.clear()
-        return lines
+        self._tool_text_refs.clear()
 
     @staticmethod
     def _task_title(state: ToolRunState) -> str:
@@ -218,8 +212,11 @@ class ToolEventView:
             return f"{state.subagent_name}({state.task_desc})"
         return state.subagent_name or "Task"
 
-    def _running_states(self) -> list[ToolRunState]:
-        return [state for state in self._state_by_id.values() if state.status == "running"]
+    def _running_states(self, *, only_tasks: bool = False) -> list[ToolRunState]:
+        states = [state for state in self._state_by_id.values() if state.status == "running"]
+        if only_tasks:
+            return [state for state in states if state.is_task]
+        return states
 
     def _running_line(self, state: ToolRunState, pulse: str, now: float) -> str:
         elapsed = _format_duration(now - state.started_at_monotonic)
@@ -242,11 +239,9 @@ class ToolEventView:
         return True
 
     def has_running_tasks(self) -> bool:
-        return any(state.status == "running" for state in self._state_by_id.values())
+        return any(state.status == "running" and state.is_task for state in self._state_by_id.values())
 
     def tick_progress(self) -> None:
-        if self._live_suspended:
-            return
         if not self.has_running_tasks():
             return
         self._frame += 1
@@ -318,24 +313,44 @@ class ToolEventView:
         running_states = [state for state in self._state_by_id.values() if state.status == "running"]
         if not running_states:
             self._state_by_id.clear()
+            self._tool_text_refs.clear()
             return
         now = time.monotonic()
         for state in running_states:
+            text_ref = self._tool_text_refs.get(state.tool_call_id)
+            if text_ref is None:
+                continue
             if state.is_task:
                 elapsed = _format_duration(now - state.started_at_monotonic)
                 token_text = self._task_token_text(state)
-                self._record_activity(
+                self._overwrite_text_ref(
+                    text_ref,
                     f"⏹ {self._task_title(state)} · 已中断 · {elapsed} · {token_text}",
-                    style="yellow",
+                    "bold yellow",
                 )
             else:
                 summary_suffix = (
                     f" {state.args_summary}" if state.args_summary and state.args_summary != "hidden" else ""
                 )
-                self._record_activity(f"⏹ {state.tool_name}{summary_suffix} 已中断", style="yellow")
+                self._overwrite_text_ref(
+                    text_ref,
+                    f"⏹ {state.tool_name}{summary_suffix} 已中断",
+                    "bold yellow",
+                )
         self._state_by_id.clear()
+        self._tool_text_refs.clear()
 
-    def render_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
+    @staticmethod
+    def _overwrite_text_ref(text_ref: Text, content: str, style: str) -> None:
+        text_ref.truncate(0)
+        text_ref.append("  ")
+        text_ref.append(content, style=style)
+
+    @staticmethod
+    def _summary_suffix(summary: str) -> str:
+        return f" {summary}" if summary and summary != "hidden" else ""
+
+    def render_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> Text:
         hide_args = _should_hide_tool_args(tool_name)
         summary = summarize_tool_args(tool_name, args)
         now = time.monotonic()
@@ -368,49 +383,61 @@ class ToolEventView:
         )
         self._state_by_id[tool_call_id] = state
 
-        summary_suffix = f" {state.args_summary}" if state.args_summary and state.args_summary != "hidden" else ""
-        self._record_activity(f"→ {tool_name}{summary_suffix}", style="dim")
+        text_ref = Text()
+        self._tool_text_refs[tool_call_id] = text_ref
+        if state.is_task:
+            line_content = f"{TOOL_RUNNING_PREFIX} {self._task_title(state)} · 运行中"
+        else:
+            line_content = f"{TOOL_RUNNING_PREFIX} {tool_name}{self._summary_suffix(state.args_summary)}"
+        self._overwrite_text_ref(text_ref, line_content, TOOL_RUNNING_STYLE)
+        return text_ref
 
     def render_result(
         self,
         tool_name: str,
         tool_call_id: str,
-        result: str,
+        result: Any,
         is_error: bool,
     ) -> None:
         state = self._state_by_id.pop(tool_call_id, None)
+        text_ref = self._tool_text_refs.pop(tool_call_id, None)
+        if text_ref is None:
+            return
 
         if state and state.is_task:
             elapsed = _format_duration(time.monotonic() - state.started_at_monotonic)
             token_text = self._task_token_text(state)
             if is_error:
-                preview = _truncate(str(result), 200)
-                self._record_activity(
-                    f"✖ {self._task_title(state)} · 失败 · {elapsed} · {token_text}",
-                    style="red",
+                self._overwrite_text_ref(
+                    text_ref,
+                    f"{TOOL_ERROR_PREFIX} {self._task_title(state)} · 失败 · {elapsed} · {token_text}",
+                    TOOL_ERROR_STYLE,
                 )
-                self._record_activity(f"  错误: {preview}", style="dim")
                 return
-            self._record_activity(
-                f"✓ {self._task_title(state)} · 完成 · {elapsed} · {token_text}",
-                style="green",
+            self._overwrite_text_ref(
+                text_ref,
+                f"{TOOL_SUCCESS_PREFIX} {self._task_title(state)} · 完成 · {elapsed} · {token_text}",
+                TOOL_SUCCESS_STYLE,
             )
             return
 
         args_summary = state.args_summary if state else ""
-        summary_suffix = f" {args_summary}" if args_summary and args_summary != "hidden" else ""
+        summary_suffix = self._summary_suffix(args_summary)
         if is_error:
-            preview = _truncate(str(result), 200)
-            self._record_activity(f"✖ {tool_name}{summary_suffix}", style="red")
-            self._record_activity(f"  错误: {preview}", style="dim")
+            self._overwrite_text_ref(
+                text_ref,
+                f"{TOOL_ERROR_PREFIX} {tool_name}{summary_suffix}",
+                TOOL_ERROR_STYLE,
+            )
             return
-        self._record_activity(f"✓ {tool_name}{summary_suffix}", style="green")
+        self._overwrite_text_ref(
+            text_ref,
+            f"{TOOL_SUCCESS_PREFIX} {tool_name}{summary_suffix}",
+            TOOL_SUCCESS_STYLE,
+        )
 
-    def renderable(self) -> RenderableType | None:
-        if self._live_suspended:
-            return None
-
-        running_states = self._running_states()
+    def renderable(self, *, only_tasks: bool = True) -> RenderableType | None:
+        running_states = self._running_states(only_tasks=only_tasks)
         if not running_states:
             return None
 

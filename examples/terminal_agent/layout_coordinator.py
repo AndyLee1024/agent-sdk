@@ -46,13 +46,12 @@ class TerminalLayoutCoordinator:
         self,
         console: Console,
         *,
-        target_fps: int = 8,
+        target_fps: int = 12,
     ) -> None:
         normalized_fps = max(4, min(int(target_fps), 24))
         self._console = console
         self._target_fps = normalized_fps
         self._turn_active = False
-        self._overlay_active = False
         self._live: Live | None = None
         self._dirty = False
         self._loading_layer: RenderableType | None = None
@@ -62,34 +61,19 @@ class TerminalLayoutCoordinator:
     def start_turn(self) -> None:
         self._turn_active = True
         self._dirty = True
-        if self._overlay_active:
-            return
         self._ensure_live()
         self.refresh(force=True)
 
     def stop_turn(self) -> None:
         if not self._turn_active:
             return
-        if not self._overlay_active:
-            self.refresh(force=True)
+        self.refresh(force=True)
         self._stop_live()
         self._turn_active = False
 
     def close(self) -> None:
         self._stop_live()
         self._turn_active = False
-
-    def set_overlay_active(self, active: bool) -> None:
-        if self._overlay_active == active:
-            return
-        self._overlay_active = active
-        if active:
-            self._stop_live()
-            return
-        if self._turn_active:
-            self._dirty = True
-            self._ensure_live()
-            self.refresh(force=True)
 
     def update_layers(
         self,
@@ -105,8 +89,6 @@ class TerminalLayoutCoordinator:
 
     def refresh(self, *, force: bool = False) -> None:
         if not self._turn_active:
-            return
-        if self._overlay_active:
             return
         if not force and not self._dirty:
             return
@@ -138,13 +120,13 @@ class TerminalLayoutCoordinator:
         self._live = None
 
     def _compose(self) -> RenderableType:
-        loading_lines = _renderable_to_lines(self._console, self._loading_layer)
         message_lines = _renderable_to_lines(self._console, self._message_layer)
         todo_lines = _renderable_to_lines(self._console, self._todo_layer)
+        loading_lines = _renderable_to_lines(self._console, self._loading_layer)
 
         max_height = max(int(self._console.size.height), 1)
         while True:
-            total = _total_height(loading_lines, message_lines, todo_lines)
+            total = _total_height(message_lines, todo_lines, loading_lines)
             if total <= max_height:
                 break
 
@@ -156,7 +138,15 @@ class TerminalLayoutCoordinator:
                 message_lines = message_lines[drop:]
                 progressed = progressed or drop > 0
 
-            total = _total_height(loading_lines, message_lines, todo_lines)
+            total = _total_height(message_lines, todo_lines, loading_lines)
+            overflow = max(0, total - max_height)
+            if todo_lines and overflow > 0 and len(todo_lines) > _TODO_MIN_LINES:
+                max_drop = len(todo_lines) - _TODO_MIN_LINES
+                drop = min(overflow, max_drop)
+                todo_lines = todo_lines[: len(todo_lines) - drop]
+                progressed = progressed or drop > 0
+
+            total = _total_height(message_lines, todo_lines, loading_lines)
             overflow = max(0, total - max_height)
             if loading_lines and overflow > 0:
                 original_len = len(loading_lines)
@@ -165,15 +155,7 @@ class TerminalLayoutCoordinator:
                 loading_lines = loading_lines[-keep:]
                 progressed = progressed or dropped > 0
 
-            total = _total_height(loading_lines, message_lines, todo_lines)
-            overflow = max(0, total - max_height)
-            if todo_lines and overflow > 0 and len(todo_lines) > _TODO_MIN_LINES:
-                max_drop = len(todo_lines) - _TODO_MIN_LINES
-                drop = min(overflow, max_drop)
-                todo_lines = todo_lines[: len(todo_lines) - drop]
-                progressed = progressed or drop > 0
-
-            total = _total_height(loading_lines, message_lines, todo_lines)
+            total = _total_height(message_lines, todo_lines, loading_lines)
             overflow = max(0, total - max_height)
             if todo_lines and overflow > 0:
                 original_len = len(todo_lines)
@@ -185,21 +167,21 @@ class TerminalLayoutCoordinator:
             if not progressed:
                 break
 
-        loading = _lines_to_renderable(loading_lines)
         message = _lines_to_renderable(message_lines)
         todo = _lines_to_renderable(todo_lines)
+        loading = _lines_to_renderable(loading_lines)
 
         parts: list[RenderableType] = []
-        if loading is not None:
-            parts.append(loading)
         if message is not None:
-            if parts:
-                parts.append(Text(""))
             parts.append(message)
         if todo is not None:
             if parts:
                 parts.append(Text(""))
             parts.append(todo)
+        if loading is not None:
+            if parts:
+                parts.append(Text(""))
+            parts.append(loading)
 
         if not parts:
             return Text("")

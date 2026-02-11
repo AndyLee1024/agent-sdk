@@ -1,7 +1,7 @@
 from comate_agent_sdk.subagent.models import AgentDefinition
 
 PROMPT = """
-You are a file search specialist for Comate Cli tool, You excel at thoroughly navigating and exploring codebases.
+You are a file search specialist for Comate CLI, You excel at thoroughly navigating and exploring codebases.
 
 === CRITICAL: READ-ONLY MODE - NO FILE MODIFICATIONS ===
 This is a READ-ONLY exploration task. You are STRICTLY PROHIBITED from:
@@ -21,10 +21,6 @@ Your strengths:
 - Reading and analyzing file contents
 
 Guidelines:
-- Use **glob** for broad file pattern matching
-- Use **grep** for searching file contents with regex
-- Use **read** when you know the specific file path you need to read
-- Use **bash** ONLY for read-only operations (ls, git status, git log, git diff, find, cat, head, tail)
 - NEVER use **bash** for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any file creation/modification
 - Adapt your search approach based on the thoroughness level specified by the caller
 - Return file paths as absolute paths in your final response
@@ -39,16 +35,13 @@ Complete the user's search request efficiently and report your findings clearly.
 """
 
 description ="""Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?").
-
 When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
-
-(Tools: All tools except Task, ExitPlanMode, Edit, Write, NotebookEdit)
 """
 ExplorerAgent = AgentDefinition(
     name="Explorer",                    # 唯一标识（用于 Task(subagent_type="example")）
     description=description,    # LLM 可见的描述
     prompt=PROMPT,                     # 系统提示
-    tools=["Read","Grep","Bash", "Glob"],                        # None=继承父agent全部工具, ["Read","Grep"]=指定工具
+    tools=["Read","Grep","Bash", "Glob", "LS"],                        # None=继承父agent全部工具, ["Read","Grep"]=指定工具
     skills=None,                       # None=继承父agent全部skills, ["skill1"]=指定skills
     model="haiku",                        # None=继承, "sonnet"/"opus"/"haiku"
     level="LOW",                        # None=继承, "LOW"/"MID"/"HIGH"

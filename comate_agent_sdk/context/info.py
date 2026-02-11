@@ -143,6 +143,10 @@ def _build_categories(
                 if item.item_type in item_types:
                     item_count += 1
 
+        # 额外检查 memory_item（独立字段）
+        if context.memory_item and context.memory_item.item_type in item_types:
+            item_count += 1
+
         categories.append(ContextCategoryInfo(
             label=label,
             token_count=total_tokens,
