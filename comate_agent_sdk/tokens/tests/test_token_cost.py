@@ -173,6 +173,74 @@ class TestTokenCost(unittest.TestCase):
         self.assertEqual(summary.total_completion_tokens, 13)
         self.assertEqual(summary.total_tokens, 32)
 
+    def test_usage_summary_total_tokens_uses_reported_usage_total(self) -> None:
+        token_cost = TokenCost(include_cost=False)
+        token_cost.add_usage(
+            "m-reported",
+            ChatInvokeUsage(
+                prompt_tokens=10,
+                prompt_cached_tokens=2,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=4,
+                total_tokens=99,
+            ),
+            level="MID",
+            source="agent",
+        )
+
+        summary = asyncio.run(token_cost.get_usage_summary())
+        self.assertEqual(summary.total_prompt_tokens, 10)
+        self.assertEqual(summary.total_completion_tokens, 4)
+        self.assertEqual(summary.total_tokens, 99)
+        self.assertEqual(summary.by_model["m-reported"].total_tokens, 99)
+        self.assertEqual(summary.by_level["MID"].total_tokens, 99)
+
+    def test_usage_summary_by_source(self) -> None:
+        token_cost = TokenCost(include_cost=False)
+        token_cost.add_usage(
+            "m1",
+            ChatInvokeUsage(
+                prompt_tokens=8,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=2,
+                total_tokens=10,
+            ),
+            source="agent",
+        )
+        token_cost.add_usage(
+            "m2",
+            ChatInvokeUsage(
+                prompt_tokens=6,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=3,
+                total_tokens=9,
+            ),
+            source="subagent:Explorer",
+        )
+        token_cost.add_usage(
+            "m3",
+            ChatInvokeUsage(
+                prompt_tokens=5,
+                prompt_cached_tokens=None,
+                prompt_cache_creation_tokens=None,
+                prompt_image_tokens=None,
+                completion_tokens=1,
+                total_tokens=6,
+            ),
+            source="subagent:Explorer",
+        )
+
+        summary = asyncio.run(token_cost.get_usage_summary())
+        self.assertEqual(summary.by_source["agent"].total_tokens, 10)
+        self.assertEqual(summary.by_source["agent"].invocations, 1)
+        self.assertEqual(summary.by_source["subagent:Explorer"].total_tokens, 15)
+        self.assertEqual(summary.by_source["subagent:Explorer"].invocations, 2)
+
     def test_usage_observer_receives_new_entry(self) -> None:
         token_cost = TokenCost(include_cost=False)
         observed_sources: list[str] = []

@@ -40,6 +40,24 @@ class _FakeContext:
         return True
 
 
+class _FakeEstimate:
+    def __init__(self, raw_total_tokens: int, buffered_tokens: int, safety_margin_ratio: float) -> None:
+        self.raw_total_tokens = raw_total_tokens
+        self.buffered_tokens = buffered_tokens
+        self.safety_margin_ratio = safety_margin_ratio
+        self.calibration_ratio = 1.0
+
+
+class _FakeTokenAccounting:
+    def __init__(self, estimate: _FakeEstimate) -> None:
+        self.estimate = estimate
+        self.calls = 0
+
+    async def estimate_next_step(self, *, context, llm, tool_definitions, timeout_ms: int):
+        self.calls += 1
+        return self.estimate
+
+
 class TestRunnerPrecheckBuffer(unittest.TestCase):
     def test_precheck_triggers_with_buffered_tokens(self) -> None:
         token_counter = _FakeTokenCounter(estimated_tokens=90)
@@ -96,6 +114,42 @@ class TestRunnerPrecheckBuffer(unittest.TestCase):
         self.assertIsNone(event)
         self.assertEqual(meta_events, [])
         self.assertEqual(context.auto_compact_calls, [])
+
+    def test_precheck_uses_token_accounting_estimate_when_available(self) -> None:
+        token_counter = _FakeTokenCounter(estimated_tokens=10)
+        context = _FakeContext(token_counter)
+        compaction_service = _FakeCompactionService(threshold=100, enabled=True)
+        token_accounting = _FakeTokenAccounting(
+            _FakeEstimate(raw_total_tokens=70, buffered_tokens=105, safety_margin_ratio=0.12)
+        )
+
+        agent = SimpleNamespace(
+            _compaction_service=compaction_service,
+            _context=context,
+            _token_accounting=token_accounting,
+            token_count_timeout_ms=300,
+            precheck_buffer_ratio=0.12,
+            llm=SimpleNamespace(model="gpt-4o", provider="openai"),
+            tool_definitions=[],
+            offload_enabled=False,
+            _context_fs=None,
+            offload_policy=None,
+            offload_token_threshold=2000,
+            _token_cost=None,
+            _effective_level=None,
+        )
+
+        compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
+
+        self.assertTrue(compacted)
+        self.assertIsNotNone(event)
+        self.assertEqual(meta_events, [])
+        self.assertEqual(event.current_tokens, 105)
+        self.assertEqual(event.threshold, 100)
+        self.assertEqual(event.trigger, "precheck")
+        self.assertEqual(context.auto_compact_calls, [105])
+        self.assertEqual(token_accounting.calls, 1)
+        self.assertEqual(token_counter.calls, [])
 
 
 if __name__ == "__main__":

@@ -31,6 +31,19 @@ async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
                 logger.warning(f"MCP tools 加载失败（已降级继续）：{e}")
 
             tool_definitions = agent.tool_definitions
+            estimated_raw_tokens: int | None = None
+            if getattr(agent, "_token_accounting", None) is not None:
+                try:
+                    estimate = await agent._token_accounting.estimate_next_step(
+                        context=agent._context,
+                        llm=agent.llm,
+                        tool_definitions=tool_definitions,
+                        timeout_ms=agent.token_count_timeout_ms,
+                    )
+                    estimated_raw_tokens = estimate.raw_total_tokens
+                except Exception as e:
+                    logger.debug(f"调用前 token 估算失败，跳过校准样本: {e}", exc_info=True)
+
             response = await agent.llm.ainvoke(
                 messages=agent._context.lower(),
                 tools=tool_definitions or None,
@@ -48,6 +61,15 @@ async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
                     level=agent._effective_level,
                     source=source,
                 )
+                if getattr(agent, "_token_accounting", None) is not None:
+                    try:
+                        agent._token_accounting.observe_reported_usage(
+                            llm=agent.llm,
+                            reported_total_tokens=int(response.usage.total_tokens),
+                            estimated_raw_tokens=estimated_raw_tokens,
+                        )
+                    except Exception as e:
+                        logger.debug(f"更新 token 校准失败: {e}", exc_info=True)
 
             return response
 

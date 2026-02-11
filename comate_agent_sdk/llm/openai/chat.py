@@ -181,13 +181,6 @@ class ChatOpenAI(BaseChatModel):
 
     def _get_usage(self, response: ChatCompletion) -> ChatInvokeUsage | None:
         if response.usage is not None:
-            completion_tokens = response.usage.completion_tokens
-            completion_token_details = response.usage.completion_tokens_details
-            if completion_token_details is not None:
-                reasoning_tokens = completion_token_details.reasoning_tokens
-                if reasoning_tokens is not None:
-                    completion_tokens += reasoning_tokens
-
             usage = ChatInvokeUsage(
                 prompt_tokens=response.usage.prompt_tokens,
                 prompt_cached_tokens=response.usage.prompt_tokens_details.cached_tokens
@@ -196,7 +189,8 @@ class ChatOpenAI(BaseChatModel):
                 prompt_cache_creation_tokens=None,
                 prompt_image_tokens=None,
                 # Completion
-                completion_tokens=completion_tokens,
+                # OpenAI 的 completion_tokens 已包含推理相关 token，避免重复累计。
+                completion_tokens=response.usage.completion_tokens,
                 total_tokens=response.usage.total_tokens,
             )
         else:

@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from comate_agent_sdk.agent.compaction import CompactionConfig, CompactionService
 from comate_agent_sdk.agent.llm_levels import LLMLevel
 from comate_agent_sdk.context import ContextIR
+from comate_agent_sdk.context.accounting import ContextTokenAccounting
 from comate_agent_sdk.context.fs import ContextFileSystem
 from comate_agent_sdk.context.offload import OffloadPolicy
 from comate_agent_sdk.tokens import TokenCost
@@ -362,6 +363,9 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
             )
 
     runtime._context = ContextIR()
+    runtime._token_accounting = ContextTokenAccounting(
+        safety_margin_ratio=max(0.0, float(runtime.precheck_buffer_ratio)),
+    )
 
     compaction_config = runtime.compaction if runtime.compaction is not None else CompactionConfig()
     compaction_llm = _resolve_compaction_llm(runtime, compaction_config)

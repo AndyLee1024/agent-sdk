@@ -314,10 +314,7 @@ class TokenCost:
                 u.usage.prompt_cached_tokens or 0 for u in filtered_usage
             ),
             completion_tokens=sum(u.usage.completion_tokens for u in filtered_usage),
-            total_tokens=sum(
-                u.usage.prompt_tokens + u.usage.completion_tokens
-                for u in filtered_usage
-            ),
+            total_tokens=sum(u.usage.total_tokens for u in filtered_usage),
         )
 
     async def get_usage_summary(
@@ -357,7 +354,7 @@ class TokenCost:
         # Calculate totals
         total_prompt = sum(u.usage.prompt_tokens for u in filtered_usage)
         total_completion = sum(u.usage.completion_tokens for u in filtered_usage)
-        total_tokens = total_prompt + total_completion
+        total_tokens = sum(u.usage.total_tokens for u in filtered_usage)
         total_prompt_cached = sum(
             u.usage.prompt_cached_tokens or 0 for u in filtered_usage
         )
@@ -365,6 +362,7 @@ class TokenCost:
         # Calculate per-model stats with record-by-record cost calculation
         model_stats: dict[str, ModelUsageStats] = {}
         level_stats: dict[str, ModelUsageStats] = {}
+        source_stats: dict[str, ModelUsageStats] = {}
 
         total_new_prompt_cost = 0.0
         total_completion_cost = 0.0
@@ -378,9 +376,7 @@ class TokenCost:
             stats = model_stats[entry.model]
             stats.prompt_tokens += entry.usage.prompt_tokens
             stats.completion_tokens += entry.usage.completion_tokens
-            stats.total_tokens += (
-                entry.usage.prompt_tokens + entry.usage.completion_tokens
-            )
+            stats.total_tokens += entry.usage.total_tokens
             stats.invocations += 1
 
             if entry.level:
@@ -389,8 +385,17 @@ class TokenCost:
                 ls = level_stats[entry.level]
                 ls.prompt_tokens += entry.usage.prompt_tokens
                 ls.completion_tokens += entry.usage.completion_tokens
-                ls.total_tokens += entry.usage.prompt_tokens + entry.usage.completion_tokens
+                ls.total_tokens += entry.usage.total_tokens
                 ls.invocations += 1
+
+            source = entry.source or "unknown"
+            if source not in source_stats:
+                source_stats[source] = ModelUsageStats(model=source)
+            ss = source_stats[source]
+            ss.prompt_tokens += entry.usage.prompt_tokens
+            ss.completion_tokens += entry.usage.completion_tokens
+            ss.total_tokens += entry.usage.total_tokens
+            ss.invocations += 1
 
             if self.include_cost:
                 # Calculate cost record by record using the updated calculate_cost function
@@ -404,6 +409,7 @@ class TokenCost:
 
                     if entry.level:
                         level_stats[entry.level].cost += cost.total_cost
+                    source_stats[source].cost += cost.total_cost
 
         def _fill_averages(stats_map: dict[str, ModelUsageStats]) -> None:
             for s in stats_map.values():
@@ -412,6 +418,7 @@ class TokenCost:
 
         _fill_averages(model_stats)
         _fill_averages(level_stats)
+        _fill_averages(source_stats)
 
         total_prompt_cost = (
             total_new_prompt_cost + total_prompt_cached_cost + total_cache_creation_cost
@@ -430,6 +437,7 @@ class TokenCost:
             entry_count=len(filtered_usage),
             by_model=model_stats,
             by_level=level_stats,
+            by_source=source_stats,
         )
 
     def _format_tokens(self, tokens: int) -> str:

@@ -74,27 +74,24 @@ def _build_grid(info: ContextInfo) -> list[str]:
 
     tokens_per_cell = info.context_limit / (COLS * rows)
 
-    # 计算各部分占用的 cell 数
-    used_cells = int(info.total_tokens / tokens_per_cell)
-    tool_def_cells = int(info.tool_definitions_tokens / tokens_per_cell)
+    # 计算各部分占用的 cell 数（主口径：next-step 估算）
+    used_cells = int(info.primary_used_tokens / tokens_per_cell)
     free_cells = int(info.free_tokens / tokens_per_cell)
     buffer_cells = int(info.buffer_tokens / tokens_per_cell)
 
     # 确保总数不超过网格容量
     total_cells = COLS * rows
-    assigned_cells = used_cells + tool_def_cells + free_cells + buffer_cells
+    assigned_cells = used_cells + free_cells + buffer_cells
     if assigned_cells > total_cells:
         # 按比例缩减
         scale = total_cells / assigned_cells
         used_cells = int(used_cells * scale)
-        tool_def_cells = int(tool_def_cells * scale)
         free_cells = int(free_cells * scale)
-        buffer_cells = total_cells - used_cells - tool_def_cells - free_cells
+        buffer_cells = total_cells - used_cells - free_cells
 
     # 构建 cell 序列
     cells = []
     cells.extend(['⛁'] * used_cells)
-    cells.extend(['⛀'] * tool_def_cells)
     cells.extend(['⛶'] * free_cells)
     cells.extend(['⛝'] * buffer_cells)
 
@@ -110,8 +107,8 @@ def _build_grid(info: ContextInfo) -> list[str]:
     model_short = _shorten_model_name(info.model_name)
     lines.append(
         f"  {first_row_cells}   {model_short} · "
-        f"{_format_token_count(info.used_tokens)}/{_format_token_count(info.context_limit)} tokens "
-        f"({info.utilization_percent:.1f}%)"
+        f"next-step {_format_token_count(info.primary_used_tokens)}/"
+        f"{_format_token_count(info.context_limit)} tokens ({info.utilization_percent:.1f}%)"
     )
 
     # 后续行：网格 + 类别明细
@@ -145,21 +142,34 @@ def _build_category_labels(info: ContextInfo) -> list[str]:
     labels = []
 
     # 第一行：类别标题
-    labels.append("Estimated usage by category")
+    labels.append("Estimated usage by category (IR)")
+
+    next_step_percent = (info.next_step_estimated_tokens / info.context_limit * 100) if info.context_limit > 0 else 0
+    labels.append(
+        f"⛁ Next-step estimate: {_format_token_count(info.next_step_estimated_tokens)} "
+        f"tokens ({next_step_percent:.1f}%)"
+    )
+    if info.last_step_reported_tokens > 0:
+        reported_percent = (info.last_step_reported_tokens / info.context_limit * 100) if info.context_limit > 0 else 0
+        labels.append(
+            f"⛂ Last-step reported: {_format_token_count(info.last_step_reported_tokens)} "
+            f"tokens ({reported_percent:.1f}%)"
+        )
+
+    msg_only_percent = (info.used_tokens_message_only / info.context_limit * 100) if info.context_limit > 0 else 0
+    labels.append(
+        f"⛃ Message-only used: {_format_token_count(info.used_tokens_message_only)} tokens ({msg_only_percent:.1f}%)"
+    )
+    with_tools_percent = (info.used_tokens_with_tools / info.context_limit * 100) if info.context_limit > 0 else 0
+    labels.append(
+        f"⛀ Message+tools used: {_format_token_count(info.used_tokens_with_tools)} tokens ({with_tools_percent:.1f}%)"
+    )
 
     # 各类别明细
     for cat in info.categories:
         percent = (cat.token_count / info.context_limit * 100) if info.context_limit > 0 else 0
         labels.append(
             f"⛁ {cat.label}: {_format_token_count(cat.token_count)} tokens ({percent:.1f}%)"
-        )
-
-    # 添加 Tool Definitions（虚拟类别）
-    if info.tool_definitions_tokens > 0:
-        percent = (info.tool_definitions_tokens / info.context_limit * 100) if info.context_limit > 0 else 0
-        labels.insert(
-            1,  # 插入到第一个类别之前
-            f"⛀ Tool Definitions: {_format_token_count(info.tool_definitions_tokens)} tokens ({percent:.1f}%)"
         )
 
     # 可用空间

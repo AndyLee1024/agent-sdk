@@ -116,3 +116,4 @@ class UsageSummary(BaseModel):
 
     by_model: dict[str, ModelUsageStats] = Field(default_factory=dict)
     by_level: dict[str, ModelUsageStats] = Field(default_factory=dict)
+    by_source: dict[str, ModelUsageStats] = Field(default_factory=dict)

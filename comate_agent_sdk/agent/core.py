@@ -12,6 +12,7 @@ from comate_agent_sdk.agent.llm_levels import LLMLevel
 from comate_agent_sdk.agent.options import AgentConfig, RuntimeAgentOptions, build_runtime_options
 from comate_agent_sdk.agent.system_prompt import SystemPromptType, resolve_system_prompt
 from comate_agent_sdk.context import ContextIR
+from comate_agent_sdk.context.accounting import ContextTokenAccounting
 from comate_agent_sdk.context.fs import ContextFileSystem
 from comate_agent_sdk.context.offload import OffloadPolicy
 from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
@@ -200,6 +201,7 @@ class AgentRuntime:
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False, init=False)
     _compaction_service: CompactionService | None = field(default=None, repr=False, init=False)
     _token_cost: TokenCost = field(default=None, repr=False, init=False)  # type: ignore[assignment]
+    _token_accounting: ContextTokenAccounting = field(default=None, repr=False, init=False)  # type: ignore[assignment]
     _context_fs: ContextFileSystem | None = field(default=None, repr=False, init=False)
     _session_id: str = field(default="", repr=False, init=False)
 
@@ -546,15 +548,37 @@ class AgentRuntime:
         context_limit = await self._compaction_service.get_model_context_limit(model_name)
         compact_threshold = await self._compaction_service.get_threshold_for_model(model_name)
 
+        tool_definitions = self.tool_definitions if self.tools else []
         tool_defs_tokens = 0
-        if self.tools:
+        if tool_definitions:
             import json
 
             tool_defs_json = json.dumps(
-                [d.model_dump() for d in self.tool_definitions],
+                [d.model_dump() for d in tool_definitions],
                 ensure_ascii=False,
             )
             tool_defs_tokens = self._context.token_counter.count(tool_defs_json)
+
+        used_tokens_message_only = budget.total_tokens
+        used_tokens_with_tools = used_tokens_message_only + tool_defs_tokens
+
+        next_step_estimated_tokens = used_tokens_with_tools
+        last_step_reported_tokens = 0
+        if self._token_accounting is not None:
+            try:
+                estimate = await self._token_accounting.estimate_next_step(
+                    context=self._context,
+                    llm=self.llm,
+                    tool_definitions=tool_definitions,
+                    timeout_ms=self.token_count_timeout_ms,
+                )
+                next_step_estimated_tokens = estimate.buffered_tokens
+                last_step_reported_tokens = self._token_accounting.last_reported_total_tokens
+            except Exception as e:
+                logger.debug(f"get_context_info 估算 next-step 失败，回退 IR 口径: {e}", exc_info=True)
+
+        if last_step_reported_tokens <= 0 and self._token_cost.usage_history:
+            last_step_reported_tokens = int(self._token_cost.usage_history[-1].usage.total_tokens)
 
         categories = _build_categories(budget.tokens_by_type, self._context)
 
@@ -569,6 +593,10 @@ class AgentRuntime:
             header_tokens=budget.header_tokens,
             conversation_tokens=budget.conversation_tokens,
             tool_definitions_tokens=tool_defs_tokens,
+            used_tokens_message_only=used_tokens_message_only,
+            used_tokens_with_tools=used_tokens_with_tools,
+            next_step_estimated_tokens=next_step_estimated_tokens,
+            last_step_reported_tokens=last_step_reported_tokens,
             categories=categories,
             compaction_enabled=compaction_enabled,
         )

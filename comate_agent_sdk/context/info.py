@@ -43,6 +43,10 @@ class ContextInfo:
         header_tokens: Header 段 token 数
         conversation_tokens: Conversation 段 token 数
         tool_definitions_tokens: Tool JSON schema 估算 token 数
+        used_tokens_message_only: 仅消息上下文占用（IR 估算）
+        used_tokens_with_tools: 消息 + 工具定义占用（IR 估算）
+        next_step_estimated_tokens: 下一次调用估算占用（主口径）
+        last_step_reported_tokens: 上一次调用 provider 回传总量（对账口径）
         categories: 各类别统计列表
         compaction_enabled: 是否启用压缩
     """
@@ -54,18 +58,29 @@ class ContextInfo:
     header_tokens: int
     conversation_tokens: int
     tool_definitions_tokens: int = 0
+    used_tokens_message_only: int = 0
+    used_tokens_with_tools: int = 0
+    next_step_estimated_tokens: int = 0
+    last_step_reported_tokens: int = 0
     categories: list[ContextCategoryInfo] = ()  # type: ignore
     compaction_enabled: bool = True
 
     @property
     def used_tokens(self) -> int:
-        """已使用的 token 数（包含 tool definitions）"""
-        return self.total_tokens + self.tool_definitions_tokens
+        """兼容字段：返回消息 + 工具定义占用。"""
+        return self.used_tokens_with_tools
+
+    @property
+    def primary_used_tokens(self) -> int:
+        """主展示口径：next-step 估算（缺失时回退到消息+工具）。"""
+        if self.next_step_estimated_tokens > 0:
+            return self.next_step_estimated_tokens
+        return self.used_tokens_with_tools
 
     @property
     def free_tokens(self) -> int:
         """到达压缩阈值前的剩余空间"""
-        return max(0, self.compact_threshold - self.used_tokens)
+        return max(0, self.compact_threshold - self.primary_used_tokens)
 
     @property
     def buffer_tokens(self) -> int:
@@ -77,7 +92,7 @@ class ContextInfo:
         """上下文利用率百分比"""
         if self.context_limit <= 0:
             return 0.0
-        return (self.used_tokens / self.context_limit) * 100
+        return (self.primary_used_tokens / self.context_limit) * 100
 
 
 def _build_categories(

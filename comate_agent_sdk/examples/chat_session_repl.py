@@ -104,6 +104,14 @@ async def _show_usage(session) -> None:
         print("\n  按档位统计:")
         for level, stats in usage.by_level.items():
             print(f"    {level}: {stats.total_tokens} tokens, ${stats.cost:.4f}")
+
+    if usage.by_source:
+        print("\n  按来源统计:")
+        for source, stats in usage.by_source.items():
+            print(
+                f"    {source}: {stats.total_tokens} tokens, "
+                f"invocations={stats.invocations}, ${stats.cost:.4f}"
+            )
     print()
 
 

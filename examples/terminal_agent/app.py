@@ -200,6 +200,21 @@ async def _show_usage(session: ChatSession) -> None:
             level_table.add_row(level, f"{stats.total_tokens:,}", f"${stats.cost:.4f}")
         console.print(level_table)
 
+    if usage.by_source:
+        source_table = Table(title="按来源统计", show_header=True, header_style="bold green")
+        source_table.add_column("来源", style="cyan")
+        source_table.add_column("Tokens", justify="right")
+        source_table.add_column("调用", justify="right")
+        source_table.add_column("成本", justify="right")
+        for source, stats in usage.by_source.items():
+            source_table.add_row(
+                source,
+                f"{stats.total_tokens:,}",
+                f"{stats.invocations}",
+                f"${stats.cost:.4f}",
+            )
+        console.print(source_table)
+
 
 async def _show_context(session: ChatSession) -> None:
     from comate_agent_sdk.context.formatter import format_context_view
