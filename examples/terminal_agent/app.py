@@ -172,10 +172,22 @@ class TerminalAgentTUI:
         self._closing = False
         self._printed_history_index = 0
         self._todo_cache: list[str] = []
+        self._history_text = ""
 
         self._app: Application[None] | None = None
         self._stream_task: asyncio.Task[None] | None = None
         self._ui_tick_task: asyncio.Task[None] | None = None
+
+        # 历史显示区域（可滚动）
+        self._history_area = TextArea(
+            text="",
+            multiline=True,
+            scrollbar=True,
+            read_only=True,
+            wrap_lines=True,
+            style="class:history",
+            focusable=True,
+        )
 
         self._input_area = TextArea(
             text="",
@@ -218,6 +230,7 @@ class TerminalAgentTUI:
 
         self._root = HSplit(
             [
+                self._history_area,
                 self._todo_container,
                 self._loading_window,
                 Window(height=1, char=" ", style="class:input.pad"),
@@ -232,6 +245,7 @@ class TerminalAgentTUI:
         self._style = PTStyle.from_dict(
             {
                 "": "bg:#1f232a #e5e9f0",
+                "history": "bg:#1a1e24 #d8dee9",
                 "todo": "bg:#232a35 #9ecbff",
                 "input.pad": "bg:#3a3d42",
                 "input.line": "bg:#3a3d42 #f2f4f8",
@@ -293,11 +307,14 @@ class TerminalAgentTUI:
             self._invalidate()
 
         @bindings.add("escape")
-        def _clear_slash(event) -> None:
+        def _clear_slash_or_refocus(event) -> None:
             del event
-            if not self._slash_active:
+            if self._slash_active:
+                self._deactivate_slash()
                 return
-            self._deactivate_slash()
+            # 如果不在 slash 模式，则将焦点切换回输入框
+            if self._app is not None:
+                self._app.layout.focus(self._input_area.window)
 
         @bindings.add("c-c")
         def _interrupt_or_exit(event) -> None:
@@ -317,6 +334,40 @@ class TerminalAgentTUI:
         def _exit(event) -> None:
             del event
             self._exit_app()
+
+        @bindings.add("pageup")
+        def _scroll_up(event) -> None:
+            del event
+            self._scroll_history(-10)
+
+        @bindings.add("pagedown")
+        def _scroll_down(event) -> None:
+            del event
+            self._scroll_history(10)
+
+        @bindings.add("c-home")
+        def _scroll_top(event) -> None:
+            del event
+            self._history_area.buffer.cursor_position = 0
+
+        @bindings.add("c-end")
+        def _scroll_bottom(event) -> None:
+            del event
+            self._history_area.buffer.cursor_position = len(self._history_area.text)
+
+        @bindings.add("c-h")
+        def _focus_history(event) -> None:
+            """切换焦点到历史窗口以便滚动"""
+            del event
+            if self._app is not None:
+                self._app.layout.focus(self._history_area.window)
+
+        @bindings.add("c-i")
+        def _focus_input(event) -> None:
+            """切换焦点回输入框"""
+            del event
+            if self._app is not None:
+                self._app.layout.focus(self._input_area.window)
 
         return bindings
 
@@ -381,6 +432,17 @@ class TerminalAgentTUI:
         self._slash_candidates = []
         self._slash_index = 0
         self._invalidate()
+
+    def _scroll_history(self, lines: int) -> None:
+        """滚动历史窗口指定行数，正数向下，负数向上"""
+        buffer = self._history_area.buffer
+        document = buffer.document
+        current_line = document.cursor_position_row
+        new_line = max(0, min(document.line_count - 1, current_line + lines))
+
+        # 移动到新行的开始位置
+        new_position = document.translate_row_col_to_index(new_line, 0)
+        buffer.cursor_position = new_position
 
     def _submit_from_input(self) -> None:
         if self._busy:
@@ -554,11 +616,7 @@ class TerminalAgentTUI:
         pending = self._pending_history_entries()
         if not pending:
             return
-
-        def _printer() -> None:
-            self._print_history_entries(pending)
-
-        await run_in_terminal(_printer, in_executor=False)
+        self._print_history_entries(pending)
 
     def _drain_history_sync(self) -> None:
         pending = self._pending_history_entries()
@@ -575,34 +633,60 @@ class TerminalAgentTUI:
         return pending
 
     @staticmethod
-    def _entry_prefix(entry: HistoryEntry) -> tuple[str, str]:
+    def _entry_prefix(entry: HistoryEntry) -> str:
         if entry.entry_type == "user":
-            return "❯", "bold cyan"
+            return "❯"
         if entry.entry_type == "assistant":
-            return "⏺", "bold bright_cyan"
+            return "⏺"
         if entry.entry_type == "tool_call":
-            return "→", "bold blue"
+            return "→"
         if entry.entry_type == "tool_result":
-            return ("✗", "bold red") if entry.is_error else ("✓", "bold green")
-        return "•", "dim"
+            return "✗" if entry.is_error else "✓"
+        return "•"
 
-    def _print_history_entries(self, entries: list[HistoryEntry]) -> None:
+    def _format_history_entries(self, entries: list[HistoryEntry]) -> str:
+        """格式化历史条目为纯文本"""
+        lines: list[str] = []
         for entry in entries:
-            prefix, prefix_style = self._entry_prefix(entry)
+            prefix = self._entry_prefix(entry)
             content_lines = entry.text.splitlines() or [""]
 
-            first_line = Text()
-            first_line.append(f"{prefix} ", style=prefix_style)
-            first_line.append(content_lines[0])
-            console.print(first_line, soft_wrap=True)
+            # 第一行带前缀
+            lines.append(f"{prefix} {content_lines[0]}")
 
+            # 后续行缩进
             for line in content_lines[1:]:
-                continuation = Text()
-                continuation.append("  ")
-                continuation.append(line)
-                console.print(continuation, soft_wrap=True)
+                lines.append(f"  {line}")
 
-            console.print()
+            # 条目之间空行
+            lines.append("")
+
+        return "\n".join(lines)
+
+    def _print_history_entries(self, entries: list[HistoryEntry]) -> None:
+        """更新历史窗口内容"""
+        if not entries:
+            return
+
+        # 检查是否在底部（用于自动滚动）
+        buffer = self._history_area.buffer
+        was_at_bottom = buffer.cursor_position >= len(buffer.text)
+
+        # 格式化新条目
+        new_text = self._format_history_entries(entries)
+
+        # 追加到历史文本
+        if self._history_text:
+            self._history_text += new_text
+        else:
+            self._history_text = new_text
+
+        # 更新显示
+        self._history_area.text = self._history_text
+
+        # 如果之前在底部，自动滚动到最新消息
+        if was_at_bottom:
+            buffer.cursor_position = len(self._history_text)
 
     async def _ui_tick(self) -> None:
         try:
