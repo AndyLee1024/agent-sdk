@@ -15,7 +15,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Annotated, Any, Callable, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from comate_agent_sdk.llm.messages import UserMessage
 from comate_agent_sdk.system_tools.artifact_store import ArtifactStore
@@ -348,6 +348,57 @@ class BashInput(BaseModel):
     max_output_chars: int = Field(default=_BASH_OUTPUT_DEFAULT_MAX_CHARS, ge=200, le=200_000)
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_stringified_fields(cls, data: Any) -> Any:
+        """Defense-in-depth: 修复非原生 OpenAI 模型将参数值字符串化的问题。"""
+        if not isinstance(data, dict):
+            return data
+
+        # args: '["git","diff"]' → ["git", "diff"]
+        args = data.get("args")
+        if isinstance(args, str):
+            try:
+                parsed = json.loads(args)
+                if isinstance(parsed, list):
+                    data["args"] = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # env: '{}' / '{"K":"V"}' / 'null' → dict | None
+        env = data.get("env")
+        if isinstance(env, str):
+            normalized = env.strip().lower()
+            if normalized in ("null", "none", ""):
+                data["env"] = None
+            else:
+                try:
+                    parsed = json.loads(env)
+                    if isinstance(parsed, dict):
+                        data["env"] = parsed
+                    elif parsed is None:
+                        data["env"] = None
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # timeout_ms: "120000" → 120000
+        timeout_ms = data.get("timeout_ms")
+        if isinstance(timeout_ms, str):
+            try:
+                data["timeout_ms"] = int(timeout_ms)
+            except (ValueError, TypeError):
+                pass
+
+        # max_output_chars: "30000" → 30000
+        max_output_chars = data.get("max_output_chars")
+        if isinstance(max_output_chars, str):
+            try:
+                data["max_output_chars"] = int(max_output_chars)
+            except (ValueError, TypeError):
+                pass
+
+        return data
 
     @field_validator("cwd", mode="before")
     @classmethod
