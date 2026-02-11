@@ -517,6 +517,22 @@ class TodoWriteInput(BaseModel):
 
     model_config = {"extra": "forbid"}
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_stringified_todos(cls, data: Any) -> Any:
+        """Defense-in-depth: 修复 LLM 将 todos 数组字符串化的问题。"""
+        if not isinstance(data, dict):
+            return data
+        todos = data.get("todos")
+        if isinstance(todos, str):
+            try:
+                parsed = json.loads(todos)
+                if isinstance(parsed, list):
+                    data["todos"] = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return data
+
 
 class WebFetchInput(BaseModel):
     url: str = Field(
@@ -548,6 +564,22 @@ class AskUserQuestionInput(BaseModel):
     questions: list[Question] = Field(min_length=1, max_length=4, description="Questions to ask")
 
     model_config = {"extra": "forbid"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_stringified_questions(cls, data: Any) -> Any:
+        """Defense-in-depth: 修复 LLM 将 questions 数组字符串化的问题。"""
+        if not isinstance(data, dict):
+            return data
+        questions = data.get("questions")
+        if isinstance(questions, str):
+            try:
+                parsed = json.loads(questions)
+                if isinstance(parsed, list):
+                    data["questions"] = parsed
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return data
 
 
 def _compute_context_window(params: GrepInput) -> tuple[int, int]:

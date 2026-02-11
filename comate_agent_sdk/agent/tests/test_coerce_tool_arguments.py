@@ -14,7 +14,7 @@ from comate_agent_sdk.agent.tool_exec import (
     _coerce_value,
     _extract_types,
 )
-from comate_agent_sdk.system_tools.tools import BashInput
+from comate_agent_sdk.system_tools.tools import AskUserQuestionInput, BashInput, TodoWriteInput
 
 
 # ── _extract_types ──────────────────────────────────────────────
@@ -298,6 +298,64 @@ class TestCoerceNonStringRecursion(unittest.TestCase):
         value = {"retries": "3", "verbose": "false"}
         result = _coerce_value(value, schema)
         assert result == {"retries": 3, "verbose": False}
+
+
+# ── TodoWriteInput defense-in-depth ─────────────────────────────
+
+
+class TestTodoWriteInputCoercion(unittest.TestCase):
+    def test_stringified_todos(self):
+        data = {
+            "todos": '[{"id": "1", "content": "task one", "status": "pending", "priority": "high"}]'
+        }
+        inp = TodoWriteInput(**data)
+        assert len(inp.todos) == 1
+        assert inp.todos[0].id == "1"
+        assert inp.todos[0].content == "task one"
+        assert inp.todos[0].status == "pending"
+
+    def test_already_correct_todos(self):
+        data = {
+            "todos": [{"id": "1", "content": "task one", "status": "pending", "priority": "high"}]
+        }
+        inp = TodoWriteInput(**data)
+        assert len(inp.todos) == 1
+
+
+# ── AskUserQuestionInput defense-in-depth ───────────────────────
+
+
+class TestAskUserQuestionInputCoercion(unittest.TestCase):
+    def test_stringified_questions(self):
+        data = {
+            "questions": json.dumps([{
+                "question": "Which approach?",
+                "header": "Approach",
+                "options": [
+                    {"label": "A", "description": "Option A"},
+                    {"label": "B", "description": "Option B"},
+                ],
+                "multiSelect": False,
+            }])
+        }
+        inp = AskUserQuestionInput(**data)
+        assert len(inp.questions) == 1
+        assert inp.questions[0].question == "Which approach?"
+
+    def test_already_correct_questions(self):
+        data = {
+            "questions": [{
+                "question": "Which?",
+                "header": "Choice",
+                "options": [
+                    {"label": "A", "description": "Opt A"},
+                    {"label": "B", "description": "Opt B"},
+                ],
+                "multiSelect": False,
+            }]
+        }
+        inp = AskUserQuestionInput(**data)
+        assert len(inp.questions) == 1
 
 
 if __name__ == "__main__":

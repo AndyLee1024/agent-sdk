@@ -117,8 +117,8 @@ def _coerce_value(value: Any, prop_schema: dict[str, Any]) -> Any:
                 if isinstance(items_schema, dict):
                     return [_coerce_value(item, items_schema) for item in parsed]
                 return parsed
-        except (json.JSONDecodeError, TypeError):
-            pass
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.debug(f"Coerce string→array json.loads failed: {exc}, value[:100]={value[:100]!r}")
 
     # string → object
     if "object" in expected:
@@ -126,8 +126,8 @@ def _coerce_value(value: Any, prop_schema: dict[str, Any]) -> Any:
             parsed = json.loads(value)
             if isinstance(parsed, dict):
                 return _coerce_object(parsed, prop_schema)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.debug(f"Coerce string→object json.loads failed: {exc}, value[:100]={value[:100]!r}")
 
     # 无法转换，原样返回让 Pydantic 报清晰错误
     return value
