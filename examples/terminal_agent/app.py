@@ -4,6 +4,7 @@ import asyncio
 import logging
 import sys
 from contextlib import suppress
+from pathlib import Path
 from typing import Any
 
 from prompt_toolkit.application import Application, run_in_terminal
@@ -28,7 +29,10 @@ from comate_agent_sdk.tools import tool
 
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.logo import print_logo
+from terminal_agent.markdown_render import render_markdown_to_plain
+from terminal_agent.mention_completer import LocalFileMentionCompleter, MentionContext
 from terminal_agent.models import HistoryEntry
+from terminal_agent.rpc_stdio import StdioRPCBridge
 from terminal_agent.status_bar import StatusBar
 
 console = Console()
@@ -167,26 +171,32 @@ class TerminalAgentTUI:
         self._slash_active = False
         self._slash_candidates: list[str] = []
         self._slash_index = 0
+        self._mention_active = False
+        self._mention_candidates: list[str] = []
+        self._mention_index = 0
+        self._mention_context: MentionContext | None = None
+        self._mention_completer = LocalFileMentionCompleter(Path.cwd())
         self._loading_frame = 0
 
         self._closing = False
         self._printed_history_index = 0
         self._todo_cache: list[str] = []
-        self._history_text = ""
+        self._render_dirty = True
+        self._last_loading_line = ""
 
         self._app: Application[None] | None = None
-        self._stream_task: asyncio.Task[None] | None = None
+        self._stream_task: asyncio.Task[Any] | None = None
         self._ui_tick_task: asyncio.Task[None] | None = None
 
         # 历史显示区域（可滚动）
         self._history_area = TextArea(
             text="",
             multiline=True,
-            scrollbar=True,
+            scrollbar=False,
             read_only=True,
             wrap_lines=True,
             style="class:history",
-            focusable=True,
+            focusable=False,
         )
 
         self._input_area = TextArea(
@@ -259,11 +269,12 @@ class TerminalAgentTUI:
             key_bindings=self._bindings,
             style=self._style,
             full_screen=False,
-            mouse_support=True,
+            mouse_support=False,
         )
 
     def _set_busy(self, value: bool) -> None:
         self._busy = value
+        self._render_dirty = True
         self._invalidate()
 
     def _build_key_bindings(self) -> KeyBindings:
@@ -272,43 +283,48 @@ class TerminalAgentTUI:
         @bindings.add("enter")
         def _submit(event) -> None:
             del event
+            if self._accept_active_candidate():
+                return
             self._submit_from_input()
 
-        @bindings.add("tab")
-        def _slash_next(event) -> None:
+        @bindings.add(
+            "tab",
+            filter=Condition(lambda: self._mention_active or self._slash_active),
+        )
+        def _accept_candidate(event) -> None:
             del event
-            if not self._slash_active or not self._slash_candidates:
-                return
-            self._slash_index = (self._slash_index + 1) % len(self._slash_candidates)
-            self._invalidate()
+            self._accept_active_candidate()
 
-        @bindings.add("s-tab")
-        def _slash_prev(event) -> None:
+        @bindings.add(
+            "s-tab",
+            filter=Condition(lambda: self._mention_active or self._slash_active),
+        )
+        def _active_prev(event) -> None:
             del event
-            if not self._slash_active or not self._slash_candidates:
-                return
-            self._slash_index = (self._slash_index - 1) % len(self._slash_candidates)
-            self._invalidate()
+            self._move_active_selection(-1)
 
-        @bindings.add("up")
-        def _slash_prev_up(event) -> None:
+        @bindings.add(
+            "up",
+            filter=Condition(lambda: self._mention_active or self._slash_active),
+        )
+        def _active_prev_up(event) -> None:
             del event
-            if not self._slash_active or not self._slash_candidates:
-                return
-            self._slash_index = (self._slash_index - 1) % len(self._slash_candidates)
-            self._invalidate()
+            self._move_active_selection(-1)
 
-        @bindings.add("down")
-        def _slash_next_down(event) -> None:
+        @bindings.add(
+            "down",
+            filter=Condition(lambda: self._mention_active or self._slash_active),
+        )
+        def _active_next_down(event) -> None:
             del event
-            if not self._slash_active or not self._slash_candidates:
-                return
-            self._slash_index = (self._slash_index + 1) % len(self._slash_candidates)
-            self._invalidate()
+            self._move_active_selection(1)
 
         @bindings.add("escape")
-        def _clear_slash_or_refocus(event) -> None:
+        def _clear_active_or_refocus(event) -> None:
             del event
+            if self._mention_active:
+                self._deactivate_mention()
+                return
             if self._slash_active:
                 self._deactivate_slash()
                 return
@@ -334,40 +350,6 @@ class TerminalAgentTUI:
         def _exit(event) -> None:
             del event
             self._exit_app()
-
-        @bindings.add("pageup")
-        def _scroll_up(event) -> None:
-            del event
-            self._scroll_history(-10)
-
-        @bindings.add("pagedown")
-        def _scroll_down(event) -> None:
-            del event
-            self._scroll_history(10)
-
-        @bindings.add("c-home")
-        def _scroll_top(event) -> None:
-            del event
-            self._history_area.buffer.cursor_position = 0
-
-        @bindings.add("c-end")
-        def _scroll_bottom(event) -> None:
-            del event
-            self._history_area.buffer.cursor_position = len(self._history_area.text)
-
-        @bindings.add("c-h")
-        def _focus_history(event) -> None:
-            """切换焦点到历史窗口以便滚动"""
-            del event
-            if self._app is not None:
-                self._app.layout.focus(self._history_area.window)
-
-        @bindings.add("c-i")
-        def _focus_input(event) -> None:
-            """切换焦点回输入框"""
-            del event
-            if self._app is not None:
-                self._app.layout.focus(self._input_area.window)
 
         return bindings
 
@@ -404,15 +386,41 @@ class TerminalAgentTUI:
         if self._busy:
             return
 
+        document = self._input_area.buffer.document
+        mention_result = self._mention_completer.suggest(document.text_before_cursor, max_items=8)
+        if mention_result is not None:
+            context, candidates = mention_result
+            if candidates:
+                previous = ""
+                if self._mention_active and self._mention_candidates:
+                    previous = self._mention_candidates[self._mention_index]
+
+                self._mention_active = True
+                self._mention_context = context
+                self._mention_candidates = candidates
+                if previous and previous in candidates:
+                    self._mention_index = candidates.index(previous)
+                else:
+                    self._mention_index = 0
+                if self._slash_active:
+                    self._deactivate_slash(invalidate=False)
+                self._invalidate()
+                return
+
+        if self._mention_active:
+            self._deactivate_mention(invalidate=False)
+
         text = self._input_area.text
         if not text.startswith("/"):
             if self._slash_active:
-                self._deactivate_slash()
+                self._deactivate_slash(invalidate=False)
+            self._invalidate()
             return
 
         candidates = [command for command in SLASH_COMMANDS if command.startswith(text)]
         if not candidates:
-            self._deactivate_slash()
+            self._deactivate_slash(invalidate=False)
+            self._invalidate()
             return
 
         previous = ""
@@ -427,22 +435,65 @@ class TerminalAgentTUI:
             self._slash_index = 0
         self._invalidate()
 
-    def _deactivate_slash(self) -> None:
+    def _move_active_selection(self, delta: int) -> bool:
+        if self._mention_active and self._mention_candidates:
+            size = len(self._mention_candidates)
+            self._mention_index = (self._mention_index + delta) % size
+            self._invalidate()
+            return True
+        if self._slash_active and self._slash_candidates:
+            size = len(self._slash_candidates)
+            self._slash_index = (self._slash_index + delta) % size
+            self._invalidate()
+            return True
+        return False
+
+    def _accept_active_candidate(self) -> bool:
+        if self._mention_active and self._mention_candidates and self._mention_context is not None:
+            completion = self._mention_candidates[self._mention_index]
+            document = self._input_area.buffer.document
+            should_append_space = not completion.endswith("/")
+            new_text, new_cursor = self._mention_completer.apply_completion(
+                full_text=document.text,
+                cursor_position=document.cursor_position,
+                context=self._mention_context,
+                completion=completion,
+                append_space=should_append_space,
+            )
+            self._input_area.buffer.document = Document(
+                text=new_text,
+                cursor_position=new_cursor,
+            )
+            if should_append_space:
+                self._deactivate_mention(invalidate=False)
+            self._invalidate()
+            return True
+
+        if self._slash_active and self._slash_candidates:
+            command = self._slash_candidates[self._slash_index]
+            if self._input_area.text.strip() == command:
+                return False
+            self._input_area.buffer.document = Document(text=command, cursor_position=len(command))
+            self._deactivate_slash(invalidate=False)
+            self._invalidate()
+            return True
+
+        return False
+
+    def _deactivate_mention(self, *, invalidate: bool = True) -> None:
+        self._mention_active = False
+        self._mention_candidates = []
+        self._mention_index = 0
+        self._mention_context = None
+        if invalidate:
+            self._invalidate()
+
+    def _deactivate_slash(self, *, invalidate: bool = True) -> None:
         self._slash_active = False
         self._slash_candidates = []
         self._slash_index = 0
-        self._invalidate()
-
-    def _scroll_history(self, lines: int) -> None:
-        """滚动历史窗口指定行数，正数向下，负数向上"""
-        buffer = self._history_area.buffer
-        document = buffer.document
-        current_line = document.cursor_position_row
-        new_line = max(0, min(document.line_count - 1, current_line + lines))
-
-        # 移动到新行的开始位置
-        new_position = document.translate_row_col_to_index(new_line, 0)
-        buffer.cursor_position = new_position
+        if invalidate:
+            self._invalidate()
 
     def _submit_from_input(self) -> None:
         if self._busy:
@@ -454,14 +505,8 @@ class TerminalAgentTUI:
             return
 
         self._input_area.buffer.document = Document("")
-
-        if self._slash_active and self._slash_candidates:
-            command = self._slash_candidates[self._slash_index]
-            self._deactivate_slash()
-            self._schedule_background(self._execute_command(command))
-            return
-
-        self._deactivate_slash()
+        self._deactivate_mention(invalidate=False)
+        self._deactivate_slash(invalidate=False)
         if text.startswith("/"):
             self._schedule_background(self._execute_command(text))
             return
@@ -610,19 +655,19 @@ class TerminalAgentTUI:
 
     def _refresh_layers(self) -> None:
         self._todo_cache = self._renderer.todo_lines()
-        self._invalidate()
+        self._render_dirty = True
 
     async def _drain_history_async(self) -> None:
         pending = self._pending_history_entries()
         if not pending:
             return
-        self._print_history_entries(pending)
+        await self._print_history_entries_async(pending)
 
     def _drain_history_sync(self) -> None:
         pending = self._pending_history_entries()
         if not pending:
             return
-        self._print_history_entries(pending)
+        self._print_history_entries_sync(pending)
 
     def _pending_history_entries(self) -> list[HistoryEntry]:
         entries = self._renderer.history_entries()
@@ -644,12 +689,19 @@ class TerminalAgentTUI:
             return "✗" if entry.is_error else "✓"
         return "•"
 
+    def _entry_content(self, entry: HistoryEntry) -> str:
+        if entry.entry_type != "assistant":
+            return entry.text
+        width = max(self._terminal_width() - 6, 40)
+        return render_markdown_to_plain(entry.text, width=width)
+
     def _format_history_entries(self, entries: list[HistoryEntry]) -> str:
         """格式化历史条目为纯文本"""
         lines: list[str] = []
         for entry in entries:
             prefix = self._entry_prefix(entry)
-            content_lines = entry.text.splitlines() or [""]
+            content = self._entry_content(entry)
+            content_lines = content.splitlines() or [""]
 
             # 第一行带前缀
             lines.append(f"{prefix} {content_lines[0]}")
@@ -663,30 +715,23 @@ class TerminalAgentTUI:
 
         return "\n".join(lines)
 
-    def _print_history_entries(self, entries: list[HistoryEntry]) -> None:
-        """更新历史窗口内容"""
+    async def _print_history_entries_async(self, entries: list[HistoryEntry]) -> None:
         if not entries:
             return
 
-        # 检查是否在底部（用于自动滚动）
-        buffer = self._history_area.buffer
-        was_at_bottom = buffer.cursor_position >= len(buffer.text)
-
-        # 格式化新条目
         new_text = self._format_history_entries(entries)
+        if not new_text:
+            return
+        await run_in_terminal(lambda: console.print(new_text))
 
-        # 追加到历史文本
-        if self._history_text:
-            self._history_text += new_text
-        else:
-            self._history_text = new_text
+    def _print_history_entries_sync(self, entries: list[HistoryEntry]) -> None:
+        if not entries:
+            return
 
-        # 更新显示
-        self._history_area.text = self._history_text
-
-        # 如果之前在底部，自动滚动到最新消息
-        if was_at_bottom:
-            buffer.cursor_position = len(self._history_text)
+        new_text = self._format_history_entries(entries)
+        if not new_text:
+            return
+        console.print(new_text)
 
     async def _ui_tick(self) -> None:
         try:
@@ -695,7 +740,19 @@ class TerminalAgentTUI:
                 self._loading_frame += 2
                 self._todo_cache = self._renderer.todo_lines()
                 await self._drain_history_async()
-                self._invalidate()
+
+                loading_line = self._renderer.loading_line().strip()
+                loading_changed = loading_line != self._last_loading_line
+                if loading_changed:
+                    self._last_loading_line = loading_line
+                    self._render_dirty = True
+
+                if self._busy and loading_line:
+                    self._render_dirty = True
+
+                if self._render_dirty:
+                    self._invalidate()
+                    self._render_dirty = False
                 await asyncio.sleep(1 / 12)
         except asyncio.CancelledError:
             return
@@ -710,6 +767,16 @@ class TerminalAgentTUI:
 
     def _status_text(self) -> list[tuple[str, str]]:
         width = self._terminal_width()
+
+        if self._mention_active and self._mention_candidates:
+            fragments: list[str] = []
+            for idx, candidate in enumerate(self._mention_candidates):
+                if idx == self._mention_index:
+                    fragments.append(f"[{candidate}]")
+                else:
+                    fragments.append(candidate)
+            mention_line = f"@> {'  '.join(fragments)}"
+            return [("class:status", _fit_single_line(mention_line, width - 1))]
 
         if self._slash_active and self._slash_candidates:
             fragments: list[str] = []
@@ -775,18 +842,25 @@ class TerminalAgentTUI:
             self._renderer.close()
 
 
-async def run() -> None:
-    print_logo(console)
-    agent = _build_agent()
-    session_id = sys.argv[1] if len(sys.argv) > 1 else None
-
+def _resolve_session(agent: Agent, session_id: str | None) -> tuple[ChatSession, str]:
     if session_id:
-        session = ChatSession.resume(agent, session_id=session_id)
-        mode = "resume"
-    else:
-        session = ChatSession(agent)
-        mode = "new"
+        return ChatSession.resume(agent, session_id=session_id), "resume"
+    return ChatSession(agent), "new"
 
+
+async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None:
+    agent = _build_agent()
+    session, mode = _resolve_session(agent, session_id)
+
+    if rpc_stdio:
+        bridge = StdioRPCBridge(session)
+        try:
+            await bridge.run()
+        finally:
+            await session.close()
+        return
+
+    print_logo(console)
     status_bar = StatusBar(session)
     if mode == "resume":
         await status_bar.refresh()
@@ -806,4 +880,5 @@ async def run() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    argv_session_id = sys.argv[1] if len(sys.argv) > 1 else None
+    asyncio.run(run(session_id=argv_session_id))

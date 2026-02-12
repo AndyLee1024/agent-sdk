@@ -71,7 +71,7 @@ class TestEventRenderer(unittest.TestCase):
             )
         )
         self.assertIn("⏳", renderer.loading_line())
-        self.assertIn("Planner", renderer.loading_line())
+        self.assertIn("拆解任务", renderer.loading_line())
 
         renderer.handle_event(
             SubagentProgressEvent(
@@ -110,6 +110,41 @@ class TestEventRenderer(unittest.TestCase):
         self.assertTrue(todo_lines)
         self.assertLessEqual(len(todo_lines), 6)
         self.assertIn("折叠", todo_lines[-1])
+
+    def test_task_tool_history_hides_prompt_and_prefix_icons(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.handle_event(
+            ToolCallEvent(
+                tool="Task",
+                args={
+                    "subagent_type": "Explorer",
+                    "description": "研究 kimi-cli-main 实现",
+                    "prompt": "这是很长的提示词，不应出现在历史里",
+                },
+                tool_call_id="tc_task_2",
+            )
+        )
+        renderer.handle_event(
+            ToolResultEvent(
+                tool="Task",
+                result="done",
+                tool_call_id="tc_task_2",
+                is_error=False,
+            )
+        )
+
+        tool_call_entry = next(
+            entry for entry in renderer.history_entries() if entry.entry_type == "tool_call"
+        )
+        tool_result_entry = next(
+            entry for entry in renderer.history_entries() if entry.entry_type == "tool_result"
+        )
+
+        self.assertEqual(tool_call_entry.text, "研究 kimi-cli-main 实现")
+        self.assertNotIn("prompt", tool_call_entry.text.lower())
+        self.assertFalse(tool_call_entry.text.startswith("→"))
+        self.assertFalse(tool_result_entry.text.startswith("✓"))
 
 
 if __name__ == "__main__":

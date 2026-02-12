@@ -57,11 +57,12 @@ def _format_tokens(token_count: int) -> str:
 
 
 def _extract_task_title(args: dict[str, Any]) -> str:
-    subagent_name = str(args.get("subagent_type", "")).strip() or "Task"
     description = str(args.get("description", "")).strip()
-    if not description:
-        return subagent_name
-    return f"{subagent_name}({description})"
+    if description:
+        return description
+
+    subagent_name = str(args.get("subagent_type", "")).strip() or "Task"
+    return subagent_name
 
 
 @dataclass
@@ -170,12 +171,13 @@ class EventRenderer:
     def _append_tool_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
         title = tool_name
         is_task = tool_name.lower() == "task"
+        summary = summarize_tool_args(tool_name, args).strip()
         if is_task:
             title = _extract_task_title(args)
-        summary = summarize_tool_args(tool_name, args).strip()
+            summary = ""
         summary_suffix = f" {summary}" if summary else ""
         self._history.append(
-            HistoryEntry(entry_type="tool_call", text=f"→ {title}{summary_suffix}")
+            HistoryEntry(entry_type="tool_call", text=f"{title}{summary_suffix}")
         )
 
         self._running_tools[tool_call_id] = _RunningTool(
@@ -196,11 +198,10 @@ class EventRenderer:
     ) -> None:
         state = self._running_tools.pop(tool_call_id, None)
         if state is None:
-            icon = "✗" if is_error else "✓"
             self._history.append(
                 HistoryEntry(
                     entry_type="tool_result",
-                    text=f"{icon} {tool_name}",
+                    text=f"{tool_name}",
                     is_error=is_error,
                 )
             )
@@ -212,11 +213,10 @@ class EventRenderer:
             if state.is_task and state.progress_tokens > 0
             else ""
         )
-        icon = "✗" if is_error else "✓"
         self._history.append(
             HistoryEntry(
                 entry_type="tool_result",
-                text=f"{icon} {state.title} · {elapsed}{tokens_suffix}",
+                text=f"{state.title} · {elapsed}{tokens_suffix}",
                 is_error=is_error,
             )
         )
