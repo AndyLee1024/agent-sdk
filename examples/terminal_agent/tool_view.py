@@ -16,8 +16,7 @@ from terminal_agent.message_style import (
     TOOL_SUCCESS_PREFIX,
     TOOL_SUCCESS_STYLE,
 )
-from terminal_agent.models import ToolRunState
-from terminal_agent.todo_view import extract_todos
+from terminal_agent.models import TodoItemState, ToolRunState
 
 _PULSE_GLYPHS: tuple[str, ...] = ("◐", "◓", "◑", "◒")
 _HIDDEN_ARG_TOOLS: frozenset[str] = frozenset({"askuserquestion"})
@@ -25,6 +24,64 @@ _TASK_PROMPT_FALLBACK_LEN = 40
 _SWEEP_SPEED_MULTIPLIER = 2
 _MAX_FANCY_TASKS = 2
 _MAX_FANCY_LINE_LEN = 100
+
+# Todo extraction helpers
+_ALLOWED_STATUS = {"pending", "in_progress", "completed"}
+_ALLOWED_PRIORITY = {"high", "medium", "low"}
+
+
+def _parse_todos_value(value: Any) -> list[dict[str, Any]] | None:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if isinstance(parsed, list):
+            return parsed
+    return None
+
+
+def _as_todos(args: dict[str, Any]) -> list[dict[str, Any]] | None:
+    if "todos" in args:
+        parsed = _parse_todos_value(args["todos"])
+        if parsed is not None:
+            return parsed
+    params = args.get("params")
+    if isinstance(params, dict):
+        parsed = _parse_todos_value(params.get("todos"))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _normalize_todo(item: dict[str, Any]) -> TodoItemState | None:
+    content = str(item.get("content", "")).strip()
+    if not content:
+        return None
+    status = str(item.get("status", "pending")).strip().lower()
+    if status not in _ALLOWED_STATUS:
+        status = "pending"
+    priority = str(item.get("priority", "medium")).strip().lower()
+    if priority not in _ALLOWED_PRIORITY:
+        priority = "medium"
+    return TodoItemState(content=content, status=status, priority=priority)
+
+
+def extract_todos(args: dict[str, Any]) -> list[TodoItemState] | None:
+    """从 TodoWrite 工具参数中提取 todo 列表。"""
+    raw = _as_todos(args)
+    if raw is None:
+        return None
+    todos: list[TodoItemState] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_todo(item)
+        if normalized is not None:
+            todos.append(normalized)
+    return todos
 
 
 def _truncate(content: str, max_len: int = 280) -> str:

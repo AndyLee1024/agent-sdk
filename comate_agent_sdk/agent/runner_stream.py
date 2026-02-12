@@ -20,6 +20,7 @@ from comate_agent_sdk.agent.events import (
     SubagentStopEvent,
     TextEvent,
     ThinkingEvent,
+    TodoUpdatedEvent,
     ToolCallEvent,
     ToolResultEvent,
     UsageDeltaEvent,
@@ -642,6 +643,31 @@ async def query_stream(
                     status="error" if tool_result.is_error else "completed",
                     duration_ms=step_duration_ms,
                 )
+
+                # Check if this was TodoWrite - if so, yield TodoUpdatedEvent
+                if tool_name == "TodoWrite" and not tool_result.is_error:
+                    todos: list[dict] = []
+                    payload = tool_result.raw_envelope
+                    if is_tool_result_envelope(payload):
+                        data = payload.get("data", {})
+                        if isinstance(data, dict):
+                            raw_todos = data.get("todos", [])
+                            if isinstance(raw_todos, list):
+                                todos = [t for t in raw_todos if isinstance(t, dict)]
+                    else:
+                        try:
+                            parsed_payload = json.loads(tool_result.text)
+                            if is_tool_result_envelope(parsed_payload):
+                                data = parsed_payload.get("data", {})
+                                if isinstance(data, dict):
+                                    raw_todos = data.get("todos", [])
+                                    if isinstance(raw_todos, list):
+                                        todos = [t for t in raw_todos if isinstance(t, dict)]
+                        except Exception:
+                            todos = []
+
+                    if todos:
+                        yield TodoUpdatedEvent(todos=todos)
 
                 # Check if this was AskUserQuestion - if so, yield UserQuestionEvent and stop
                 if tool_name == "AskUserQuestion" and not tool_result.is_error:

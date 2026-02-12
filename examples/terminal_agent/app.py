@@ -285,7 +285,6 @@ class TerminalAgentTUI:
 
         self._closing = False
         self._printed_history_index = 0
-        self._todo_cache: list[str] = []
         self._render_dirty = True
         self._last_loading_line = ""
 
@@ -325,16 +324,9 @@ class TerminalAgentTUI:
                 buffer.start_completion(select_first=False)
 
         self._question_ui = AskUserQuestionUI()
-        self._todo_control = FormattedTextControl(text=self._todo_text)
         self._loading_control = FormattedTextControl(text=self._loading_text)
         self._status_control = FormattedTextControl(text=self._status_text)
 
-        self._todo_window = Window(
-            content=self._todo_control,
-            wrap_lines=False,
-            dont_extend_height=True,
-            style="class:todo",
-        )
         self._loading_window = Window(
             content=self._loading_control,
             height=1,
@@ -348,10 +340,6 @@ class TerminalAgentTUI:
             style="class:status",
         )
 
-        self._todo_container = ConditionalContainer(
-            content=self._todo_window,
-            filter=Condition(lambda: bool(self._todo_cache)),
-        )
         self._input_container = ConditionalContainer(
             content=self._input_area,
             filter=Condition(lambda: self._ui_mode == UIMode.NORMAL),
@@ -364,7 +352,6 @@ class TerminalAgentTUI:
         self._main_container = HSplit(
             [
                 self._history_area,
-                self._todo_container,
                 self._loading_window,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
@@ -391,14 +378,6 @@ class TerminalAgentTUI:
             {
                 "": "bg:#1f232a #e5e9f0",
                 "history": "bg:#1a1e24 #d8dee9",
-                "todo": "bg:#232a35 #9ecbff",
-                "todo.summary": "fg:#9ecbff bold",
-                "todo.pending": "fg:#fde68a",
-                "todo.pending.low": "fg:#9ca3af",
-                "todo.in_progress": "fg:#67e8f9",
-                "todo.completed": "fg:#86efac strike",
-                "todo.meta": "fg:#93a4bb",
-                "todo.separator": "fg:#4b5563",
                 "input.pad": "bg:#3a3d42",
                 "input.line": "bg:#3a3d42 #f2f4f8",
                 "input-line": "bg:#3a3d42 #f2f4f8",
@@ -922,7 +901,6 @@ class TerminalAgentTUI:
         self._renderer.append_system_message("\n".join(lines))
 
     def _refresh_layers(self) -> None:
-        self._todo_cache = self._renderer.todo_lines()
         self._sync_focus_for_mode()
         self._render_dirty = True
 
@@ -1007,7 +985,6 @@ class TerminalAgentTUI:
             while not self._closing:
                 self._renderer.tick_progress()
                 self._loading_frame += 2
-                self._todo_cache = self._renderer.todo_lines()
                 await self._drain_history_async()
 
                 loading_line = self._renderer.loading_line().strip()
@@ -1044,32 +1021,6 @@ class TerminalAgentTUI:
             mode = "waiting_input"
         merged = f"[{mode}] {base}"
         return [("class:status", _fit_single_line(merged, width - 1))]
-
-    def _todo_text(self) -> list[tuple[str, str]]:
-        if not self._todo_cache:
-            return [("class:todo", "")]
-        limited = self._todo_cache[:6]
-        fragments: list[tuple[str, str]] = []
-        for idx, line in enumerate(limited):
-            style = "class:todo"
-            if idx == 0 and line.startswith("TODO "):
-                style = "class:todo.summary"
-            elif line.startswith("  ◉"):
-                style = "class:todo.in_progress"
-            elif line.startswith("  ○") and "(low)" in line:
-                style = "class:todo.pending.low"
-            elif line.startswith("  ○"):
-                style = "class:todo.pending"
-            elif line.startswith("  ✔"):
-                style = "class:todo.completed"
-            elif line.startswith("  ─"):
-                style = "class:todo.separator"
-            elif line.startswith("最近变更:") or line.startswith("  （还有 ") or "折叠" in line:
-                style = "class:todo.meta"
-            fragments.append((style, line))
-            if idx < len(limited) - 1:
-                fragments.append(("", "\n"))
-        return fragments
 
     def _loading_text(self) -> list[tuple[str, str]]:
         text = self._renderer.loading_line().strip()

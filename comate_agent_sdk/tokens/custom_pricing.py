@@ -81,4 +81,10 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
         "input_cost_per_token": 0.0,
         "output_cost_per_token": 0.0,
     },
+    "kimi-for-coding":{
+        "max_input_tokens": 262144,
+        "max_output_tokens": 32768,
+        "input_cost_per_token": 4e-07,
+        "output_cost_per_token": 2e-06,
+    }
 }

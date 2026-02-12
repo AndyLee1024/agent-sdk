@@ -14,6 +14,7 @@ from comate_agent_sdk.agent.events import (
     SubagentStopEvent,
     TextEvent,
     ThinkingEvent,
+    TodoUpdatedEvent,
     ToolCallEvent,
     ToolResultEvent,
     UsageDeltaEvent,
@@ -21,12 +22,9 @@ from comate_agent_sdk.agent.events import (
 )
 
 from terminal_agent.models import HistoryEntry
-from terminal_agent.todo_view import TodoStateStore
 from terminal_agent.tool_view import summarize_tool_args
 
 logger = logging.getLogger(__name__)
-
-_MAX_TODO_LINES = 6
 
 
 def _truncate(content: str, max_len: int = 120) -> str:
@@ -79,7 +77,6 @@ class EventRenderer:
     """Convert SDK events to lightweight terminal state for prompt_toolkit UI."""
 
     def __init__(self) -> None:
-        self._todo = TodoStateStore()
         self._history: list[HistoryEntry] = []
         self._running_tools: dict[str, _RunningTool] = {}
         self._thinking_content: str = ""
@@ -132,17 +129,6 @@ class EventRenderer:
     def loading_line(self) -> str:
         return self._loading_line
 
-    def todo_lines(self) -> list[str]:
-        lines = self._todo.visible_lines(max_visible_items=6)
-        if not lines:
-            return []
-        if len(lines) <= _MAX_TODO_LINES:
-            return lines
-        kept = lines[: _MAX_TODO_LINES - 1]
-        hidden = len(lines) - len(kept)
-        kept.append(f"... （折叠 {hidden} 行）")
-        return kept
-
     def append_system_message(self, content: str, *, is_error: bool = False) -> None:
         normalized = content.strip()
         if not normalized:
@@ -187,8 +173,6 @@ class EventRenderer:
             is_task=is_task,
             args_summary=summary,
         )
-
-        self._todo.maybe_render_update(tool_name, args)
 
     def _append_tool_result(
         self,
@@ -271,6 +255,47 @@ class EventRenderer:
                 )
             )
 
+    def _append_todo_update(self, todos: list[dict[str, Any]]) -> None:
+        """将 todo 列表渲染为消息并添加到历史记录中。"""
+        if not todos:
+            return
+
+        total = len(todos)
+        completed = sum(1 for t in todos if t.get("status") == "completed")
+        in_progress = sum(1 for t in todos if t.get("status") == "in_progress")
+        pending = total - completed - in_progress
+
+        # 构建消息
+        lines: list[str] = []
+        lines.append(f"📋 任务列表 ({completed}/{total} 完成)")
+
+        # 按状态分组：进行中 -> 待处理 -> 已完成
+        open_items = [t for t in todos if t.get("status") != "completed"]
+        done_items = [t for t in todos if t.get("status") == "completed"]
+
+        for item in open_items:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            status = item.get("status", "pending")
+            if status == "in_progress":
+                lines.append(f"  ◉ {content} ⏳")
+            else:
+                lines.append(f"  ○ {content}")
+
+        if open_items and done_items:
+            lines.append("  ───────────────")
+
+        for item in done_items:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            lines.append(f"  ✓ ~~{content}~~")
+
+        self._history.append(
+            HistoryEntry(entry_type="system", text="\n".join(lines))
+        )
+
     def handle_event(self, event: Any) -> tuple[bool, list[dict[str, Any]] | None]:
         if not isinstance(event, TextEvent):
             self._flush_assistant_segment()
@@ -321,6 +346,8 @@ class EventRenderer:
                         state.started_at_monotonic = time.monotonic() - (normalized / 1000)
             case SubagentStopEvent(tool_call_id=_, subagent_name=_, status=_, duration_ms=_, error=_):
                 pass
+            case TodoUpdatedEvent(todos=todos):
+                self._append_todo_update(todos)
             case UserQuestionEvent(questions=questions, tool_call_id=_):
                 self._append_questions(questions)
                 self._rebuild_loading_line()

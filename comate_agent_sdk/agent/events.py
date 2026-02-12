@@ -332,6 +332,22 @@ class UserQuestionEvent:
 
 
 @dataclass
+class TodoUpdatedEvent:
+	"""Emitted when the todo list is updated via TodoWrite tool.
+
+	This event contains the full todo list state and is intended for UI rendering.
+	"""
+
+	todos: list[dict[str, Any]]
+	"""The complete list of todo items with their current state."""
+
+	def __str__(self) -> str:
+		total = len(self.todos)
+		completed = sum(1 for t in self.todos if t.get('status') == 'completed')
+		return f'📋 Todo updated: {completed}/{total} completed'
+
+
+@dataclass
 class PreCompactEvent:
 	"""Emitted before context compaction is performed."""
 
@@ -404,6 +420,7 @@ AgentEvent = (
 	| SubagentProgressEvent
 	| HiddenUserMessageEvent
 	| UserQuestionEvent
+	| TodoUpdatedEvent
 	| PreCompactEvent
 	| CompactionMetaEvent
 )
