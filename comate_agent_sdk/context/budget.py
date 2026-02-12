@@ -227,7 +227,12 @@ class TokenCounter:
         *,
         timeout_ms: int,
     ) -> int | None:
-        """Anthropic 估算：优先 SDK count_tokens。"""
+        """Anthropic 估算：优先 SDK count_tokens（最小超时 1000ms）。"""
+        model_name = str(getattr(llm, "model", ""))
+        requested_timeout_ms = max(1, int(timeout_ms))
+        effective_timeout_ms = max(1000, requested_timeout_ms)
+        timeout_s = effective_timeout_ms / 1000.0
+
         try:
             from comate_agent_sdk.llm.anthropic.serializer import AnthropicMessageSerializer
 
@@ -235,22 +240,26 @@ class TokenCounter:
             client = llm.get_client()  # type: ignore[attr-defined]
 
             kwargs: dict[str, Any] = {
-                "model": str(getattr(llm, "model", "")),
+                "model": model_name,
                 "messages": serialized_messages,
-                "timeout": max(1, int(timeout_ms)) / 1000.0,
+                "timeout": timeout_s,
             }
             if system_prompt:
                 kwargs["system"] = system_prompt
 
             resp = await asyncio.wait_for(
                 client.messages.count_tokens(**kwargs),
-                timeout=max(1, int(timeout_ms)) / 1000.0 + 0.05,
+                timeout=timeout_s + 0.05,
             )
             input_tokens = int(getattr(resp, "input_tokens", 0) or 0)
             if input_tokens > 0:
                 return input_tokens
         except Exception as e:
-            logger.warning(f"Anthropic token count failed, fallback to cl100k: {e}")
+            logger.warning(
+                f"Anthropic token count failed, fallback to cl100k: "
+                f"provider=anthropic model={model_name or '<unknown>'} "
+                f"timeout_ms={effective_timeout_ms} exc_type={type(e).__name__} err={e}"
+            )
         return None
 
     async def _count_google_messages(

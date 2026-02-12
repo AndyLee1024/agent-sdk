@@ -21,6 +21,9 @@ from comate_agent_sdk.agent.events import (
     UserQuestionEvent,
 )
 
+from rich.console import RenderableType
+from rich.text import Text
+
 from terminal_agent.models import HistoryEntry
 from terminal_agent.tool_view import summarize_tool_args
 
@@ -82,6 +85,7 @@ class EventRenderer:
         self._thinking_content: str = ""
         self._assistant_buffer = ""
         self._loading_line: str = ""
+        self._current_todos: list[dict[str, Any]] = []
 
     def start_turn(self) -> None:
         self._flush_assistant_segment()
@@ -255,19 +259,36 @@ class EventRenderer:
                 )
             )
 
-    def _append_todo_update(self, todos: list[dict[str, Any]]) -> None:
-        """将 todo 列表渲染为消息并添加到历史记录中。"""
-        if not todos:
-            return
+    def _update_todos(self, todos: list[dict[str, Any]]) -> None:
+        """更新当前 todo 列表状态，并将渲染后的 Rich Text 添加到历史记录。"""
+        self._current_todos = list(todos) if todos else []
 
+        # 将 Rich Text 作为特殊 entry 添加到 history
+        todo_renderable = self.todo_renderable()
+        if todo_renderable is not None:
+            self._history.append(
+                HistoryEntry(entry_type="system", text=todo_renderable)
+            )
+
+    def todo_renderable(self) -> RenderableType | None:
+        """将当前 todo 列表渲染为 Rich 组件。
+
+        Returns:
+            Rich RenderableType 或 None（如果没有 todo）
+        """
+        if not self._current_todos:
+            return None
+
+        todos = self._current_todos
         total = len(todos)
         completed = sum(1 for t in todos if t.get("status") == "completed")
         in_progress = sum(1 for t in todos if t.get("status") == "in_progress")
-        pending = total - completed - in_progress
 
-        # 构建消息
-        lines: list[str] = []
-        lines.append(f"📋 任务列表 ({completed}/{total} 完成)")
+        # 构建 Rich Text 组件
+        result = Text()
+
+        # 标题
+        result.append(f"📋 任务列表 ({completed}/{total} 完成)\n")
 
         # 按状态分组：进行中 -> 待处理 -> 已完成
         open_items = [t for t in todos if t.get("status") != "completed"]
@@ -279,22 +300,48 @@ class EventRenderer:
                 continue
             status = item.get("status", "pending")
             if status == "in_progress":
-                lines.append(f"  ◉ {content} ⏳")
+                # 进行中：黄色 + 进度图标
+                result.append(f"  ◉ ")
+                result.append(f"{content}", style="yellow")
+                result.append(" ⏳\n")
             else:
-                lines.append(f"  ○ {content}")
+                # 待处理：默认颜色
+                result.append(f"  ○ {content}\n")
 
         if open_items and done_items:
-            lines.append("  ───────────────")
+            result.append(f"  {'─' * 15}\n")
 
         for item in done_items:
             content = str(item.get("content", "")).strip()
             if not content:
                 continue
-            lines.append(f"  ✓ ~~{content}~~")
+            # 已完成：绿色 + 删除线
+            result.append(f"  ✓ ")
+            result.append(f"{content}", style="green strike")
+            result.append("\n")
 
-        self._history.append(
-            HistoryEntry(entry_type="system", text="\n".join(lines))
-        )
+        # 移除末尾的换行
+        if result.plain.endswith("\n"):
+            result = result[:-1]
+
+        return result
+
+    def todo_lines(self) -> list[str]:
+        """返回当前 todo 列表的行列表（用于测试）。"""
+        renderable = self.todo_renderable()
+        if renderable is None:
+            return []
+        # 如果是 Rich Text 对象，返回其文本行
+        if hasattr(renderable, "plain"):
+            text = str(renderable.plain)
+        else:
+            text = str(renderable)
+        lines = text.splitlines()
+        # 如果超过 6 行，折叠显示
+        if len(lines) > 6:
+            lines = lines[:5]
+            lines.append(f"  ... 还有 {len(text.splitlines()) - 5} 个任务折叠")
+        return lines
 
     def handle_event(self, event: Any) -> tuple[bool, list[dict[str, Any]] | None]:
         if not isinstance(event, TextEvent):
@@ -310,6 +357,12 @@ class EventRenderer:
             case ToolCallEvent(tool=tool_name, args=arguments, tool_call_id=tool_call_id):
                 args_dict = arguments if isinstance(arguments, dict) else {"_raw": str(arguments)}
                 self._thinking_content = ""
+                # 处理 TodoWrite 工具：更新 todo 列表
+                if tool_name.lower() == "todowrite":
+                    from terminal_agent.tool_view import extract_todos
+                    todos = extract_todos(args_dict)
+                    if todos:
+                        self._update_todos([{"content": t.content, "status": t.status, "priority": t.priority} for t in todos])
                 self._append_tool_call(tool_name, args_dict, tool_call_id)
             case ToolResultEvent(tool=tool_name, result=_, tool_call_id=tool_call_id, is_error=is_error):
                 self._append_tool_result(
@@ -347,7 +400,7 @@ class EventRenderer:
             case SubagentStopEvent(tool_call_id=_, subagent_name=_, status=_, duration_ms=_, error=_):
                 pass
             case TodoUpdatedEvent(todos=todos):
-                self._append_todo_update(todos)
+                self._update_todos(todos)
             case UserQuestionEvent(questions=questions, tool_call_id=_):
                 self._append_questions(questions)
                 self._rebuild_loading_line()

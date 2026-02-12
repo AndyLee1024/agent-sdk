@@ -31,6 +31,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.widgets import TextArea
 from rich.console import Console
+from rich.text import Text
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig, ChatSession
@@ -38,6 +39,7 @@ from comate_agent_sdk.context import EnvOptions
 from comate_agent_sdk.context.items import ItemType
 from comate_agent_sdk.tools import tool
 
+from terminal_agent.animations import StreamAnimationController, SubmissionAnimator
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.logo import print_logo
 from terminal_agent.markdown_render import render_markdown_to_plain
@@ -169,6 +171,13 @@ def _build_agent() -> Agent:
             role="software_engineering",
             env_options=EnvOptions(system_env=True, git_env=True),
             mcp_servers={
+                 "context7": {
+                    "type": "http",
+                    "url": "https://mcp.context7.com/mcp",
+                    "headers": {
+                        "CONTEXT7_API_KEY": "ctx7sk-74909a03-11b1-47f4-bb65-011804753c9d"
+                    }
+                },
                 "exa_search": {
                     "type": "http",
                     "url": "https://mcp.exa.ai/mcp?exaApiKey=084b86e8-c227-4ef0-9f6d-e248594839f4&tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa",
@@ -282,6 +291,10 @@ class TerminalAgentTUI:
             "exit": self._slash_exit,
         }
         self._loading_frame = 0
+
+        # 初始化提交动画控制器
+        self._animator = SubmissionAnimator()
+        self._animation_controller = StreamAnimationController(self._animator)
 
         self._closing = False
         self._printed_history_index = 0
@@ -747,6 +760,9 @@ class TerminalAgentTUI:
         self._renderer.seed_user_message(text)
         self._refresh_layers()
 
+        # 启动提交动画
+        await self._animation_controller.start()
+
         waiting_for_input = False
         questions: list[dict[str, Any]] | None = None
 
@@ -784,6 +800,8 @@ class TerminalAgentTUI:
         questions: list[dict[str, Any]] | None = None
 
         async for event in self._session.query_stream(text):
+            # 将事件传递给动画控制器以控制动画生命周期
+            await self._animation_controller.on_event(event)
             is_waiting, new_questions = self._renderer.handle_event(event)
             if is_waiting:
                 waiting_for_input = True
@@ -792,6 +810,7 @@ class TerminalAgentTUI:
             self._refresh_layers()
 
         self._renderer.finalize_turn()
+        await self._animation_controller.shutdown()
         return waiting_for_input, questions
 
     def _schedule_background(self, coroutine: Any) -> None:
@@ -966,19 +985,45 @@ class TerminalAgentTUI:
         if not entries:
             return
 
-        new_text = self._format_history_entries(entries)
-        if not new_text:
-            return
-        await run_in_terminal(lambda: console.print(new_text))
+        # 分离普通文本 entries 和 Rich renderable
+        for entry in entries:
+            if hasattr(entry.text, "__rich_console__"):
+                # Rich Text 对象直接打印（带前缀）
+                prefix = self._entry_prefix(entry)
+                prefixed = Text(f"{prefix} ", style="bold")
+                prefixed.append_text(entry.text)
+                await run_in_terminal(lambda t=prefixed: console.print(t))
+            else:
+                # 普通文本按原来的方式处理
+                prefix = self._entry_prefix(entry)
+                content = self._entry_content(entry)
+                content_lines = content.splitlines() or [""]
+                lines = [f"{prefix} {content_lines[0]}"]
+                for line in content_lines[1:]:
+                    lines.append(f"  {line}")
+                await run_in_terminal(lambda l="\n".join(lines): console.print(l))
 
     def _print_history_entries_sync(self, entries: list[HistoryEntry]) -> None:
         if not entries:
             return
 
-        new_text = self._format_history_entries(entries)
-        if not new_text:
-            return
-        console.print(new_text)
+        # 分离普通文本 entries 和 Rich renderable
+        for entry in entries:
+            if hasattr(entry.text, "__rich_console__"):
+                # Rich Text 对象直接打印（带前缀）
+                prefix = self._entry_prefix(entry)
+                prefixed = Text(f"{prefix} ", style="bold")
+                prefixed.append_text(entry.text)
+                console.print(prefixed)
+            else:
+                # 普通文本按原来的方式处理
+                prefix = self._entry_prefix(entry)
+                content = self._entry_content(entry)
+                content_lines = content.splitlines() or [""]
+                lines = [f"{prefix} {content_lines[0]}"]
+                for line in content_lines[1:]:
+                    lines.append(f"  {line}")
+                console.print("\n".join(lines))
 
     async def _ui_tick(self) -> None:
         try:
@@ -987,13 +1032,17 @@ class TerminalAgentTUI:
                 self._loading_frame += 2
                 await self._drain_history_async()
 
+                # 检查动画器是否需要刷新
+                if self._animator.consume_dirty():
+                    self._render_dirty = True
+
                 loading_line = self._renderer.loading_line().strip()
                 loading_changed = loading_line != self._last_loading_line
                 if loading_changed:
                     self._last_loading_line = loading_line
                     self._render_dirty = True
 
-                if self._busy and loading_line:
+                if self._busy and (loading_line or self._animator.is_active):
                     self._render_dirty = True
 
                 if self._render_dirty:
@@ -1023,14 +1072,53 @@ class TerminalAgentTUI:
         return [("class:status", _fit_single_line(merged, width - 1))]
 
     def _loading_text(self) -> list[tuple[str, str]]:
+        # 优先使用动画器的渲染（流光走字 + 随机 geek 术语）
+        if self._animator.is_active:
+            renderable = self._animator.renderable()
+            return self._rich_text_to_pt_fragments(renderable)
+
+        # 回退到原有的 loading_line 逻辑
         text = self._renderer.loading_line().strip()
-        if not text and self._busy:
-            text = "⏳ 正在处理..."
         if not text:
             return [("", " ")]
         width = self._terminal_width()
         clipped = _fit_single_line(text, width - 1)
         return _sweep_gradient_fragments(clipped, frame=self._loading_frame)
+
+    def _rich_text_to_pt_fragments(self, renderable) -> list[tuple[str, str]]:
+        """将 Rich Text 转换为 prompt_toolkit 的 fragments 格式."""
+        from rich.segment import Segment
+
+        fragments: list[tuple[str, str]] = []
+        for segment in renderable.__rich_console__(console, console.options):
+            if isinstance(segment, Segment):
+                text = segment.text
+                style = segment.style
+                if style:
+                    # 将 Rich style 转换为 prompt_toolkit style
+                    pt_style = self._rich_style_to_pt(style)
+                    fragments.append((pt_style, text))
+                else:
+                    fragments.append(("", text))
+        return fragments if fragments else [("", " ")]
+
+    def _rich_style_to_pt(self, rich_style) -> str:
+        """将 Rich style 转换为 prompt_toolkit style 字符串."""
+        parts: list[str] = []
+        if rich_style.bold:
+            parts.append("bold")
+        if rich_style.italic:
+            parts.append("italic")
+        if rich_style.color:
+            color = rich_style.color
+            if color.type.name == "TRUECOLOR":
+                # triplet.hex 已经包含 # 前缀
+                parts.append(color.triplet.hex)
+            elif color.type.name == "STANDARD":
+                parts.append(str(color.name).lower())
+            elif color.type.name == "EIGHT_BIT":
+                parts.append(f"ansibright{color.number}" if color.number >= 8 else f"ansi{color.number}")
+        return " ".join(parts) if parts else ""
 
     def _invalidate(self) -> None:
         if self._app is None:

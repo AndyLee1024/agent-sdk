@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from rich.text import Text
 
 ToolStatus = Literal["running", "success", "error"]
 HistoryEntryType = Literal["user", "assistant", "tool_call", "tool_result", "system"]
@@ -30,7 +33,7 @@ class ToolRunState:
 @dataclass
 class HistoryEntry:
     entry_type: HistoryEntryType
-    text: str
+    text: str | Text  # 支持普通字符串或 Rich Text 对象
     is_error: bool = False
 
 
