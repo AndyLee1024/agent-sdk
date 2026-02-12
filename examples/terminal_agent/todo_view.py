@@ -151,8 +151,6 @@ class TodoStateStore:
     def visible_lines(self, *, max_visible_items: int = _MAX_VISIBLE_ITEMS) -> list[str]:
         if not self._current:
             return []
-        if not self.has_open_todos():
-            return []
 
         counts = self._summary_counts()
         lines: list[str] = [
@@ -166,11 +164,18 @@ class TodoStateStore:
         open_items = [todo for todo in self._current if todo.status != "completed"]
         done_items = [todo for todo in self._current if todo.status == "completed"]
         display_items = (open_items + done_items)[: max(max_visible_items, 0)]
+        display_open_items = [todo for todo in display_items if todo.status != "completed"]
+        display_done_items = [todo for todo in display_items if todo.status == "completed"]
 
-        for todo in display_items:
-            marker = "✔" if todo.status == "completed" else ("◉" if todo.status == "in_progress" else "○")
-            content = todo.content
-            lines.append(f"  {marker} {content} ({_priority_label(todo.priority)})")
+        for todo in display_open_items:
+            marker = "◉" if todo.status == "in_progress" else "○"
+            lines.append(f"  {marker} {todo.content} ({_priority_label(todo.priority)})")
+
+        if display_open_items and display_done_items:
+            lines.append("  ──────────────────────────────────────────────")
+
+        for todo in display_done_items:
+            lines.append(f"  ✔ ~~{todo.content}~~ ({_priority_label(todo.priority)})")
 
         hidden = len(self._current) - len(display_items)
         if hidden > 0:

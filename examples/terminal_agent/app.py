@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +21,7 @@ from prompt_toolkit.completion import (
     merge_completers,
 )
 from prompt_toolkit.document import Document
-from prompt_toolkit.filters import Condition, has_completions
+from prompt_toolkit.filters import Condition, has_completions, has_focus
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
@@ -42,6 +43,7 @@ from terminal_agent.logo import print_logo
 from terminal_agent.markdown_render import render_markdown_to_plain
 from terminal_agent.mention_completer import LocalFileMentionCompleter
 from terminal_agent.models import HistoryEntry
+from terminal_agent.question_view import AskUserQuestionUI, QuestionAction
 from terminal_agent.rpc_stdio import StdioRPCBridge
 from terminal_agent.status_bar import StatusBar
 
@@ -244,6 +246,11 @@ def _sweep_gradient_fragments(content: str, frame: int) -> list[tuple[str, str]]
     return fragments
 
 
+class UIMode(Enum):
+    NORMAL = "normal"
+    QUESTION = "question"
+
+
 class TerminalAgentTUI:
     def __init__(self, session: ChatSession, status_bar: StatusBar, renderer: EventRenderer) -> None:
         self._session = session
@@ -253,6 +260,7 @@ class TerminalAgentTUI:
         self._busy = False
         self._waiting_for_input = False
         self._pending_questions: list[dict[str, Any]] | None = None
+        self._ui_mode = UIMode.NORMAL
         self._input_read_only = Condition(lambda: self._busy)
 
         self._slash_completer = _SlashCommandCompleter(SLASH_COMMAND_SPECS)
@@ -316,6 +324,7 @@ class TerminalAgentTUI:
             if buffer.complete_while_typing():
                 buffer.start_completion(select_first=False)
 
+        self._question_ui = AskUserQuestionUI()
         self._todo_control = FormattedTextControl(text=self._todo_text)
         self._loading_control = FormattedTextControl(text=self._loading_text)
         self._status_control = FormattedTextControl(text=self._status_text)
@@ -343,6 +352,14 @@ class TerminalAgentTUI:
             content=self._todo_window,
             filter=Condition(lambda: bool(self._todo_cache)),
         )
+        self._input_container = ConditionalContainer(
+            content=self._input_area,
+            filter=Condition(lambda: self._ui_mode == UIMode.NORMAL),
+        )
+        self._question_container = ConditionalContainer(
+            content=self._question_ui.container,
+            filter=Condition(lambda: self._ui_mode == UIMode.QUESTION),
+        )
 
         self._main_container = HSplit(
             [
@@ -350,7 +367,8 @@ class TerminalAgentTUI:
                 self._todo_container,
                 self._loading_window,
                 Window(height=1, char=" ", style="class:input.pad"),
-                self._input_area,
+                self._input_container,
+                self._question_container,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._status_window,
             ]
@@ -374,10 +392,35 @@ class TerminalAgentTUI:
                 "": "bg:#1f232a #e5e9f0",
                 "history": "bg:#1a1e24 #d8dee9",
                 "todo": "bg:#232a35 #9ecbff",
+                "todo.summary": "fg:#9ecbff bold",
+                "todo.pending": "fg:#fde68a",
+                "todo.pending.low": "fg:#9ca3af",
+                "todo.in_progress": "fg:#67e8f9",
+                "todo.completed": "fg:#86efac strike",
+                "todo.meta": "fg:#93a4bb",
+                "todo.separator": "fg:#4b5563",
                 "input.pad": "bg:#3a3d42",
                 "input.line": "bg:#3a3d42 #f2f4f8",
                 "input-line": "bg:#3a3d42 #f2f4f8",
                 "status": "bg:#2d3138 #c3ccd8",
+                "question.tabs": "bg:#30353f #c7d2fe",
+                "question.tabs.nav": "bg:#30353f #93c5fd",
+                "question.tab": "bg:#374151 #cbd5e1",
+                "question.tab.submit": "bg:#14532d #86efac bold",
+                "question.tab.active": "bg:#1d4ed8 #eff6ff bold",
+                "question.divider": "fg:#4b5563",
+                "question.body": "bg:#252a33 #d8dee9",
+                "question.title": "fg:#f8fafc bold",
+                "question.hint": "fg:#94a3b8",
+                "question.option": "fg:#dbeafe",
+                "question.option.cursor": "bg:#1e3a8a #f8fafc bold",
+                "question.option.selected": "fg:#93c5fd bold",
+                "question.option.description": "fg:#9ca3af",
+                "question.custom_input": "bg:#0f172a #f8fafc",
+                "question.custom_input.border": "fg:#334155",
+                "question.preview.title": "fg:#e2e8f0 bold",
+                "question.preview.question": "fg:#bfdbfe",
+                "question.preview.answer": "fg:#f1f5f9",
                 "completion-menu": "bg:#2d3441 #d8dee9",
                 "completion-menu.completion.current": "bg:#5e81ac #eceff4",
                 "completion-menu.meta.completion": "bg:#2d3441 #81a1c1",
@@ -400,15 +443,76 @@ class TerminalAgentTUI:
 
     def _build_key_bindings(self) -> KeyBindings:
         bindings = KeyBindings()
+        normal_mode = Condition(lambda: self._ui_mode == UIMode.NORMAL)
+        question_mode = Condition(lambda: self._ui_mode == UIMode.QUESTION)
 
-        @bindings.add("enter")
+        @bindings.add("enter", filter=question_mode)
+        def _question_enter(event) -> None:
+            del event
+            action = self._question_ui.handle_enter()
+            self._handle_question_action(action)
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add("up", filter=question_mode)
+        def _question_up(event) -> None:
+            del event
+            self._question_ui.move_option(-1)
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add("down", filter=question_mode)
+        def _question_down(event) -> None:
+            del event
+            self._question_ui.move_option(1)
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add("left", filter=question_mode)
+        def _question_prev(event) -> None:
+            del event
+            self._question_ui.prev_question()
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add("right", filter=question_mode)
+        def _question_next(event) -> None:
+            del event
+            self._question_ui.next_question()
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add(
+            "space",
+            filter=question_mode & ~has_focus(self._question_ui.custom_input_window),
+        )
+        def _question_toggle(event) -> None:
+            del event
+            self._question_ui.toggle_current_selection()
+            self._invalidate()
+
+        @bindings.add("tab", filter=question_mode)
+        def _question_submit_tab(event) -> None:
+            del event
+            self._question_ui.focus_submit()
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add("escape", filter=question_mode)
+        def _question_cancel(event) -> None:
+            del event
+            self._handle_question_action(self._question_ui.handle_escape())
+            self._sync_focus_for_mode()
+            self._invalidate()
+
+        @bindings.add("enter", filter=normal_mode)
         def _submit(event) -> None:
             del event
             if self._accept_active_completion():
                 return
             self._submit_from_input()
 
-        @bindings.add("tab")
+        @bindings.add("tab", filter=normal_mode)
         def _accept_candidate(event) -> None:
             buffer = event.current_buffer
             complete_state = buffer.complete_state
@@ -417,11 +521,11 @@ class TerminalAgentTUI:
                 return
             buffer.start_completion(select_first=False)
 
-        @bindings.add("s-tab", filter=has_completions)
+        @bindings.add("s-tab", filter=normal_mode & has_completions)
         def _active_prev(event) -> None:
             event.current_buffer.complete_previous()
 
-        @bindings.add("up")
+        @bindings.add("up", filter=normal_mode)
         def _active_prev_up(event) -> None:
             buffer = event.current_buffer
             if self._move_completion_selection(buffer, backward=True):
@@ -429,7 +533,7 @@ class TerminalAgentTUI:
             if self._should_handle_history():
                 buffer.auto_up(count=1)
 
-        @bindings.add("down")
+        @bindings.add("down", filter=normal_mode)
         def _active_next_down(event) -> None:
             buffer = event.current_buffer
             if self._move_completion_selection(buffer, backward=False):
@@ -437,7 +541,7 @@ class TerminalAgentTUI:
             if self._should_handle_history():
                 buffer.auto_down(count=1)
 
-        @bindings.add("escape")
+        @bindings.add("escape", filter=normal_mode)
         def _clear_active_or_refocus(event) -> None:
             buffer = event.current_buffer
             if buffer.complete_state is not None:
@@ -465,6 +569,7 @@ class TerminalAgentTUI:
                     self._set_busy(False)
                     self._waiting_for_input = False
                     self._pending_questions = None
+                    self._exit_question_mode()
                     self._refresh_layers()
                     return
 
@@ -542,6 +647,47 @@ class TerminalAgentTUI:
 
         return False
 
+    def _enter_question_mode(self, questions: list[dict[str, Any]]) -> None:
+        if not self._question_ui.set_questions(questions):
+            return
+        self._ui_mode = UIMode.QUESTION
+        self._sync_focus_for_mode()
+        self._refresh_layers()
+
+    def _exit_question_mode(self) -> None:
+        self._ui_mode = UIMode.NORMAL
+        self._question_ui.clear()
+        self._sync_focus_for_mode()
+
+    def _sync_focus_for_mode(self) -> None:
+        if self._app is None:
+            return
+        if self._ui_mode == UIMode.QUESTION:
+            self._app.layout.focus(self._question_ui.focus_target())
+            return
+        self._app.layout.focus(self._input_area.window)
+
+    def _handle_question_action(self, action: QuestionAction | None) -> None:
+        if action is None:
+            return
+        if action.kind == "cancel":
+            self._submit_question_reply(action.message, cancelled=True)
+            return
+        if action.kind == "submit":
+            self._submit_question_reply(action.message, cancelled=False)
+
+    def _submit_question_reply(self, message: str, *, cancelled: bool) -> None:
+        normalized = message.strip()
+        if not normalized:
+            return
+        self._exit_question_mode()
+        self._waiting_for_input = False
+        self._pending_questions = None
+        if cancelled:
+            self._renderer.append_system_message("用户取消问答，已发送拒绝回答消息。")
+        self._refresh_layers()
+        self._schedule_background(self._submit_user_message(normalized))
+
     def add_resume_history(self, mode: str) -> None:
         if mode != "resume":
             return
@@ -586,6 +732,8 @@ class TerminalAgentTUI:
     def _submit_from_input(self) -> None:
         if self._busy:
             return
+        if self._ui_mode != UIMode.NORMAL:
+            return
 
         raw_text = self._input_area.text
         text = raw_text.strip()
@@ -605,6 +753,9 @@ class TerminalAgentTUI:
         if self._busy:
             self._renderer.append_system_message("当前已有任务在运行，请稍候。", is_error=True)
             return
+
+        if self._ui_mode == UIMode.QUESTION:
+            self._exit_question_mode()
 
         self._session.run_controller.clear()
         self._interrupt_requested_at = None
@@ -638,10 +789,14 @@ class TerminalAgentTUI:
         if waiting_for_input:
             self._waiting_for_input = True
             self._pending_questions = questions
-            self._renderer.append_system_message("请输入对上述问题的回答后回车提交。")
+            if questions:
+                self._enter_question_mode(questions)
+            else:
+                self._renderer.append_system_message("请输入对上述问题的回答后回车提交。")
         else:
             self._waiting_for_input = False
             self._pending_questions = None
+            self._exit_question_mode()
 
         self._refresh_layers()
 
@@ -768,6 +923,7 @@ class TerminalAgentTUI:
 
     def _refresh_layers(self) -> None:
         self._todo_cache = self._renderer.todo_lines()
+        self._sync_focus_for_mode()
         self._render_dirty = True
 
     async def _drain_history_async(self) -> None:
@@ -893,7 +1049,27 @@ class TerminalAgentTUI:
         if not self._todo_cache:
             return [("class:todo", "")]
         limited = self._todo_cache[:6]
-        return [("class:todo", "\n".join(limited))]
+        fragments: list[tuple[str, str]] = []
+        for idx, line in enumerate(limited):
+            style = "class:todo"
+            if idx == 0 and line.startswith("TODO "):
+                style = "class:todo.summary"
+            elif line.startswith("  ◉"):
+                style = "class:todo.in_progress"
+            elif line.startswith("  ○") and "(low)" in line:
+                style = "class:todo.pending.low"
+            elif line.startswith("  ○"):
+                style = "class:todo.pending"
+            elif line.startswith("  ✔"):
+                style = "class:todo.completed"
+            elif line.startswith("  ─"):
+                style = "class:todo.separator"
+            elif line.startswith("最近变更:") or line.startswith("  （还有 ") or "折叠" in line:
+                style = "class:todo.meta"
+            fragments.append((style, line))
+            if idx < len(limited) - 1:
+                fragments.append(("", "\n"))
+        return fragments
 
     def _loading_text(self) -> list[tuple[str, str]]:
         text = self._renderer.loading_line().strip()
