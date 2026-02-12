@@ -3,10 +3,13 @@ from __future__ import annotations
 import os
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import logging
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.document import Document
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +20,7 @@ class MentionContext:
     fragment: str
 
 
-class LocalFileMentionCompleter:
+class LocalFileMentionCompleter(Completer):
     """Offer fuzzy `@` path suggestions backed by workspace files."""
 
     _TRIGGER_GUARDS = frozenset((".", "-", "_", "`", "'", '"', ":", "@", "#", "~"))
@@ -270,3 +273,21 @@ class LocalFileMentionCompleter:
             return (self._root / candidate).is_file()
         except OSError:
             return False
+
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterable[Completion]:
+        del complete_event
+        result = self.suggest(document.text_before_cursor, max_items=12)
+        if result is None:
+            return
+
+        context, candidates = result
+        for candidate in candidates:
+            append_space = not candidate.endswith("/") and not document.text_after_cursor.startswith(" ")
+            insert_text = f"{candidate} " if append_space else candidate
+            yield Completion(
+                text=insert_text,
+                start_position=-len(context.fragment),
+                display=candidate,
+            )

@@ -2,24 +2,34 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
+import time
+from collections.abc import Callable
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from prompt_toolkit.application import Application, run_in_terminal
-from prompt_toolkit.completion import Completer, Completion
+from prompt_toolkit.completion import (
+    Completer,
+    Completion,
+    FuzzyCompleter,
+    WordCompleter,
+    merge_completers,
+)
 from prompt_toolkit.document import Document
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import Condition, has_completions
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.widgets import TextArea
 from rich.console import Console
-from rich.text import Text
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig, ChatSession
@@ -30,7 +40,7 @@ from comate_agent_sdk.tools import tool
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.logo import print_logo
 from terminal_agent.markdown_render import render_markdown_to_plain
-from terminal_agent.mention_completer import LocalFileMentionCompleter, MentionContext
+from terminal_agent.mention_completer import LocalFileMentionCompleter
 from terminal_agent.models import HistoryEntry
 from terminal_agent.rpc_stdio import StdioRPCBridge
 from terminal_agent.status_bar import StatusBar
@@ -39,33 +49,110 @@ console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("comate_agent_sdk.system_tools.tools").setLevel(logging.ERROR)
 
-SLASH_COMMANDS: tuple[str, ...] = (
-    "/help",
-    "/session",
-    "/usage",
-    "/context",
-    "/exit",
+@dataclass(frozen=True, slots=True)
+class SlashCommandSpec:
+    name: str
+    description: str
+    aliases: tuple[str, ...] = ()
+
+    def slash_name(self) -> str:
+        if self.aliases:
+            return f"/{self.name} ({', '.join(self.aliases)})"
+        return f"/{self.name}"
+
+
+@dataclass(frozen=True, slots=True)
+class _SlashCommandCall:
+    name: str
+    args: str
+    raw_input: str
+
+
+def _parse_slash_command_call(user_input: str) -> _SlashCommandCall | None:
+    text = user_input.strip()
+    if not text or not text.startswith("/"):
+        return None
+
+    match = re.match(r"^\/([a-zA-Z0-9_-]+(?::[a-zA-Z0-9_-]+)*)", text)
+    if match is None:
+        return None
+    if len(text) > match.end() and not text[match.end()].isspace():
+        return None
+
+    return _SlashCommandCall(
+        name=match.group(1),
+        args=text[match.end() :].lstrip(),
+        raw_input=text,
+    )
+
+
+SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
+    SlashCommandSpec(name="help", description="Show available slash commands", aliases=("h",)),
+    SlashCommandSpec(name="session", description="Show current session ID"),
+    SlashCommandSpec(name="usage", description="Show token usage summary"),
+    SlashCommandSpec(name="context", description="Show context usage summary"),
+    SlashCommandSpec(name="exit", description="Exit terminal agent", aliases=("quit",)),
 )
+SLASH_COMMANDS: tuple[str, ...] = tuple(f"/{cmd.name}" for cmd in SLASH_COMMAND_SPECS)
 
 
 class _SlashCommandCompleter(Completer):
-    """保留用于 slash 规则单测，实际 UI 不再使用 popup completion。"""
-
-    def __init__(self, commands: tuple[str, ...]) -> None:
+    def __init__(self, commands: tuple[SlashCommandSpec, ...]) -> None:
         self._commands = commands
+        self._command_lookup: dict[str, list[SlashCommandSpec]] = {}
+        words: list[str] = []
+
+        for cmd in sorted(self._commands, key=lambda item: item.name):
+            if cmd.name not in self._command_lookup:
+                self._command_lookup[cmd.name] = []
+                words.append(cmd.name)
+            self._command_lookup[cmd.name].append(cmd)
+            for alias in cmd.aliases:
+                if alias in self._command_lookup:
+                    self._command_lookup[alias].append(cmd)
+                else:
+                    self._command_lookup[alias] = [cmd]
+                    words.append(alias)
+
+        self._word_pattern = re.compile(r"[^\s]+")
+        self._fuzzy_pattern = r"^[^\s]*"
+        self._word_completer = WordCompleter(words, WORD=False, pattern=self._word_pattern)
+        self._fuzzy = FuzzyCompleter(self._word_completer, WORD=False, pattern=self._fuzzy_pattern)
 
     def get_completions(self, document: Document, complete_event):
-        del complete_event
-        text = document.text
-        if not text.startswith("/"):
+        text = document.text_before_cursor
+        if document.text_after_cursor.strip():
             return
 
-        for command in self._commands:
-            if command.startswith(text):
+        last_space = text.rfind(" ")
+        token = text[last_space + 1 :]
+        prefix = text[: last_space + 1] if last_space != -1 else ""
+        if prefix:
+            return
+        if not token.startswith("/"):
+            return
+
+        typed = token[1:]
+        if typed and typed in self._command_lookup:
+            return
+
+        typed_doc = Document(text=typed, cursor_position=len(typed))
+        candidates = list(self._fuzzy.get_completions(typed_doc, complete_event))
+        seen: set[str] = set()
+
+        for candidate in candidates:
+            commands = self._command_lookup.get(candidate.text)
+            if not commands:
+                continue
+            for cmd in commands:
+                if cmd.name in seen:
+                    continue
+                seen.add(cmd.name)
                 yield Completion(
-                    text=command,
-                    start_position=-len(text),
-                    display=command,
+                    text=f"/{cmd.name}",
+                    start_position=-len(token),
+                    display=cmd.slash_name(),
+                    display_meta=cmd.description,
                 )
 
 
@@ -168,14 +255,24 @@ class TerminalAgentTUI:
         self._pending_questions: list[dict[str, Any]] | None = None
         self._input_read_only = Condition(lambda: self._busy)
 
-        self._slash_active = False
-        self._slash_candidates: list[str] = []
-        self._slash_index = 0
-        self._mention_active = False
-        self._mention_candidates: list[str] = []
-        self._mention_index = 0
-        self._mention_context: MentionContext | None = None
+        self._slash_completer = _SlashCommandCompleter(SLASH_COMMAND_SPECS)
         self._mention_completer = LocalFileMentionCompleter(Path.cwd())
+        self._input_completer = merge_completers(
+            [self._slash_completer, self._mention_completer],
+            deduplicate=True,
+        )
+        self._slash_lookup: dict[str, SlashCommandSpec] = {}
+        for spec in SLASH_COMMAND_SPECS:
+            self._slash_lookup[spec.name] = spec
+            for alias in spec.aliases:
+                self._slash_lookup[alias] = spec
+        self._slash_handlers: dict[str, Callable[[str], Any]] = {
+            "help": self._slash_help,
+            "session": self._slash_session,
+            "usage": self._slash_usage,
+            "context": self._slash_context,
+            "exit": self._slash_exit,
+        }
         self._loading_frame = 0
 
         self._closing = False
@@ -187,6 +284,8 @@ class TerminalAgentTUI:
         self._app: Application[None] | None = None
         self._stream_task: asyncio.Task[Any] | None = None
         self._ui_tick_task: asyncio.Task[None] | None = None
+        self._interrupt_requested_at: float | None = None
+        self._interrupt_force_window_seconds = 1.5
 
         # 历史显示区域（可滚动）
         self._history_area = TextArea(
@@ -204,11 +303,18 @@ class TerminalAgentTUI:
             multiline=False,
             prompt="> ",
             wrap_lines=False,
+            completer=self._input_completer,
+            complete_while_typing=True,
             history=InMemoryHistory(),
             read_only=self._input_read_only,
             style="class:input.line",
         )
-        self._input_area.buffer.on_text_changed += self._on_input_changed
+        @self._input_area.buffer.on_text_changed.add_handler
+        def _trigger_completion(buffer) -> None:
+            if self._busy:
+                return
+            if buffer.complete_while_typing():
+                buffer.start_completion(select_first=False)
 
         self._todo_control = FormattedTextControl(text=self._todo_text)
         self._loading_control = FormattedTextControl(text=self._loading_text)
@@ -238,7 +344,7 @@ class TerminalAgentTUI:
             filter=Condition(lambda: bool(self._todo_cache)),
         )
 
-        self._root = HSplit(
+        self._main_container = HSplit(
             [
                 self._history_area,
                 self._todo_container,
@@ -248,6 +354,17 @@ class TerminalAgentTUI:
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._status_window,
             ]
+        )
+
+        self._root = FloatContainer(
+            content=self._main_container,
+            floats=[
+                Float(
+                    xcursor=True,
+                    ycursor=True,
+                    content=CompletionsMenu(max_height=12, scroll_offset=1),
+                ),
+            ],
         )
 
         self._layout = Layout(self._root, focused_element=self._input_area.window)
@@ -261,6 +378,10 @@ class TerminalAgentTUI:
                 "input.line": "bg:#3a3d42 #f2f4f8",
                 "input-line": "bg:#3a3d42 #f2f4f8",
                 "status": "bg:#2d3138 #c3ccd8",
+                "completion-menu": "bg:#2d3441 #d8dee9",
+                "completion-menu.completion.current": "bg:#5e81ac #eceff4",
+                "completion-menu.meta.completion": "bg:#2d3441 #81a1c1",
+                "completion-menu.meta.completion.current": "bg:#5e81ac #e5e9f0",
             }
         )
 
@@ -283,52 +404,45 @@ class TerminalAgentTUI:
         @bindings.add("enter")
         def _submit(event) -> None:
             del event
-            if self._accept_active_candidate():
+            if self._accept_active_completion():
                 return
             self._submit_from_input()
 
-        @bindings.add(
-            "tab",
-            filter=Condition(lambda: self._mention_active or self._slash_active),
-        )
+        @bindings.add("tab")
         def _accept_candidate(event) -> None:
-            del event
-            self._accept_active_candidate()
+            buffer = event.current_buffer
+            complete_state = buffer.complete_state
+            if complete_state is not None and complete_state.completions:
+                self._accept_active_completion()
+                return
+            buffer.start_completion(select_first=False)
 
-        @bindings.add(
-            "s-tab",
-            filter=Condition(lambda: self._mention_active or self._slash_active),
-        )
+        @bindings.add("s-tab", filter=has_completions)
         def _active_prev(event) -> None:
-            del event
-            self._move_active_selection(-1)
+            event.current_buffer.complete_previous()
 
-        @bindings.add(
-            "up",
-            filter=Condition(lambda: self._mention_active or self._slash_active),
-        )
+        @bindings.add("up")
         def _active_prev_up(event) -> None:
-            del event
-            self._move_active_selection(-1)
+            buffer = event.current_buffer
+            if self._move_completion_selection(buffer, backward=True):
+                return
+            if self._should_handle_history():
+                buffer.auto_up(count=1)
 
-        @bindings.add(
-            "down",
-            filter=Condition(lambda: self._mention_active or self._slash_active),
-        )
+        @bindings.add("down")
         def _active_next_down(event) -> None:
-            del event
-            self._move_active_selection(1)
+            buffer = event.current_buffer
+            if self._move_completion_selection(buffer, backward=False):
+                return
+            if self._should_handle_history():
+                buffer.auto_down(count=1)
 
         @bindings.add("escape")
         def _clear_active_or_refocus(event) -> None:
-            del event
-            if self._mention_active:
-                self._deactivate_mention()
+            buffer = event.current_buffer
+            if buffer.complete_state is not None:
+                buffer.cancel_completion()
                 return
-            if self._slash_active:
-                self._deactivate_slash()
-                return
-            # 如果不在 slash 模式，则将焦点切换回输入框
             if self._app is not None:
                 self._app.layout.focus(self._input_area.window)
 
@@ -336,12 +450,27 @@ class TerminalAgentTUI:
         def _interrupt_or_exit(event) -> None:
             del event
             if self._busy and self._stream_task is not None:
-                self._stream_task.cancel()
-                self._renderer.interrupt_turn()
-                self._renderer.append_system_message("已中断当前任务，可继续输入。")
-                self._set_busy(False)
-                self._waiting_for_input = False
-                self._pending_questions = None
+                now = time.monotonic()
+                interrupted_once = (
+                    self._interrupt_requested_at is not None
+                    and (now - self._interrupt_requested_at) <= self._interrupt_force_window_seconds
+                )
+
+                if interrupted_once:
+                    self._stream_task.cancel()
+                    self._session.run_controller.clear()
+                    self._interrupt_requested_at = None
+                    self._renderer.interrupt_turn()
+                    self._renderer.append_system_message("已强制中断当前任务，可继续输入。")
+                    self._set_busy(False)
+                    self._waiting_for_input = False
+                    self._pending_questions = None
+                    self._refresh_layers()
+                    return
+
+                self._session.run_controller.interrupt(reason="user")
+                self._interrupt_requested_at = now
+                self._renderer.append_system_message("已发送中断信号。再次按 Ctrl+C 将强制中断。")
                 self._refresh_layers()
                 return
             self._exit_app()
@@ -352,6 +481,66 @@ class TerminalAgentTUI:
             self._exit_app()
 
         return bindings
+
+    def _should_handle_history(self) -> bool:
+        """检查是否应该处理历史浏览(而不是补全导航)
+
+        Returns:
+            True 表示可以浏览历史,False 表示应该优先处理补全
+        """
+        buffer = self._input_area.buffer
+
+        # 如果有活动的补全菜单,不应该浏览历史
+        if buffer.complete_state is not None and buffer.complete_state.completions:
+            return False
+
+        # 如果在补全上下文中(输入了 / 或 @),不应该浏览历史
+        document = buffer.document
+        if self._completion_context_active(document.text_before_cursor, document.text_after_cursor):
+            return False
+
+        return True
+
+    def _completion_context_active(self, text_before_cursor: str, text_after_cursor: str) -> bool:
+        if text_after_cursor.strip():
+            return False
+        if text_before_cursor.startswith("/") and " " not in text_before_cursor:
+            return True
+        return self._mention_completer.extract_context(text_before_cursor) is not None
+
+    def _move_completion_selection(self, buffer: Any, *, backward: bool) -> bool:
+        """尝试在补全菜单中移动选择项
+
+        行为:
+        - 如果补全菜单已显示,在菜单中导航
+        - 如果在补全上下文中(输入 / 或 @)但菜单未显示,触发补全并选中第一项
+        - 否则返回 False,允许调用者处理其他行为(如历史浏览)
+
+        Args:
+            buffer: 当前的 Buffer 对象
+            backward: True 表示向上导航,False 表示向下导航
+
+        Returns:
+            True 表示已处理补全导航,False 表示未处理
+        """
+        complete_state = buffer.complete_state
+
+        # 情况1: 已有补全菜单且有补全项
+        if complete_state is not None and complete_state.completions:
+            if backward:
+                buffer.complete_previous()
+            else:
+                buffer.complete_next()
+            return True
+
+        # 情况2: 在补全上下文中但菜单未显示
+        document = buffer.document
+        if self._completion_context_active(document.text_before_cursor, document.text_after_cursor):
+            # 启动补全并选择第一项(关键改动:select_first=True)
+            buffer.start_completion(select_first=True)
+            return True
+
+        return False
 
     def add_resume_history(self, mode: str) -> None:
         if mode != "resume":
@@ -382,118 +571,17 @@ class TerminalAgentTUI:
 
         self._drain_history_sync()
 
-    def _on_input_changed(self, _event: Any) -> None:
-        if self._busy:
-            return
+    def _accept_active_completion(self) -> bool:
+        buffer = self._input_area.buffer
+        complete_state = buffer.complete_state
+        if complete_state is None or not complete_state.completions:
+            return False
 
-        document = self._input_area.buffer.document
-        mention_result = self._mention_completer.suggest(document.text_before_cursor, max_items=8)
-        if mention_result is not None:
-            context, candidates = mention_result
-            if candidates:
-                previous = ""
-                if self._mention_active and self._mention_candidates:
-                    previous = self._mention_candidates[self._mention_index]
-
-                self._mention_active = True
-                self._mention_context = context
-                self._mention_candidates = candidates
-                if previous and previous in candidates:
-                    self._mention_index = candidates.index(previous)
-                else:
-                    self._mention_index = 0
-                if self._slash_active:
-                    self._deactivate_slash(invalidate=False)
-                self._invalidate()
-                return
-
-        if self._mention_active:
-            self._deactivate_mention(invalidate=False)
-
-        text = self._input_area.text
-        if not text.startswith("/"):
-            if self._slash_active:
-                self._deactivate_slash(invalidate=False)
-            self._invalidate()
-            return
-
-        candidates = [command for command in SLASH_COMMANDS if command.startswith(text)]
-        if not candidates:
-            self._deactivate_slash(invalidate=False)
-            self._invalidate()
-            return
-
-        previous = ""
-        if self._slash_active and self._slash_candidates:
-            previous = self._slash_candidates[self._slash_index]
-
-        self._slash_active = True
-        self._slash_candidates = candidates
-        if previous and previous in candidates:
-            self._slash_index = candidates.index(previous)
-        else:
-            self._slash_index = 0
-        self._invalidate()
-
-    def _move_active_selection(self, delta: int) -> bool:
-        if self._mention_active and self._mention_candidates:
-            size = len(self._mention_candidates)
-            self._mention_index = (self._mention_index + delta) % size
-            self._invalidate()
-            return True
-        if self._slash_active and self._slash_candidates:
-            size = len(self._slash_candidates)
-            self._slash_index = (self._slash_index + delta) % size
-            self._invalidate()
-            return True
-        return False
-
-    def _accept_active_candidate(self) -> bool:
-        if self._mention_active and self._mention_candidates and self._mention_context is not None:
-            completion = self._mention_candidates[self._mention_index]
-            document = self._input_area.buffer.document
-            should_append_space = not completion.endswith("/")
-            new_text, new_cursor = self._mention_completer.apply_completion(
-                full_text=document.text,
-                cursor_position=document.cursor_position,
-                context=self._mention_context,
-                completion=completion,
-                append_space=should_append_space,
-            )
-            self._input_area.buffer.document = Document(
-                text=new_text,
-                cursor_position=new_cursor,
-            )
-            if should_append_space:
-                self._deactivate_mention(invalidate=False)
-            self._invalidate()
-            return True
-
-        if self._slash_active and self._slash_candidates:
-            command = self._slash_candidates[self._slash_index]
-            if self._input_area.text.strip() == command:
-                return False
-            self._input_area.buffer.document = Document(text=command, cursor_position=len(command))
-            self._deactivate_slash(invalidate=False)
-            self._invalidate()
-            return True
-
-        return False
-
-    def _deactivate_mention(self, *, invalidate: bool = True) -> None:
-        self._mention_active = False
-        self._mention_candidates = []
-        self._mention_index = 0
-        self._mention_context = None
-        if invalidate:
-            self._invalidate()
-
-    def _deactivate_slash(self, *, invalidate: bool = True) -> None:
-        self._slash_active = False
-        self._slash_candidates = []
-        self._slash_index = 0
-        if invalidate:
-            self._invalidate()
+        completion = complete_state.current_completion
+        if completion is None:
+            completion = complete_state.completions[0]
+        buffer.apply_completion(completion)
+        return True
 
     def _submit_from_input(self) -> None:
         if self._busy:
@@ -504,9 +592,9 @@ class TerminalAgentTUI:
         if not text:
             return
 
+        if self._input_area.buffer.complete_state is not None:
+            self._input_area.buffer.cancel_completion()
         self._input_area.buffer.document = Document("")
-        self._deactivate_mention(invalidate=False)
-        self._deactivate_slash(invalidate=False)
         if text.startswith("/"):
             self._schedule_background(self._execute_command(text))
             return
@@ -517,6 +605,9 @@ class TerminalAgentTUI:
         if self._busy:
             self._renderer.append_system_message("当前已有任务在运行，请稍候。", is_error=True)
             return
+
+        self._session.run_controller.clear()
+        self._interrupt_requested_at = None
 
         self._set_busy(True)
         self._waiting_for_input = False
@@ -540,6 +631,7 @@ class TerminalAgentTUI:
             self._renderer.append_system_message(f"流式处理失败: {exc}", is_error=True)
         finally:
             self._stream_task = None
+            self._interrupt_requested_at = None
             self._set_busy(False)
             await self._status_bar.refresh()
 
@@ -582,33 +674,54 @@ class TerminalAgentTUI:
         task.add_done_callback(_done)
 
     async def _execute_command(self, command: str) -> None:
+        parsed = _parse_slash_command_call(command)
         normalized = command.strip()
-        if normalized == "/help":
-            self._renderer.append_system_message(" ".join(SLASH_COMMANDS))
+        if parsed is None:
+            self._renderer.append_system_message(f"Unknown command: {normalized}", is_error=True)
             self._refresh_layers()
             return
 
-        if normalized == "/session":
-            self._renderer.append_system_message(f"Session ID: {self._session.session_id}")
+        spec = self._slash_lookup.get(parsed.name)
+        if spec is None:
+            self._renderer.append_system_message(f"Unknown command: {normalized}", is_error=True)
             self._refresh_layers()
             return
 
-        if normalized == "/usage":
-            await self._append_usage_snapshot()
+        handler = self._slash_handlers.get(spec.name)
+        if handler is None:
+            logger.error("slash handler missing for command: %s", spec.name)
+            self._renderer.append_system_message(
+                f"Unknown command: {parsed.raw_input}",
+                is_error=True,
+            )
             self._refresh_layers()
             return
 
-        if normalized == "/context":
-            await self._append_context_snapshot()
-            self._refresh_layers()
-            return
-
-        if normalized == "/exit":
-            self._exit_app()
-            return
-
-        self._renderer.append_system_message(f"Unknown command: {normalized}", is_error=True)
+        result = handler(parsed.args)
+        if asyncio.iscoroutine(result):
+            await result
         self._refresh_layers()
+
+    def _slash_help(self, _args: str) -> None:
+        lines = []
+        for spec in SLASH_COMMAND_SPECS:
+            alias_text = ""
+            if spec.aliases:
+                alias_text = f" ({', '.join(f'/{alias}' for alias in spec.aliases)})"
+            lines.append(f"/{spec.name}{alias_text} - {spec.description}")
+        self._renderer.append_system_message("\n".join(lines))
+
+    def _slash_session(self, _args: str) -> None:
+        self._renderer.append_system_message(f"Session ID: {self._session.session_id}")
+
+    async def _slash_usage(self, _args: str) -> None:
+        await self._append_usage_snapshot()
+
+    async def _slash_context(self, _args: str) -> None:
+        await self._append_context_snapshot()
+
+    def _slash_exit(self, _args: str) -> None:
+        self._exit_app()
 
     async def _append_usage_snapshot(self) -> None:
         usage = await self._session.get_usage()
@@ -767,27 +880,6 @@ class TerminalAgentTUI:
 
     def _status_text(self) -> list[tuple[str, str]]:
         width = self._terminal_width()
-
-        if self._mention_active and self._mention_candidates:
-            fragments: list[str] = []
-            for idx, candidate in enumerate(self._mention_candidates):
-                if idx == self._mention_index:
-                    fragments.append(f"[{candidate}]")
-                else:
-                    fragments.append(candidate)
-            mention_line = f"@> {'  '.join(fragments)}"
-            return [("class:status", _fit_single_line(mention_line, width - 1))]
-
-        if self._slash_active and self._slash_candidates:
-            fragments: list[str] = []
-            for idx, command in enumerate(self._slash_candidates):
-                if idx == self._slash_index:
-                    fragments.append(f"[{command}]")
-                else:
-                    fragments.append(command)
-            slash_line = f"slash> {'  '.join(fragments)}"
-            return [("class:status", _fit_single_line(slash_line, width - 1))]
-
         base = self._status_bar.footer_status_text()
         mode = "idle"
         if self._busy:
@@ -820,6 +912,7 @@ class TerminalAgentTUI:
 
     def _exit_app(self) -> None:
         self._closing = True
+        self._session.run_controller.clear()
         if self._stream_task is not None:
             self._stream_task.cancel()
         if self._app is not None:

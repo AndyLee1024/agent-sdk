@@ -28,6 +28,7 @@ from comate_agent_sdk.agent.chat_session import (
     ChatSessionClosedError,
     ChatSessionError,
 )
+from comate_agent_sdk.agent.interrupt import SessionRunController
 from comate_agent_sdk.agent.options import AgentConfig
 from comate_agent_sdk.agent.service import Agent, AgentRuntime, AgentTemplate
 from comate_agent_sdk.agent.prompts import MEMORY_NOTICE
@@ -41,6 +42,7 @@ __all__ = [
     "ChatSession",
     "ChatSessionError",
     "ChatSessionClosedError",
+    "SessionRunController",
     # Events
     "AgentEvent",
     "SessionInitEvent",

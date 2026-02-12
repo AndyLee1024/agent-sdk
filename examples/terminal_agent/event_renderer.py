@@ -335,6 +335,10 @@ class EventRenderer:
                 self._rebuild_loading_line()
                 if reason == "waiting_for_input":
                     return (True, None)
+                if reason == "interrupted":
+                    self._history.append(
+                        HistoryEntry(entry_type="system", text="当前任务已中断。")
+                    )
             case _:
                 logger.debug("Unhandled event type: %s", type(event).__name__)
 

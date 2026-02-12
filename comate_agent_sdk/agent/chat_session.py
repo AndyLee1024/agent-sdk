@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from comate_agent_sdk.agent.events import AgentEvent, SessionInitEvent, StopEvent
+from comate_agent_sdk.agent.interrupt import SessionRunController
 from comate_agent_sdk.agent.service import AgentTemplate, AgentRuntime
 from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.tokens.views import TokenUsageEntry, UsageSummary
@@ -538,6 +539,7 @@ class ChatSession:
         self._events_started = False
         self._queue: asyncio.Queue[ChatMessage | None] = asyncio.Queue()
         self._message_source = message_source
+        self.run_controller = SessionRunController()
 
     @classmethod
     def resume(
@@ -746,10 +748,15 @@ class ChatSession:
         self._turn_number += 1
         before = _ConversationState.capture(self._agent._context.conversation.items)
         before_usage_count = len(self._agent._token_cost.usage_history)
+        previous_controller = self._agent._run_controller
+        self.run_controller.clear()
+        self._agent._run_controller = self.run_controller
         try:
             async for event in self._agent.query_stream(message):  # type: ignore[arg-type]
                 yield event
         finally:
+            self._agent._run_controller = previous_controller
+            self.run_controller.clear()
             evt = _build_conversation_event(
                 session_id=self.session_id,
                 turn_number=self._turn_number,
@@ -782,12 +789,17 @@ class ChatSession:
             self._turn_number += 1
             before = _ConversationState.capture(self._agent._context.conversation.items)
             before_usage_count = len(self._agent._token_cost.usage_history)
+            previous_controller = self._agent._run_controller
+            self.run_controller.clear()
+            self._agent._run_controller = self.run_controller
             try:
                 async for event in self._agent.query_stream(message):  # type: ignore[arg-type]
                     yield event
                     if isinstance(event, StopEvent):
                         break
             finally:
+                self._agent._run_controller = previous_controller
+                self.run_controller.clear()
                 evt = _build_conversation_event(
                     session_id=self.session_id,
                     turn_number=self._turn_number,

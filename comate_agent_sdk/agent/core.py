@@ -31,6 +31,7 @@ logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.events import AgentEvent
+    from comate_agent_sdk.agent.interrupt import SessionRunController
     from comate_agent_sdk.context.env import EnvOptions
     from comate_agent_sdk.llm.views import ChatInvokeCompletion
 
@@ -204,6 +205,7 @@ class AgentRuntime:
     _token_accounting: ContextTokenAccounting = field(default=None, repr=False, init=False)  # type: ignore[assignment]
     _context_fs: ContextFileSystem | None = field(default=None, repr=False, init=False)
     _session_id: str = field(default="", repr=False, init=False)
+    _run_controller: "SessionRunController | None" = field(default=None, repr=False, init=False)
 
     # MCP internal state
     _mcp_manager: Any | None = field(default=None, repr=False, init=False)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from contextlib import nullcontext
@@ -367,6 +368,8 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                 content=error_msg,
                 is_error=True,
             )
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             error_msg = f"Error executing tool: {e}"
             if Laminar is not None:

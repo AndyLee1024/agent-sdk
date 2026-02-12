@@ -5,6 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from prompt_toolkit.completion import CompleteEvent
+from prompt_toolkit.document import Document
+
 EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
@@ -57,6 +60,14 @@ class TestLocalFileMentionCompleter(unittest.TestCase):
         )
         self.assertEqual(new_text, "open @main.py ")
         self.assertEqual(new_cursor, len("open @main.py "))
+
+    def test_prompt_toolkit_completion_appends_space_for_files(self) -> None:
+        doc = Document(text="open @ma", cursor_position=len("open @ma"))
+        event = CompleteEvent(completion_requested=True)
+        completions = list(self.completer.get_completions(doc, event))
+        self.assertTrue(completions)
+        texts = [completion.text for completion in completions]
+        self.assertIn("main.py ", texts)
 
 
 if __name__ == "__main__":

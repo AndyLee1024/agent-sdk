@@ -9,6 +9,7 @@ if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
 from comate_agent_sdk.agent.events import (
+    StopEvent,
     SubagentProgressEvent,
     TextEvent,
     ToolCallEvent,
@@ -145,6 +146,16 @@ class TestEventRenderer(unittest.TestCase):
         self.assertNotIn("prompt", tool_call_entry.text.lower())
         self.assertFalse(tool_call_entry.text.startswith("→"))
         self.assertFalse(tool_result_entry.text.startswith("✓"))
+
+    def test_stop_event_interrupted_appends_system_message(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.seed_user_message("hello")
+        renderer.handle_event(StopEvent(reason="interrupted"))
+
+        system_entries = [e for e in renderer.history_entries() if e.entry_type == "system"]
+        self.assertTrue(system_entries)
+        self.assertIn("中断", system_entries[-1].text)
 
 
 if __name__ == "__main__":

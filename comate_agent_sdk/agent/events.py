@@ -122,7 +122,7 @@ class StopEvent:
 	Final assistant text (if any) is emitted via `TextEvent`.
 	"""
 
-	reason: Literal['completed', 'max_iterations', 'waiting_for_input']
+	reason: Literal['completed', 'max_iterations', 'waiting_for_input', 'interrupted']
 	"""Why the stream stopped."""
 
 	def __str__(self) -> str:
@@ -185,14 +185,14 @@ class StepCompleteEvent:
 	step_id: str
 	"""The ID of the completed step."""
 
-	status: Literal['completed', 'error']
+	status: Literal['completed', 'error', 'cancelled']
 	"""The final status of the step."""
 
 	duration_ms: float = 0.0
 	"""Duration of the step in milliseconds."""
 
 	def __str__(self) -> str:
-		icon = '✅' if self.status == 'completed' else '❌'
+		icon = '✅' if self.status == 'completed' else ('⏹️' if self.status == 'cancelled' else '❌')
 		return f'{icon} Step complete ({self.duration_ms:.0f}ms)'
 
 
@@ -224,7 +224,7 @@ class SubagentStopEvent:
 	subagent_name: str
 	"""Subagent name (subagent_type)."""
 
-	status: Literal['completed', 'error', 'timeout']
+	status: Literal['completed', 'error', 'timeout', 'cancelled']
 	"""Final status for the subagent execution."""
 
 	duration_ms: float = 0.0
@@ -234,7 +234,7 @@ class SubagentStopEvent:
 	"""Error message if status is error/timeout."""
 
 	def __str__(self) -> str:
-		icon = '✅' if self.status == 'completed' else '❌'
+		icon = '✅' if self.status == 'completed' else ('⏹️' if self.status == 'cancelled' else '❌')
 		return f'{icon} Subagent stop: {self.subagent_name} ({self.duration_ms:.0f}ms)'
 
 
@@ -284,7 +284,7 @@ class SubagentProgressEvent:
 	description: str = ''
 	"""Subagent task description."""
 
-	status: Literal['running', 'completed', 'error', 'timeout'] = 'running'
+	status: Literal['running', 'completed', 'error', 'timeout', 'cancelled'] = 'running'
 	"""Current task status."""
 
 	elapsed_ms: float = 0.0

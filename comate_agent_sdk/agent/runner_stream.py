@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -107,6 +108,13 @@ def _normalize_tool_call_event_args(
     return raw_args
 
 
+def _is_interrupt_requested(agent: "AgentRuntime") -> bool:
+    controller = getattr(agent, "_run_controller", None)
+    if controller is None:
+        return False
+    return bool(controller.is_interrupted)
+
+
 async def query_stream(
     agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]
 ) -> AsyncIterator[AgentEvent]:
@@ -154,6 +162,43 @@ async def query_stream(
                     tokens=state.tokens,
                 )
 
+    async def _yield_interrupted_stop() -> AsyncIterator[AgentEvent]:
+        async for usage_event in _drain_usage_events():
+            yield usage_event
+        yield StopEvent(reason="interrupted")
+
+    async def _emit_cancelled_task(tool_call_id: str) -> AsyncIterator[AgentEvent]:
+        state = running_tasks.pop(tool_call_id, None)
+        elapsed_ms = 0.0
+        total_tokens = 0
+        subagent_name = "Task"
+        description = "Task"
+        if state is not None:
+            elapsed_ms = (time.monotonic() - state.started_at_monotonic) * 1000
+            total_tokens = state.tokens
+            subagent_name = state.subagent_name
+            description = state.description
+            yield SubagentProgressEvent(
+                tool_call_id=tool_call_id,
+                subagent_name=subagent_name,
+                description=description,
+                status="cancelled",
+                elapsed_ms=elapsed_ms,
+                tokens=total_tokens,
+            )
+            yield SubagentStopEvent(
+                tool_call_id=tool_call_id,
+                subagent_name=subagent_name,
+                status="cancelled",
+                duration_ms=elapsed_ms,
+                error="Interrupted by user",
+            )
+        yield StepCompleteEvent(
+            step_id=tool_call_id,
+            status="cancelled",
+            duration_ms=elapsed_ms,
+        )
+
     usage_observer_id = agent._token_cost.subscribe_usage(_on_usage_entry)
 
     try:
@@ -166,13 +211,42 @@ async def query_stream(
         iterations = 0
 
         while iterations < agent.max_iterations:
+            if _is_interrupt_requested(agent):
+                async for event in _yield_interrupted_stop():
+                    yield event
+                return
+
             iterations += 1
 
             # Destroy ephemeral messages from previous iteration before LLM sees them again
             destroy_ephemeral_messages(agent)
 
-            # Invoke the LLM
-            response = await invoke_llm(agent)
+            # Invoke the LLM (polling to support cooperative interruption)
+            llm_task = asyncio.create_task(invoke_llm(agent))
+            while True:
+                async for usage_event in _drain_usage_events():
+                    yield usage_event
+
+                if _is_interrupt_requested(agent):
+                    llm_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await llm_task
+                    async for event in _yield_interrupted_stop():
+                        yield event
+                    return
+
+                done, _ = await asyncio.wait(
+                    {llm_task},
+                    timeout=usage_poll_interval_seconds,
+                    return_when=asyncio.ALL_COMPLETED,
+                )
+
+                async for usage_event in _drain_usage_events():
+                    yield usage_event
+                if done:
+                    break
+
+            response = await llm_task
             async for usage_event in _drain_usage_events():
                 yield usage_event
 
@@ -188,6 +262,11 @@ async def query_stream(
                 tool_calls=response.tool_calls if response.tool_calls else None,
             )
             agent._context.add_message(assistant_msg)
+
+            if _is_interrupt_requested(agent):
+                async for event in _yield_interrupted_stop():
+                    yield event
+                return
 
             # If no tool calls, finish
             if not response.has_tool_calls:
@@ -214,6 +293,11 @@ async def query_stream(
             step_number = 0
             idx = 0
             while idx < len(tool_calls):
+                if _is_interrupt_requested(agent):
+                    async for event in _yield_interrupted_stop():
+                        yield event
+                    return
+
                 tool_call = tool_calls[idx]
                 tool_name = tool_call.function.name
 
@@ -299,6 +383,32 @@ async def query_stream(
                         async for usage_event in _drain_usage_events():
                             yield usage_event
 
+                        if _is_interrupt_requested(agent):
+                            for fut in pending:
+                                fut.cancel()
+                            await asyncio.gather(*pending, return_exceptions=True)
+
+                            # Persist results that were already completed before interruption.
+                            for tc in group:
+                                tool_result = results_by_id.get(tc.id)
+                                if tool_result is None:
+                                    continue
+                                agent._context.add_message(tool_result)
+                                if agent._context.has_pending_skill_items:
+                                    agent._context.flush_pending_skill_items()
+
+                            # Mark unfinished task calls as cancelled.
+                            completed_ids = set(results_by_id.keys())
+                            for tc in group:
+                                if tc.id in completed_ids:
+                                    continue
+                                async for event in _emit_cancelled_task(tc.id):
+                                    yield event
+
+                            async for event in _yield_interrupted_stop():
+                                yield event
+                            return
+
                         done, pending = await asyncio.wait(
                             pending,
                             timeout=usage_poll_interval_seconds,
@@ -318,7 +428,7 @@ async def query_stream(
                             state = running_tasks.pop(tc.id, None)
                             total_tokens = state.tokens if state is not None else 0
 
-                            stop_status: Literal["completed", "error", "timeout"] = "completed"
+                            stop_status: Literal["completed", "error", "timeout", "cancelled"] = "completed"
                             error_msg: str | None = None
                             if tool_result.is_error:
                                 error_msg = tool_result.text
@@ -444,6 +554,27 @@ async def query_stream(
                 while True:
                     async for usage_event in _drain_usage_events():
                         yield usage_event
+
+                    if _is_interrupt_requested(agent):
+                        tool_result_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await tool_result_task
+
+                        step_duration_ms = (time.time() - step_start_time) * 1000
+                        if is_task:
+                            async for event in _emit_cancelled_task(tool_call.id):
+                                yield event
+                        else:
+                            yield StepCompleteEvent(
+                                step_id=tool_call.id,
+                                status="cancelled",
+                                duration_ms=step_duration_ms,
+                            )
+
+                        async for event in _yield_interrupted_stop():
+                            yield event
+                        return
+
                     done, _ = await asyncio.wait(
                         {tool_result_task},
                         timeout=usage_poll_interval_seconds,
@@ -473,7 +604,7 @@ async def query_stream(
                 if is_task:
                     state = running_tasks.pop(tool_call.id, None)
                     total_tokens = state.tokens if state is not None else 0
-                    stop_status: Literal["completed", "error", "timeout"] = "completed"
+                    stop_status: Literal["completed", "error", "timeout", "cancelled"] = "completed"
                     error_msg: str | None = None
                     if tool_result.is_error:
                         error_msg = tool_result.text
