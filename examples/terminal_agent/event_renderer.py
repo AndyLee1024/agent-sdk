@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from comate_agent_sdk.agent.events import (
@@ -24,7 +25,7 @@ from comate_agent_sdk.agent.events import (
 from rich.console import RenderableType
 from rich.text import Text
 
-from terminal_agent.models import HistoryEntry
+from terminal_agent.models import HistoryEntry, LoadingState
 from terminal_agent.tool_view import summarize_tool_args
 
 logger = logging.getLogger(__name__)
@@ -79,13 +80,14 @@ class _RunningTool:
 class EventRenderer:
     """Convert SDK events to lightweight terminal state for prompt_toolkit UI."""
 
-    def __init__(self) -> None:
+    def __init__(self, project_root: Path | None = None) -> None:
         self._history: list[HistoryEntry] = []
         self._running_tools: dict[str, _RunningTool] = {}
         self._thinking_content: str = ""
         self._assistant_buffer = ""
-        self._loading_line: str = ""
+        self._loading_state: LoadingState = LoadingState.idle()
         self._current_todos: list[dict[str, Any]] = []
+        self._project_root = project_root
 
     def start_turn(self) -> None:
         self._flush_assistant_segment()
@@ -130,8 +132,13 @@ class EventRenderer:
     def history_entries(self) -> list[HistoryEntry]:
         return list(self._history)
 
+    def loading_state(self) -> LoadingState:
+        """返回语义化的 loading 状态，用于 UI 层决定渲染策略。"""
+        return self._loading_state
+
     def loading_line(self) -> str:
-        return self._loading_line
+        """兼容旧接口，返回 loading 状态的文本内容。"""
+        return self._loading_state.text
 
     def append_system_message(self, content: str, *, is_error: bool = False) -> None:
         normalized = content.strip()
@@ -161,7 +168,7 @@ class EventRenderer:
     def _append_tool_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
         title = tool_name
         is_task = tool_name.lower() == "task"
-        summary = summarize_tool_args(tool_name, args).strip()
+        summary = summarize_tool_args(tool_name, args, self._project_root).strip()
         if is_task:
             title = _extract_task_title(args)
             summary = ""
@@ -221,14 +228,25 @@ class EventRenderer:
             )
             more = len(self._running_tools) - 1
             more_suffix = f" (+{more})" if more > 0 else ""
-            self._loading_line = f"⏳ {state.title} · {elapsed}{tokens_suffix}{more_suffix}"
+            text = f"⏳ {state.title} · {elapsed}{tokens_suffix}{more_suffix}"
+            self._loading_state = LoadingState.tool_call(
+                text=text,
+                tool_name=state.tool_name,
+                title=state.title,
+                elapsed=elapsed,
+                is_task=state.is_task,
+            )
             return
 
         if self._thinking_content:
-            self._loading_line = f"🤔 {_truncate(self._thinking_content, 90)}"
+            text = f"🤔 {_truncate(self._thinking_content, 90)}"
+            self._loading_state = LoadingState.thinking(
+                text=text,
+                content=self._thinking_content,
+            )
             return
 
-        self._loading_line = ""
+        self._loading_state = LoadingState.idle()
 
     def _append_questions(self, questions: list[dict[str, Any]]) -> None:
         if not questions:

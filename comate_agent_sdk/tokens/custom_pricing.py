@@ -15,6 +15,12 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
         "input_cost_per_token": 4e-07,
         "output_cost_per_token": 2e-06,
     },
+    "zai-org/GLM-5-FP8": {
+        "max_input_tokens": 202752,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 4e-07,
+        "output_cost_per_token": 2e-06,
+    },
     "gpt-4.1": {
         "max_input_tokens": 111424,
         "max_output_tokens": 16384,

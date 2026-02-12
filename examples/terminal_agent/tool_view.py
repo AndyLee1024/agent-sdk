@@ -2,11 +2,35 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 from typing import Any
 
 from rich.console import RenderableType
 from rich.panel import Panel
 from rich.text import Text
+
+
+def _normalize_path_for_display(path_str: str | None, project_root: Path | None) -> str | None:
+    """将路径转换为相对于项目根目录的显示格式。"""
+    if path_str is None:
+        return None
+    try:
+        path = Path(path_str)
+        if project_root is not None and path.is_absolute():
+            try:
+                relative = path.relative_to(project_root)
+                return relative.as_posix()
+            except ValueError:
+                # 路径不在 project_root 下，保持原样
+                pass
+        return path_str
+    except Exception:
+        return path_str
+
+
+def _normalize_cwd_for_display(cwd: str | None, project_root: Path | None) -> str | None:
+    """将工作目录转换为相对于项目根目录的显示格式。"""
+    return _normalize_path_for_display(cwd, project_root)
 
 from terminal_agent.message_style import (
     TOOL_ERROR_PREFIX,
@@ -203,29 +227,50 @@ def _sweep_gradient_text(content: str, frame: int) -> Text:
     return text
 
 
-def summarize_tool_args(tool_name: str, args: dict[str, Any]) -> str:
+def summarize_tool_args(
+    tool_name: str, args: dict[str, Any], project_root: Path | None = None
+) -> str:
+    """Summarize tool arguments for display.
+
+    Args:
+        tool_name: Name of the tool being called.
+        args: Tool arguments dictionary.
+        project_root: Optional project root path. If provided, absolute paths
+            will be converted to relative paths for display.
+
+    Returns:
+        A compact string representation of the tool arguments.
+    """
     if _should_hide_tool_args(tool_name):
         return ""
     lowered = tool_name.lower()
     if lowered == "write":
         path = _lookup_arg(args, "file_path", "path")
-        return f"path={path}" if path else _compact_json(args)
+        path_display = _normalize_path_for_display(path, project_root)
+        return f"path={path_display}" if path_display else _compact_json(args)
     if lowered == "edit":
         path = _lookup_arg(args, "file_path", "path")
+        path_display = _normalize_path_for_display(path, project_root)
         old_len = len(str(_lookup_arg(args, "old_string") or ""))
         new_len = len(str(_lookup_arg(args, "new_string") or ""))
-        return f"path={path} old_len={old_len} new_len={new_len}" if path else _compact_json(args)
+        return f"path={path_display} old_len={old_len} new_len={new_len}" if path_display else _compact_json(args)
     if lowered == "read":
         path = _lookup_arg(args, "file_path", "path")
+        path_display = _normalize_path_for_display(path, project_root)
         offset = _lookup_arg(args, "offset_line")
         limit = _lookup_arg(args, "limit_lines")
-        return f"path={path} offset={offset} limit={limit}" if path else _compact_json(args)
+        return f"path={path_display} offset={offset} limit={limit}" if path_display else _compact_json(args)
     if lowered in {"grep", "glob", "ls"}:
         pattern = _lookup_arg(args, "pattern")
         path = _lookup_arg(args, "path")
-        return f"path={path} pattern={pattern}" if (path or pattern) else _compact_json(args)
+        path_display = _normalize_path_for_display(path, project_root)
+        return f"path={path_display} pattern={pattern}" if (path_display or pattern) else _compact_json(args)
     if lowered == "bash":
         command = _lookup_arg(args, "command")
+        cwd = _lookup_arg(args, "cwd")
+        cwd_display = _normalize_cwd_for_display(cwd, project_root)
+        if cwd_display:
+            return f"cwd={cwd_display} command={_truncate(str(command), 180)}" if command else _compact_json(args)
         return f"command={_truncate(str(command), 180)}" if command else _compact_json(args)
     if lowered == "webfetch":
         url = _lookup_arg(args, "url")

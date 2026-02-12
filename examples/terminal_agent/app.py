@@ -44,7 +44,7 @@ from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.logo import print_logo
 from terminal_agent.markdown_render import render_markdown_to_plain
 from terminal_agent.mention_completer import LocalFileMentionCompleter
-from terminal_agent.models import HistoryEntry
+from terminal_agent.models import HistoryEntry, LoadingStateType
 from terminal_agent.question_view import AskUserQuestionUI, QuestionAction
 from terminal_agent.rpc_stdio import StdioRPCBridge
 from terminal_agent.status_bar import StatusBar
@@ -417,6 +417,7 @@ class TerminalAgentTUI:
                 "completion-menu.completion.current": "bg:#5e81ac #eceff4",
                 "completion-menu.meta.completion": "bg:#2d3441 #81a1c1",
                 "completion-menu.meta.completion.current": "bg:#5e81ac #e5e9f0",
+                "loading": "bg:#1a1e24",
             }
         )
 
@@ -1077,12 +1078,31 @@ class TerminalAgentTUI:
             renderable = self._animator.renderable()
             return self._rich_text_to_pt_fragments(renderable)
 
-        # 回退到原有的 loading_line 逻辑
-        text = self._renderer.loading_line().strip()
+        # 获取语义化的 loading 状态
+        loading_state = self._renderer.loading_state()
+        text = loading_state.text.strip()
         if not text:
             return [("", " ")]
+
         width = self._terminal_width()
         clipped = _fit_single_line(text, width - 1)
+
+        # 根据状态类型决定渲染策略
+        if loading_state.type == LoadingStateType.TOOL_CALL:
+            # 工具调用：保留旋转图标动画，但工具名称静态显示
+            pulse_glyphs = ("◐", "◓", "◑", "◒")
+            pulse_idx = self._loading_frame % len(pulse_glyphs)
+            pulse = pulse_glyphs[pulse_idx]
+            # 移除原有的 ⏳ 图标，用旋转图标替代
+            display_text = clipped
+            if clipped.startswith("⏳ "):
+                display_text = clipped[2:]  # 移除 "⏳ " 前缀
+            return [
+                (f"fg:#6B7280 bold", f"{pulse} "),
+                ("fg:#96c49c bold", display_text),
+            ]
+
+        # 其他状态（thinking, animation）：使用流光效果
         return _sweep_gradient_fragments(clipped, frame=self._loading_frame)
 
     def _rich_text_to_pt_fragments(self, renderable) -> list[tuple[str, str]]:
@@ -1173,7 +1193,7 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
     if mode == "resume":
         await status_bar.refresh()
 
-    renderer = EventRenderer()
+    renderer = EventRenderer(project_root=Path.cwd())
     tui = TerminalAgentTUI(session, status_bar, renderer)
     tui.add_resume_history(mode)
 
