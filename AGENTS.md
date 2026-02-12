@@ -5,13 +5,13 @@
 
 ## global rule
 
-1. 和你搭档的程序员是中文使用者, 所以你总是要输出中文
-2. 如果你遇到不清楚的问题或者缺少什么信息，MUST及时向我询问。  
-3. 先给出你的方案，MUST经我审阅后再编写代码。
-4. 给出几版方案选择，构建方案时使用问答的方式逐步确认我的需求。 this is MUST
-5. 不要为我生成任何总结文档, 除非我主动告诉你.
-6. 当用户让你排查或者修复问题时，我希望你站在全局角度工程化考虑问题,结合当前架构,分析问题原因,给出解决方案。而不是简单止血。需要确认修改这个会不会造成其他依赖这个的功能的连锁反应和冲突. this is MUST
-7. make code simple, readable, maintainable, and extensible
+1. 如果你遇到不清楚的问题或者缺少什么信息，MUST及时向我询问。  
+2. 先给出你的方案，MUST经我审阅后再编写代码。
+3. 给出几版方案选择，构建方案时使用问答的方式逐步确认我的需求。 this is MUST
+4. 不要为我生成任何总结文档, 除非我主动告诉你.
+5. 当用户让你排查或者修复问题时，我希望你站在全局角度工程化考虑问题,结合当前架构,分析问题原因,给出解决方案。而不是简单止血。需要确认修改这个会不会造成其他依赖这个的功能的连锁反应和冲突. this is MUST
+6. make code simple, readable, maintainable, and extensible
+7. 涉及到Textual 这个TUI框架, 你必须使用 context7 mcp里面的  query-docs和resolve-library-id 功能来查询相关文档, 以确保你对这个框架的理解是正确的. this is MUST
 
 ## python coding rule
 1. 代码必须使用 f-string 进行字符串格式化
