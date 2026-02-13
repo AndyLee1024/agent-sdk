@@ -39,21 +39,12 @@
  
 不要做 History TUI。历史永远只写入终端 scrollback，UI 只负责底部输入、补全菜单和状态栏。任何“把聊天历史放进可滚动窗口/HSplit 顶部 TextArea”的实现，一律视为回归并拒绝合并。
 
-1. History 输出的唯一通道
+- Chat history 永远不进入 prompt_toolkit layout；历史唯一输出通道是 run_in_terminal(...) 追加到 scrollback。
 
-* 只允许 `run_in_terminal(console.print(...))` 或等价的“安全打印”通道。
-* 禁止在 prompt_toolkit 布局里存在 `history_area` / `chat_window` / `messages_view` 之类承载历史文本的组件（TextArea/Window/FormattedTextControl 都不行）。
-* 禁止为历史实现滚动、重绘、diff、虚拟列表、分页等 UI 行为。所有历史回看依赖终端 scrollback 或外部日志文件。
+- layout 允许存在“底部交互带”，其内容仅包括：loading（可选）、输入相关（input/问答 UI/补全菜单等短暂交互组件）、status。
 
-2. 布局铁律（三行模型）
+- 禁止出现任何承载历史消息的 multiline read-only 组件（典型：TextArea(multiline=True, read_only=True)、或任何“messages/history/chat”命名的 Window/TextArea/FormattedTextControl）。
 
-* Application 布局只允许：`loading_line`（可选） + `input_line` + `status_line`，外加 `CompletionsMenu` 作为 float。
-* 任何 HSplit 上方的“内容区”高度 > 1 都视为历史 TUI 试图复活。
-
-3. 输出频率铁律
-
-* 任何 history 追加必须“批量打印”，每个 tick 最多一次 `run_in_terminal()`。
-* 禁止按 token/按事件高频打印导致 UI 暂停/恢复频繁切换。
-
+- 禁止“回写/修改”已经写进 scrollback 的历史行（比如工具开始打一行，结束回去改成绿色）。scrollback 只允许追加不可变日志。
  
  

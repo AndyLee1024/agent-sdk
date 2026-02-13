@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import sys
 import time
+from bisect import bisect_right
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -30,8 +32,6 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.widgets import TextArea
-from prompt_toolkit.filters import has_completions, has_focus
-from prompt_toolkit.layout.containers import ConditionalContainer
 from rich.console import Console
 from rich.text import Text
 
@@ -55,6 +55,97 @@ from terminal_agent.status_bar import StatusBar
 console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("comate_agent_sdk.system_tools.tools").setLevel(logging.ERROR)
+
+
+def _read_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
+        return default
+    if value <= 0:
+        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
+        return default
+    return value
+
+
+def _compute_visual_line_ranges(text: str, max_cols: int) -> list[tuple[int, int]]:
+    """
+    Compute visual line ranges [start, end) by wrapping `text` at `max_cols`
+    display cells, respecting explicit newlines.
+    """
+    if max_cols <= 0:
+        max_cols = 1
+
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    col = 0
+    for idx, ch in enumerate(text):
+        if ch == "\n":
+            ranges.append((start, idx))
+            start = idx + 1
+            col = 0
+            continue
+
+        ch_width = get_cwidth(ch)
+        if ch_width <= 0:
+            ch_width = 1
+        if ch_width > max_cols:
+            ch_width = max_cols
+
+        if col + ch_width > max_cols:
+            ranges.append((start, idx))
+            start = idx
+            col = 0
+
+        col += ch_width
+
+    ranges.append((start, len(text)))
+    return ranges
+
+
+def _visual_col_for_index(text: str, start: int, end: int, max_cols: int, index: int) -> int:
+    if max_cols <= 0:
+        max_cols = 1
+    if index < start:
+        return 0
+    if index > end:
+        index = end
+    col = 0
+    for ch in text[start:index]:
+        ch_width = get_cwidth(ch)
+        if ch_width <= 0:
+            ch_width = 1
+        if ch_width > max_cols:
+            ch_width = max_cols
+        if col + ch_width > max_cols:
+            break
+        col += ch_width
+    return col
+
+
+def _index_for_visual_col(text: str, start: int, end: int, max_cols: int, target_col: int) -> int:
+    if max_cols <= 0:
+        max_cols = 1
+    if target_col <= 0:
+        return start
+    if target_col > max_cols:
+        target_col = max_cols
+    col = 0
+    for idx in range(start, end):
+        ch = text[idx]
+        ch_width = get_cwidth(ch)
+        if ch_width <= 0:
+            ch_width = 1
+        if ch_width > max_cols:
+            ch_width = max_cols
+        if col + ch_width > target_col:
+            return idx
+        col += ch_width
+    return end
 
 @dataclass(frozen=True, slots=True)
 class SlashCommandSpec:
@@ -181,12 +272,12 @@ def _build_agent() -> Agent:
                     "type": "http",
                     "url": "https://mcp.context7.com/mcp",
                     "headers": {
-                        "CONTEXT7_API_KEY": "ctx7sk-74909a03-11b1-47f4-bb65-011804753c9d"
+                        "CONTEXT7_API_KEY": os.getenv("CONTEXT7_API_KEY"),
                     }
                 },
                 "exa_search": {
                     "type": "http",
-                    "url": "https://mcp.exa.ai/mcp?exaApiKey=084b86e8-c227-4ef0-9f6d-e248594839f4&tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa",
+                    "url": f"https://mcp.exa.ai/mcp?exaApiKey={os.getenv('EXA_API_KEY')}&tools=web_search_exa,web_search_advanced_exa,get_code_context_exa,crawling_exa",
                 }
             },
         )
@@ -335,20 +426,51 @@ class TerminalAgentTUI:
         self._interrupt_requested_at: float | None = None
         self._interrupt_force_window_seconds = 1.5
 
+        self._esc_last_pressed_at: float = 0.0
+        self._esc_press_count: int = 0
+        esc_window_ms = _read_env_int("AGENT_SDK_TUI_ESC_CLEAR_WINDOW_MS", 700)
+        self._esc_clear_window_seconds = esc_window_ms / 1000.0
+
+        self._ctrl_c_last_pressed_at: float = 0.0
+        self._ctrl_c_press_count: int = 0
+        ctrl_c_window_ms = _read_env_int("AGENT_SDK_TUI_CTRL_C_EXIT_WINDOW_MS", 700)
+        self._ctrl_c_exit_window_seconds = ctrl_c_window_ms / 1000.0
+
+        self._paste_threshold_chars = _read_env_int(
+            "AGENT_SDK_TUI_PASTE_PLACEHOLDER_THRESHOLD_CHARS",
+            500,
+        )
+        self._pasted_payload: str | None = None
+        self._paste_placeholder_text: str | None = None
+        self._suppress_input_change_hook = False
+        self._last_input_len = 0
+
+        self._input_prompt_text = "> "
+        self._input_prompt_width = max(1, get_cwidth(self._input_prompt_text))
+
+        def _input_line_prefix(_line_number: int, wrap_count: int) -> list[tuple[str, str]]:
+            if wrap_count <= 0:
+                return [("class:input.prompt", self._input_prompt_text)]
+            return [("class:input.prompt", " " * self._input_prompt_width)]
+
         self._input_area = TextArea(
             text="",
-            multiline=False,
-            prompt="> ",
-            wrap_lines=False,
+            multiline=True,
+            prompt="",
+            wrap_lines=True,
+            dont_extend_height=True,
             completer=self._input_completer,
             complete_while_typing=False,  # 通过 Tab/上下键手动触发补全
             history=InMemoryHistory(),
             read_only=self._input_read_only,
             style="class:input.line",
+            get_line_prefix=_input_line_prefix,
         )
 
         @self._input_area.buffer.on_text_changed.add_handler
         def _trigger_completion(_buffer) -> None:
+            if self._handle_large_paste(_buffer):
+                return
             if self._busy:
                 return
             doc = self._input_area.buffer.document
@@ -373,31 +495,24 @@ class TerminalAgentTUI:
             style="class:status",
         )
    
+        # 补全菜单：在底部区域显示（覆盖 statusline）
+        self._completion_menu = CompletionsMenu(
+            max_height=8,
+            scroll_offset=0,
+            extra_filter=(
+                Condition(lambda: self._ui_mode == UIMode.NORMAL) & has_focus(self._input_area)
+            ),
+        )
 
-        # 补全菜单是否可见：仅在 NORMAL + input 聚焦 + 有候选时
         self._completion_visible = (
             Condition(lambda: self._ui_mode == UIMode.NORMAL)
             & has_focus(self._input_area)
             & has_completions
         )
-
-        # statusline：当补全菜单出现时隐藏
-        self._status_container = ConditionalContainer(
-            content=self._status_window,
-            filter=~self._completion_visible,
-        )
-
-        # input 与 statusline 之间的分隔行：补全菜单出现时隐藏，让菜单紧贴 input 下方
-        self._input_bottom_pad_container = ConditionalContainer(
-            content=Window(height=1, char=" ", style="class:input.pad"),
-            filter=~self._completion_visible,
-        )
-
-        # 补全菜单：绘制在 statusline 区域上方（不使用 float 覆盖 input）
-        self._completion_menu = CompletionsMenu(
-            max_height=8,
-            scroll_offset=0,
-            extra_filter=self._completion_visible,
+        self._bottom_container = ConditionalContainer(
+            content=self._completion_menu,
+            filter=self._completion_visible,
+            alternative_content=self._status_window,
         )
 
         self._input_container = ConditionalContainer(
@@ -415,9 +530,8 @@ class TerminalAgentTUI:
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
                 self._question_container,
-                self._input_bottom_pad_container,
-                self._completion_menu,
-                self._status_container,
+                Window(height=1, char=" ", style="class:input.pad"),
+                self._bottom_container,
             ]
         )
 
@@ -433,6 +547,7 @@ class TerminalAgentTUI:
                 "": "bg:#1f232a #e5e9f0",
                 "history": "bg:#1a1e24 #d8dee9",
                 "input.pad": "bg:#3a3d42",
+                "input.prompt": "bg:#3a3d42 #f2f4f8",
                 "input.line": "bg:#3a3d42 #f2f4f8",
                 "input-line": "bg:#3a3d42 #f2f4f8",
                 "status": "bg:#2d3138 #c3ccd8",
@@ -539,7 +654,7 @@ class TerminalAgentTUI:
             self._sync_focus_for_mode()
             self._invalidate()
 
-        @bindings.add("enter", filter=normal_mode)
+        @bindings.add("enter", filter=normal_mode, eager=True)
         def _enter(event) -> None:
             buffer = event.current_buffer
             cs = buffer.complete_state
@@ -577,6 +692,9 @@ class TerminalAgentTUI:
             buffer = event.current_buffer
             if self._move_completion_selection(buffer, backward=True):
                 return
+            if self._move_cursor_visual(buffer, backward=True):
+                self._invalidate()
+                return
             if self._should_handle_history():
                 buffer.auto_up(count=1)
 
@@ -585,14 +703,31 @@ class TerminalAgentTUI:
             buffer = event.current_buffer
             if self._move_completion_selection(buffer, backward=False):
                 return
+            if self._move_cursor_visual(buffer, backward=False):
+                self._invalidate()
+                return
             if self._should_handle_history():
                 buffer.auto_down(count=1)
 
         @bindings.add("escape", filter=normal_mode)
-        def _clear_active_or_refocus(event) -> None:
+        def _esc(event) -> None:
             buffer = event.current_buffer
+            now = time.monotonic()
             if buffer.complete_state is not None:
                 buffer.cancel_completion()
+                self._esc_press_count = 0
+                self._esc_last_pressed_at = now
+                return
+
+            if now - self._esc_last_pressed_at > self._esc_clear_window_seconds:
+                self._esc_press_count = 0
+            self._esc_press_count += 1
+            self._esc_last_pressed_at = now
+
+            if self._esc_press_count >= 2:
+                self._esc_press_count = 0
+                self._clear_input_area()
+                self._invalidate()
                 return
             if self._app is not None:
                 self._app.layout.focus(self._input_area.window)
@@ -625,7 +760,19 @@ class TerminalAgentTUI:
                 self._renderer.append_system_message("已发送中断信号。再次按 Ctrl+C 将强制中断。")
                 self._refresh_layers()
                 return
-            self._exit_app()
+            now = time.monotonic()
+            if now - self._ctrl_c_last_pressed_at > self._ctrl_c_exit_window_seconds:
+                self._ctrl_c_press_count = 0
+            self._ctrl_c_press_count += 1
+            self._ctrl_c_last_pressed_at = now
+
+            if self._ctrl_c_press_count >= 2:
+                self._ctrl_c_press_count = 0
+                self._exit_app()
+                return
+
+            self._clear_input_area()
+            self._invalidate()
 
         @bindings.add("c-d")
         def _exit(event) -> None:
@@ -764,6 +911,105 @@ class TerminalAgentTUI:
 
         self._drain_history_sync()
 
+    def _clear_input_area(self) -> None:
+        self._pasted_payload = None
+        self._paste_placeholder_text = None
+        self._last_input_len = 0
+
+        buffer = self._input_area.buffer
+        buffer.cancel_completion()
+        self._suppress_input_change_hook = True
+        try:
+            buffer.set_document(Document("", cursor_position=0), bypass_readonly=True)
+        finally:
+            self._suppress_input_change_hook = False
+
+    def _resolve_submit_texts(self, raw_text: str) -> tuple[str, str]:
+        stripped = raw_text.strip()
+        if (
+            self._pasted_payload is not None
+            and self._paste_placeholder_text is not None
+            and stripped == self._paste_placeholder_text
+        ):
+            return self._paste_placeholder_text, self._pasted_payload
+        return stripped, stripped
+
+    def _handle_large_paste(self, buffer: Any) -> bool:
+        if self._suppress_input_change_hook:
+            return False
+        if self._busy:
+            return False
+
+        text = str(buffer.text)
+        new_len = len(text)
+        delta = new_len - self._last_input_len
+        self._last_input_len = new_len
+
+        if self._paste_placeholder_text and text == self._paste_placeholder_text:
+            return False
+
+        if self._pasted_payload is not None and self._paste_placeholder_text is not None:
+            if text != self._paste_placeholder_text:
+                self._pasted_payload = None
+                self._paste_placeholder_text = None
+            return False
+
+        threshold = max(1, int(self._paste_threshold_chars))
+        looks_like_paste = new_len >= threshold and delta >= threshold
+        if not looks_like_paste:
+            return False
+
+        self._pasted_payload = text
+        placeholder = f"[Pasted Content {new_len} chars]"
+        self._paste_placeholder_text = placeholder
+
+        self._suppress_input_change_hook = True
+        try:
+            buffer.cancel_completion()
+            buffer.set_document(
+                Document(placeholder, cursor_position=len(placeholder)),
+                bypass_readonly=True,
+            )
+            self._last_input_len = len(placeholder)
+        finally:
+            self._suppress_input_change_hook = False
+
+        self._invalidate()
+        return True
+
+    def _move_cursor_visual(self, buffer: Any, *, backward: bool) -> bool:
+        text = str(buffer.text)
+        if not text:
+            return False
+
+        width = self._terminal_width()
+        max_cols = max(1, width - self._input_prompt_width)
+        ranges = _compute_visual_line_ranges(text, max_cols=max_cols)
+        if len(ranges) <= 1:
+            return False
+
+        cursor_index = int(buffer.cursor_position)
+        starts = [start for start, _end in ranges]
+        row = max(0, bisect_right(starts, cursor_index) - 1)
+        row_start, row_end = ranges[row]
+
+        current_col = _visual_col_for_index(
+            text,
+            row_start,
+            row_end,
+            max_cols,
+            cursor_index,
+        )
+
+        target_row = row - 1 if backward else row + 1
+        if target_row < 0 or target_row >= len(ranges):
+            return False
+
+        target_start, target_end = ranges[target_row]
+        target_index = _index_for_visual_col(text, target_start, target_end, max_cols, current_col)
+        buffer.cursor_position = target_index
+        return True
+
     def _submit_from_input(self) -> None:
         if self._busy:
             return
@@ -771,20 +1017,20 @@ class TerminalAgentTUI:
             return
 
         raw_text = self._input_area.text
-        text = raw_text.strip()
-        if not text:
+        display_text, submit_text = self._resolve_submit_texts(raw_text)
+        if not submit_text.strip():
             return
 
         if self._input_area.buffer.complete_state is not None:
             self._input_area.buffer.cancel_completion()
-        self._input_area.buffer.document = Document("")
-        if text.startswith("/"):
-            self._schedule_background(self._execute_command(text))
+        self._clear_input_area()
+        if display_text.lstrip().startswith("/"):
+            self._schedule_background(self._execute_command(display_text.strip()))
             return
 
-        self._schedule_background(self._submit_user_message(text))
+        self._schedule_background(self._submit_user_message(submit_text, display_text=display_text))
 
-    async def _submit_user_message(self, text: str) -> None:
+    async def _submit_user_message(self, text: str, *, display_text: str | None = None) -> None:
         if self._busy:
             self._renderer.append_system_message("当前已有任务在运行，请稍候。", is_error=True)
             return
@@ -800,7 +1046,7 @@ class TerminalAgentTUI:
         self._pending_questions = None
 
         self._renderer.start_turn()
-        self._renderer.seed_user_message(text)
+        self._renderer.seed_user_message(display_text if display_text is not None else text)
         self._refresh_layers()
 
         # 启动提交动画
