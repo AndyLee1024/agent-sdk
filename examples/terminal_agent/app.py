@@ -49,6 +49,8 @@ from terminal_agent.markdown_render import render_markdown_to_plain
 from terminal_agent.mention_completer import LocalFileMentionCompleter
 from terminal_agent.models import HistoryEntry, LoadingStateType
 from terminal_agent.question_view import AskUserQuestionUI, QuestionAction
+from terminal_agent.selection_menu import SelectionMenuUI, SelectionResult, create_model_level_menu
+from comate_agent_sdk.agent.llm_levels import LLMLevel, ALL_LEVELS
 from terminal_agent.rpc_stdio import StdioRPCBridge
 from terminal_agent.status_bar import StatusBar
 
@@ -186,6 +188,7 @@ def _parse_slash_command_call(user_input: str) -> _SlashCommandCall | None:
 
 SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec(name="help", description="Show available slash commands", aliases=("h",)),
+    SlashCommandSpec(name="model", description="Switch model level (LOW/MID/HIGH)", aliases=("m",)),
     SlashCommandSpec(name="session", description="Show current session ID"),
     SlashCommandSpec(name="usage", description="Show token usage summary"),
     SlashCommandSpec(name="context", description="Show context usage summary"),
@@ -377,6 +380,7 @@ def _sweep_gradient_fragments(content: str, frame: int) -> list[tuple[str, str]]
 class UIMode(Enum):
     NORMAL = "normal"
     QUESTION = "question"
+    SELECTION = "selection"  # 通用选择菜单模式（如模型切换）
 
 
 class TerminalAgentTUI:
@@ -404,6 +408,7 @@ class TerminalAgentTUI:
                 self._slash_lookup[alias] = spec
         self._slash_handlers: dict[str, Callable[[str], Any]] = {
             "help": self._slash_help,
+            "model": self._slash_model,
             "session": self._slash_session,
             "usage": self._slash_usage,
             "context": self._slash_context,
@@ -479,6 +484,7 @@ class TerminalAgentTUI:
                 self._input_area.buffer.start_completion(select_first=False)
 
         self._question_ui = AskUserQuestionUI()
+        self._selection_ui = SelectionMenuUI()
         self._loading_control = FormattedTextControl(text=self._loading_text)
         self._status_control = FormattedTextControl(text=self._status_text)
 
@@ -523,6 +529,10 @@ class TerminalAgentTUI:
             content=self._question_ui.container,
             filter=Condition(lambda: self._ui_mode == UIMode.QUESTION),
         )
+        self._selection_container = ConditionalContainer(
+            content=self._selection_ui.container,
+            filter=Condition(lambda: self._ui_mode == UIMode.SELECTION),
+        )
 
         self._main_container = HSplit(
             [
@@ -530,6 +540,7 @@ class TerminalAgentTUI:
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
                 self._question_container,
+                self._selection_container,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._bottom_container,
             ]
@@ -569,6 +580,14 @@ class TerminalAgentTUI:
                 "question.preview.title": "fg:#e2e8f0 bold",
                 "question.preview.question": "fg:#bfdbfe",
                 "question.preview.answer": "fg:#f1f5f9",
+                "selection.title": "bg:#2d3138 #c3ccd8 bold",
+                "selection.divider": "fg:#4b5563",
+                "selection.body": "bg:#252a33 #d8dee9",
+                "selection.option": "fg:#dbeafe",
+                "selection.option.selected": "bg:#1e3a8a #f8fafc bold",
+                "selection.description": "fg:#9ca3af",
+                "selection.description.selected": "fg:#93c5fd",
+                "selection.hint": "fg:#94a3b8",
                 "completion-menu": "bg:#2d3441 #d8dee9",
                 "completion-menu.completion.current": "bg:#5e81ac #eceff4",
                 "completion-menu.meta.completion": "bg:#2d3441 #81a1c1",
@@ -594,6 +613,46 @@ class TerminalAgentTUI:
         bindings = KeyBindings()
         normal_mode = Condition(lambda: self._ui_mode == UIMode.NORMAL)
         question_mode = Condition(lambda: self._ui_mode == UIMode.QUESTION)
+        selection_mode = Condition(lambda: self._ui_mode == UIMode.SELECTION)
+
+        # Selection menu key bindings
+        @bindings.add("enter", filter=selection_mode)
+        def _selection_enter(event) -> None:
+            del event
+            result = self._selection_ui.confirm()
+            self._handle_selection_result(result)
+            self._invalidate()
+
+        @bindings.add("up", filter=selection_mode)
+        def _selection_up(event) -> None:
+            del event
+            self._selection_ui.move_selection(-1)
+            self._invalidate()
+
+        @bindings.add("down", filter=selection_mode)
+        def _selection_down(event) -> None:
+            del event
+            self._selection_ui.move_selection(1)
+            self._invalidate()
+
+        @bindings.add("k", filter=selection_mode)
+        def _selection_k(event) -> None:
+            del event
+            self._selection_ui.move_selection(-1)
+            self._invalidate()
+
+        @bindings.add("j", filter=selection_mode)
+        def _selection_j(event) -> None:
+            del event
+            self._selection_ui.move_selection(1)
+            self._invalidate()
+
+        @bindings.add("escape", filter=selection_mode)
+        def _selection_cancel(event) -> None:
+            del event
+            result = self._selection_ui.cancel()
+            self._handle_selection_result(result)
+            self._invalidate()
 
         @bindings.add("enter", filter=question_mode)
         def _question_enter(event) -> None:
@@ -858,6 +917,9 @@ class TerminalAgentTUI:
             return
         if self._ui_mode == UIMode.QUESTION:
             self._app.layout.focus(self._question_ui.focus_target())
+            return
+        if self._ui_mode == UIMode.SELECTION:
+            self._app.layout.focus(self._selection_ui.focus_target())
             return
         self._app.layout.focus(self._input_area.window)
 
@@ -1164,6 +1226,145 @@ class TerminalAgentTUI:
 
     def _slash_exit(self, _args: str) -> None:
         self._exit_app()
+
+    def _slash_model(self, args: str) -> None:
+        """Handle /model command - switch model level."""
+        # If args provided, try to use it directly
+        if args.strip():
+            level = args.strip().upper()
+            if level in ALL_LEVELS:
+                self._switch_model_level(level)
+                return
+            # Invalid level, show error and open menu
+            self._renderer.append_system_message(
+                f"Invalid model level: {args.strip()}. Use LOW, MID, or HIGH.",
+                is_error=True,
+            )
+
+        # Open selection menu
+        self._enter_selection_mode()
+
+    def _switch_model_level(self, level: str) -> None:
+        """Switch to the specified model level."""
+        try:
+            from comate_agent_sdk.agent.llm_levels import LLMLevel
+
+            llm_level = level  # type: ignore[assignment]
+            event = self._session.set_level(llm_level)
+
+            # Get model names for display
+            prev_model = event.previous_model or "unknown"
+            new_model = event.new_model or "unknown"
+
+            self._renderer.append_system_message(
+                f"Model switched: {event.previous_level} → {event.new_level}\n"
+                f"  ({prev_model} → {new_model})"
+            )
+            logger.info(f"Model level switched: {event}")
+
+            # Update status bar model name
+            self._update_status_bar_model()
+        except Exception as e:
+            logger.exception("Failed to switch model level")
+            self._renderer.append_system_message(
+                f"Failed to switch model: {e}",
+                is_error=True,
+            )
+
+    def _update_status_bar_model(self) -> None:
+        """Update status bar with current model name from session."""
+        try:
+            agent = getattr(self._session, "_agent", None)
+            llm = getattr(agent, "llm", None)
+            model = getattr(llm, "model", "")
+            if model:
+                self._status_bar._model_name = str(model).strip() or "unknown-model"
+                self._invalidate()
+        except Exception:
+            logger.exception("Failed to update status bar model name")
+
+    def _enter_selection_mode(self) -> None:
+        """Enter model selection menu mode."""
+        # Get current level and llm_levels
+        # Default to MID if level is not set
+        current_level = "MID"
+        llm_levels = None
+        try:
+            agent_level = self._session._agent.level
+            if agent_level:
+                current_level = agent_level
+            llm_levels = self._session._agent.llm_levels
+        except Exception:
+            pass
+
+        # Setup selection menu
+        def on_confirm(value: str) -> None:
+            self._exit_selection_mode()
+            self._switch_model_level(value)
+            self._refresh_layers()
+
+        def on_cancel() -> None:
+            self._exit_selection_mode()
+            self._renderer.append_system_message("Model switch cancelled.")
+            self._refresh_layers()
+
+        # Create and configure the menu
+        ui = create_model_level_menu(
+            current_level=current_level,
+            llm_levels=llm_levels,
+            on_confirm=on_confirm,
+            on_cancel=on_cancel,
+        )
+
+        # Replace the selection UI
+        self._selection_ui = ui
+
+        # Update container to use new UI
+        self._selection_container = ConditionalContainer(
+            content=self._selection_ui.container,
+            filter=Condition(lambda: self._ui_mode == UIMode.SELECTION),
+        )
+
+        # Rebuild main container with new selection container
+        self._main_container = HSplit(
+            [
+                self._loading_window,
+                Window(height=1, char=" ", style="class:input.pad"),
+                self._input_container,
+                self._question_container,
+                self._selection_container,
+                Window(height=1, char=" ", style="class:input.pad"),
+                self._bottom_container,
+            ]
+        )
+
+        # Update root
+        self._root.content = self._main_container
+
+        # Enter selection mode
+        self._ui_mode = UIMode.SELECTION
+        self._sync_focus_for_mode()
+        self._invalidate()
+
+    def _exit_selection_mode(self) -> None:
+        """Exit selection menu mode."""
+        self._ui_mode = UIMode.NORMAL
+        self._selection_ui.clear()
+        self._sync_focus_for_mode()
+        self._invalidate()
+
+    def _handle_selection_result(self, result: SelectionResult | None) -> None:
+        """Handle selection result."""
+        if result is None:
+            return
+
+        if not result.confirmed:
+            self._exit_selection_mode()
+            self._renderer.append_system_message("Model switch cancelled.")
+            return
+
+        # The callback handles the actual switch
+        self._exit_selection_mode()
 
     async def _append_usage_snapshot(self) -> None:
         usage = await self._session.get_usage()
