@@ -172,10 +172,13 @@ class TerminalAgentTUI:
             "AGENT_SDK_TUI_PASTE_PLACEHOLDER_THRESHOLD_CHARS",
             500,
         )
-        self._pasted_payload: str | None = None
         self._paste_placeholder_text: str | None = None
+        self._active_paste_token: str | None = None
+        self._paste_payload_by_token: dict[str, str] = {}
+        self._paste_token_seq = 0
         self._suppress_input_change_hook = False
         self._last_input_len = 0
+        self._last_input_text = ""
 
         self._input_prompt_text = "> "
         self._input_prompt_width = max(1, get_cwidth(self._input_prompt_text))
@@ -765,9 +768,9 @@ class TerminalAgentTUI:
         return ""
 
     def _clear_input_area(self) -> None:
-        self._pasted_payload = None
-        self._paste_placeholder_text = None
+        self._clear_paste_state()
         self._last_input_len = 0
+        self._last_input_text = ""
 
         buffer = self._input_area.buffer
         buffer.cancel_completion()
@@ -777,14 +780,57 @@ class TerminalAgentTUI:
         finally:
             self._suppress_input_change_hook = False
 
+    def _next_paste_token(self) -> str:
+        self._paste_token_seq += 1
+        return f"paste_{self._paste_token_seq}"
+
+    def _clear_paste_state(self) -> None:
+        self._active_paste_token = None
+        self._paste_placeholder_text = None
+        self._paste_payload_by_token.clear()
+
+    @staticmethod
+    def _find_inserted_segment(
+        previous_text: str,
+        current_text: str,
+    ) -> tuple[int, int, str] | None:
+        if len(current_text) <= len(previous_text):
+            return None
+
+        prefix = 0
+        max_prefix = min(len(previous_text), len(current_text))
+        while (
+            prefix < max_prefix
+            and previous_text[prefix] == current_text[prefix]
+        ):
+            prefix += 1
+
+        previous_remaining = len(previous_text) - prefix
+        current_remaining = len(current_text) - prefix
+        suffix = 0
+        max_suffix = min(previous_remaining, current_remaining)
+        while (
+            suffix < max_suffix
+            and previous_text[len(previous_text) - 1 - suffix]
+            == current_text[len(current_text) - 1 - suffix]
+        ):
+            suffix += 1
+
+        start = prefix
+        end = len(current_text) - suffix
+        if end <= start:
+            return None
+        return start, end, current_text[start:end]
+
     def _resolve_submit_texts(self, raw_text: str) -> tuple[str, str]:
         stripped = raw_text.strip()
-        if (
-            self._pasted_payload is not None
-            and self._paste_placeholder_text is not None
-            and stripped == self._paste_placeholder_text
-        ):
-            return self._paste_placeholder_text, self._pasted_payload
+        token = self._active_paste_token
+        placeholder = self._paste_placeholder_text
+        if token is not None and placeholder is not None and placeholder in raw_text:
+            payload = self._paste_payload_by_token.get(token)
+            if payload is not None:
+                submit_text = raw_text.replace(placeholder, payload, 1).strip()
+                return stripped, submit_text
         return stripped, stripped
 
     def _handle_large_paste(self, buffer: Any) -> bool:
@@ -794,39 +840,41 @@ class TerminalAgentTUI:
             return False
 
         text = str(buffer.text)
-        new_len = len(text)
-        delta = new_len - self._last_input_len
-        self._last_input_len = new_len
+        previous_text = self._last_input_text
+        self._last_input_len = len(text)
+        self._last_input_text = text
 
-        if self._paste_placeholder_text and text == self._paste_placeholder_text:
+        placeholder = self._paste_placeholder_text
+        if self._active_paste_token is not None and placeholder and placeholder in text:
             return False
 
-        if (
-            self._pasted_payload is not None
-            and self._paste_placeholder_text is not None
-        ):
-            if text != self._paste_placeholder_text:
-                self._pasted_payload = None
-                self._paste_placeholder_text = None
-            return False
+        if self._active_paste_token is not None and self._paste_placeholder_text is not None:
+            self._clear_paste_state()
 
         threshold = max(1, int(self._paste_threshold_chars))
-        looks_like_paste = new_len >= threshold and delta >= threshold
-        if not looks_like_paste:
+        segment = self._find_inserted_segment(previous_text, text)
+        if segment is None:
+            return False
+        start, end, inserted_text = segment
+        if len(inserted_text) < threshold:
             return False
 
-        self._pasted_payload = text
-        placeholder = f"[Pasted Content {new_len} chars]"
+        token = self._next_paste_token()
+        self._active_paste_token = token
+        self._paste_payload_by_token[token] = inserted_text
+        placeholder = f"[Pasted Content {len(inserted_text)} chars]"
         self._paste_placeholder_text = placeholder
+        replaced_text = f"{text[:start]}{placeholder}{text[end:]}"
 
         self._suppress_input_change_hook = True
         try:
             buffer.cancel_completion()
             buffer.set_document(
-                Document(placeholder, cursor_position=len(placeholder)),
+                Document(replaced_text, cursor_position=start + len(placeholder)),
                 bypass_readonly=True,
             )
-            self._last_input_len = len(placeholder)
+            self._last_input_len = len(replaced_text)
+            self._last_input_text = replaced_text
         finally:
             self._suppress_input_change_hook = False
 
