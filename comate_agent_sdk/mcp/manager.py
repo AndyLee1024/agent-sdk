@@ -62,6 +62,7 @@ class McpManager:
         self._sessions: dict[str, ClientSession] = {}
         self._tool_info_by_mapped: dict[str, McpToolInfo] = {}
         self._tools: list[Tool] = []
+        self._failed_servers: list[tuple[str, str]] = []
         self._lifecycle_task: asyncio.Task[None] | None = None
         self._shutdown_event: asyncio.Event = asyncio.Event()
         self._init_done: asyncio.Future[None] | None = None
@@ -74,6 +75,46 @@ class McpManager:
     @property
     def tool_infos(self) -> list[McpToolInfo]:
         return list(self._tool_info_by_mapped.values())
+
+    @property
+    def failed_servers(self) -> list[tuple[str, str]]:
+        """Return list of (alias, friendly_reason) for servers that failed to connect."""
+        return list(self._failed_servers)
+
+    @staticmethod
+    def _friendly_error_message(alias: str, cfg: McpServerConfig, exc: Exception) -> str:
+        """Classify common MCP connection exceptions into actionable English hints."""
+        msg = str(exc)
+
+        # None header value — typically an unset env var
+        if "Header value" in msg and "NoneType" in msg:
+            # Try to identify which header key is None
+            headers = cfg.get("headers") or {}  # type: ignore[attr-defined]
+            null_keys = [k for k, v in headers.items() if v is None] if isinstance(headers, dict) else []
+            if null_keys:
+                return f"header contains null value for {null_keys}, check related env vars"
+            return "header contains null value (likely unset env var), check config"
+
+        # Connection refused / connect error
+        exc_name = type(exc).__name__
+        if exc_name in ("ConnectionRefusedError", "ConnectError") or "Connection refused" in msg:
+            return "cannot connect to server, verify URL and server status"
+
+        # Timeout
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or "timeout" in msg.lower():
+            return "connection timed out, check network or server availability"
+
+        # stdio command not found
+        if isinstance(exc, FileNotFoundError):
+            command = cfg.get("command", "")  # type: ignore[attr-defined]
+            return f"command '{command}' not found, verify it is installed and in PATH"
+
+        # ValueError from our own validation (already friendly)
+        if isinstance(exc, ValueError):
+            return msg
+
+        # Fallback: type + message
+        return f"{exc_name}: {msg}"
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
@@ -99,7 +140,7 @@ class McpManager:
         try:
             await asyncio.wait_for(asyncio.shield(init_done), timeout=_START_TIMEOUT_S)
         except asyncio.TimeoutError:
-            logger.error(f"MCP manager 初始化超时（{_START_TIMEOUT_S:.1f}s）")
+            logger.error(f"MCP manager init timed out ({_START_TIMEOUT_S:.1f}s)")
             await self.aclose()
             raise
         except Exception:
@@ -116,14 +157,14 @@ class McpManager:
         try:
             await asyncio.wait_for(lifecycle_task, timeout=_SHUTDOWN_TIMEOUT_S)
         except asyncio.TimeoutError:
-            logger.warning(f"MCP lifecycle task 清理超时（{_SHUTDOWN_TIMEOUT_S:.1f}s），强制取消")
+            logger.warning(f"MCP lifecycle task cleanup timed out ({_SHUTDOWN_TIMEOUT_S:.1f}s), force cancelling")
             lifecycle_task.cancel()
             try:
                 await lifecycle_task
             except asyncio.CancelledError:
                 pass
         except Exception as e:
-            logger.error(f"MCP lifecycle task 异常: {e}", exc_info=True)
+            logger.error(f"MCP lifecycle task error: {e}", exc_info=True)
         finally:
             async with self._lifecycle_lock:
                 if self._lifecycle_task is lifecycle_task:
@@ -278,7 +319,7 @@ class McpManager:
         return "\n".join(texts).strip()
 
     async def _run_lifecycle(self) -> None:
-        """生命周期管理 task：确保 exit stack 在同一 task 中创建和清理。"""
+        """Lifecycle management task: ensure exit stack is created and cleaned up in the same task."""
         init_done = self._init_done
         self._exit_stack = AsyncExitStack()
 
@@ -311,21 +352,24 @@ class McpManager:
                         self._tool_info_by_mapped[mapped] = info
 
                     success_servers.append(alias)
-                    logger.info(f"已加载 MCP server={alias} tools={len(tool_list)}")
+                    logger.info(f"MCP server loaded: {alias} ({len(tool_list)} tools)")
                 except Exception as e:
-                    failed_servers.append((alias, str(e)))
-                    logger.warning(f"MCP server 连接/加载失败，已跳过：{alias}：{e}")
+                    friendly = self._friendly_error_message(alias, cfg, e)
+                    failed_servers.append((alias, friendly))
+                    logger.warning(f"MCP server skipped: {alias}: {friendly}")
+                    logger.debug(f"MCP server '{alias}' raw error", exc_info=True)
+
+            self._failed_servers = list(failed_servers)
 
             self._tools = [
                 self._build_tool(mapped, info)
                 for mapped, info in self._tool_info_by_mapped.items()
             ]
 
-            # 检查配置了 server 但没有加载到工具的情况
             if self._servers and not self._tools:
                 logger.warning(
-                    f"MCP 配置了 {len(self._servers)} 个 server，但没有加载到任何工具。"
-                    f"成功: {success_servers}, 失败: {failed_servers}"
+                    f"MCP configured {len(self._servers)} server(s) but no tools were loaded. "
+                    f"succeeded: {success_servers}, failed: {failed_servers}"
                 )
 
             if init_done is not None and not init_done.done():
@@ -335,7 +379,7 @@ class McpManager:
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            logger.error(f"MCP lifecycle task 异常: {e}", exc_info=True)
+            logger.error(f"MCP lifecycle task error: {e}", exc_info=True)
             if init_done is not None and not init_done.done():
                 init_done.set_exception(e)
             raise
@@ -344,7 +388,7 @@ class McpManager:
                 try:
                     await self._exit_stack.aclose()
                 except Exception as e:
-                    logger.error(f"清理 MCP exit_stack 失败: {e}", exc_info=True)
+                    logger.error(f"Failed to cleanup MCP exit_stack: {e}", exc_info=True)
                 finally:
                     self._exit_stack = None
 

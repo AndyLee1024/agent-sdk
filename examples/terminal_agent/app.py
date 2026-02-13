@@ -22,6 +22,7 @@ from terminal_agent.tui import TerminalAgentTUI
 console = Console()
 logger = logging.getLogger(__name__)
 logging.getLogger("comate_agent_sdk.system_tools.tools").setLevel(logging.ERROR)
+logging.getLogger("comate_agent_sdk.mcp.manager").setLevel(logging.ERROR)
 
 
 @tool("Add two numbers 涉及到加法运算 必须使用这个工具")
@@ -72,6 +73,30 @@ def _resolve_session(agent: Agent, session_id: str | None) -> tuple[ChatSession,
     return ChatSession(agent), "new"
 
 
+async def _preload_mcp(session: ChatSession, con: Console) -> None:
+    """Pre-load MCP tools and print connection status under the logo."""
+    from terminal_agent.startup import print_error, print_success, print_warning
+
+    try:
+        await session._agent.ensure_mcp_tools_loaded()
+    except Exception as e:
+        print_error(con, f"MCP initialization failed: {e}")
+        return
+
+    mgr = session._agent._mcp_manager
+    if mgr is None:
+        return
+
+    for alias, reason in mgr.failed_servers:
+        print_warning(con, f"MCP server '{alias}' skipped: {reason}")
+
+    loaded = mgr.tool_infos
+    if loaded:
+        count = len(loaded)
+        aliases = sorted({i.server_alias for i in loaded})
+        print_success(con, f"MCP loaded: {', '.join(aliases)} ({count} tools)")
+
+
 async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None:
     agent = _build_agent()
     session, mode = _resolve_session(agent, session_id)
@@ -85,6 +110,7 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
         return
 
     print_logo(console)
+    await _preload_mcp(session, console)
     status_bar = StatusBar(session)
     if mode == "resume":
         await status_bar.refresh()
