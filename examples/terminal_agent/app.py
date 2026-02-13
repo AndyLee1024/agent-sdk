@@ -30,6 +30,8 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.widgets import TextArea
+from prompt_toolkit.filters import has_completions, has_focus
+from prompt_toolkit.layout.containers import ConditionalContainer
 from rich.console import Console
 from rich.text import Text
 
@@ -38,6 +40,7 @@ from comate_agent_sdk.agent import AgentConfig, ChatSession
 from comate_agent_sdk.context import EnvOptions
 from comate_agent_sdk.context.items import ItemType
 from comate_agent_sdk.tools import tool
+
 
 from terminal_agent.animations import StreamAnimationController, SubmissionAnimator
 from terminal_agent.event_renderer import EventRenderer
@@ -137,8 +140,11 @@ class _SlashCommandCompleter(Completer):
             return
 
         typed = token[1:]
-        if typed and typed in self._command_lookup:
-            return
+        if typed:
+            commands = self._command_lookup.get(typed, [])
+            # 只有当 typed 本身就是某个命令 name 时才早退
+            if any(cmd.name == typed for cmd in commands):
+                return
 
         typed_doc = Document(text=typed, cursor_position=len(typed))
         candidates = list(self._fuzzy.get_completions(typed_doc, complete_event))
@@ -206,13 +212,35 @@ def _extract_assistant_text(item: Any) -> str:
     return ""
 
 
+from prompt_toolkit.utils import get_cwidth
+
+# 单字符省略号，节省显示宽度
+_ELLIPSIS = "…"
+
+
 def _fit_single_line(content: str, width: int) -> str:
-    normalized = max(width, 8)
-    if len(content) <= normalized:
+    """根据终端显示宽度截断字符串，正确处理中文/emoji 等宽字符."""
+    max_width = max(width, 8)
+    if get_cwidth(content) <= max_width:
         return content
-    if normalized <= 3:
-        return content[:normalized]
-    return f"{content[: normalized - 3]}..."
+    if max_width <= 1:
+        # 宽度太小，直接返回省略号
+        return _ELLIPSIS
+
+    # 逐字符累加显示宽度，直到达到限制
+    result: list[str] = []
+    used_width = 0
+    ellipsis_width = get_cwidth(_ELLIPSIS)
+    target_width = max_width - ellipsis_width  # 预留省略号的空间
+
+    for char in content:
+        char_width = get_cwidth(char)
+        if used_width + char_width > target_width:
+            break
+        result.append(char)
+        used_width += char_width
+
+    return "".join(result) + _ELLIPSIS
 
 
 def _lerp_rgb(
@@ -307,34 +335,26 @@ class TerminalAgentTUI:
         self._interrupt_requested_at: float | None = None
         self._interrupt_force_window_seconds = 1.5
 
-        # 历史显示区域（可滚动）
-        self._history_area = TextArea(
-            text="",
-            multiline=True,
-            scrollbar=False,
-            read_only=True,
-            wrap_lines=True,
-            style="class:history",
-            focusable=False,
-        )
-
         self._input_area = TextArea(
             text="",
             multiline=False,
             prompt="> ",
             wrap_lines=False,
             completer=self._input_completer,
-            complete_while_typing=True,
+            complete_while_typing=False,  # 通过 Tab/上下键手动触发补全
             history=InMemoryHistory(),
             read_only=self._input_read_only,
             style="class:input.line",
         )
+
         @self._input_area.buffer.on_text_changed.add_handler
-        def _trigger_completion(buffer) -> None:
+        def _trigger_completion(_buffer) -> None:
             if self._busy:
                 return
-            if buffer.complete_while_typing():
-                buffer.start_completion(select_first=False)
+            doc = self._input_area.buffer.document
+            if self._completion_context_active(doc.text_before_cursor, doc.text_after_cursor):
+                # 输入 / 或 @ 时自动弹出（不会选中第一项）
+                self._input_area.buffer.start_completion(select_first=False)
 
         self._question_ui = AskUserQuestionUI()
         self._loading_control = FormattedTextControl(text=self._loading_text)
@@ -352,6 +372,22 @@ class TerminalAgentTUI:
             dont_extend_height=True,
             style="class:status",
         )
+   
+
+        # 补全菜单是否可见：仅在 NORMAL + input 聚焦 + 有候选时
+        self._completion_visible = (
+            Condition(lambda: self._ui_mode == UIMode.NORMAL)
+            & has_focus(self._input_area)
+            & has_completions
+        )
+
+        # statusline：当补全菜单出现时隐藏
+        self._status_container = ConditionalContainer(
+            content=self._status_window,
+            filter=~self._completion_visible,
+        )
+
+
 
         self._input_container = ConditionalContainer(
             content=self._input_area,
@@ -364,24 +400,31 @@ class TerminalAgentTUI:
 
         self._main_container = HSplit(
             [
-                self._history_area,
                 self._loading_window,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
                 self._question_container,
                 Window(height=1, char=" ", style="class:input.pad"),
-                self._status_window,
+                self._status_container,   
             ]
         )
 
         self._root = FloatContainer(
             content=self._main_container,
             floats=[
-                Float(
-                    xcursor=True,
-                    ycursor=True,
-                    content=CompletionsMenu(max_height=12, scroll_offset=1),
-                ),
+               Float(
+                    left=0,
+                    right=0,
+                    bottom=0,  
+                    content=ConditionalContainer(
+                        content=CompletionsMenu(
+                            max_height=8,      
+                            scroll_offset=0,   
+                        ),
+                        filter=self._completion_visible,   
+                    ),
+                ) 
+
             ],
         )
 
@@ -499,19 +542,32 @@ class TerminalAgentTUI:
             self._invalidate()
 
         @bindings.add("enter", filter=normal_mode)
-        def _submit(event) -> None:
-            del event
-            if self._accept_active_completion():
-                return
+        def _enter(event) -> None:
+            buffer = event.current_buffer
+            cs = buffer.complete_state
+
+            # 菜单打开时：先把当前选中项写回输入框
+            if cs is not None and cs.completions:
+                completion = cs.current_completion or cs.completions[0]
+                buffer.apply_completion(completion)
+                buffer.cancel_completion()
+                return  # ✅ 不提交，留给下一次 Enter
+
+            # 没有菜单：正常提交
             self._submit_from_input()
 
+
         @bindings.add("tab", filter=normal_mode)
-        def _accept_candidate(event) -> None:
+        def _tab(event) -> None:
             buffer = event.current_buffer
-            complete_state = buffer.complete_state
-            if complete_state is not None and complete_state.completions:
-                self._accept_active_completion()
+            cs = buffer.complete_state
+            # Tab：如果有补全项 -> 接受当前项并关闭菜单
+            if cs is not None and cs.completions:
+                completion = cs.current_completion or cs.completions[0]
+                buffer.apply_completion(completion)
+                buffer.cancel_completion()
                 return
+            # 否则触发补全菜单
             buffer.start_completion(select_first=False)
 
         @bindings.add("s-tab", filter=normal_mode & has_completions)
@@ -709,18 +765,6 @@ class TerminalAgentTUI:
                 self._renderer.append_system_message("(tool call only message)")
 
         self._drain_history_sync()
-
-    def _accept_active_completion(self) -> bool:
-        buffer = self._input_area.buffer
-        complete_state = buffer.complete_state
-        if complete_state is None or not complete_state.completions:
-            return False
-
-        completion = complete_state.current_completion
-        if completion is None:
-            completion = complete_state.completions[0]
-        buffer.apply_completion(completion)
-        return True
 
     def _submit_from_input(self) -> None:
         if self._busy:
@@ -986,45 +1030,71 @@ class TerminalAgentTUI:
         if not entries:
             return
 
-        # 分离普通文本 entries 和 Rich renderable
+        from rich.console import Group
+
+        renderables: list[Any] = []
+
         for entry in entries:
             if hasattr(entry.text, "__rich_console__"):
-                # Rich Text 对象直接打印（带前缀）
+                # Rich Text 对象带前缀
                 prefix = self._entry_prefix(entry)
                 prefixed = Text(f"{prefix} ", style="bold")
                 prefixed.append_text(entry.text)
-                await run_in_terminal(lambda t=prefixed: console.print(t))
+                renderables.append(prefixed)
             else:
-                # 普通文本按原来的方式处理
+                # 普通文本格式化
                 prefix = self._entry_prefix(entry)
                 content = self._entry_content(entry)
                 content_lines = content.splitlines() or [""]
                 lines = [f"{prefix} {content_lines[0]}"]
                 for line in content_lines[1:]:
                     lines.append(f"  {line}")
-                await run_in_terminal(lambda l="\n".join(lines): console.print(l))
+                renderables.append("\n".join(lines))
+
+            # 条目之间空行分隔
+            renderables.append(Text(""))
+
+        if not renderables:
+            return
+
+        # 批量输出，减少 run_in_terminal 调用次数
+        group = Group(*renderables)
+        await run_in_terminal(lambda g=group: console.print(g))
 
     def _print_history_entries_sync(self, entries: list[HistoryEntry]) -> None:
         if not entries:
             return
 
-        # 分离普通文本 entries 和 Rich renderable
+        from rich.console import Group
+
+        renderables: list[Any] = []
+
         for entry in entries:
             if hasattr(entry.text, "__rich_console__"):
-                # Rich Text 对象直接打印（带前缀）
+                # Rich Text 对象带前缀
                 prefix = self._entry_prefix(entry)
                 prefixed = Text(f"{prefix} ", style="bold")
                 prefixed.append_text(entry.text)
-                console.print(prefixed)
+                renderables.append(prefixed)
             else:
-                # 普通文本按原来的方式处理
+                # 普通文本格式化
                 prefix = self._entry_prefix(entry)
                 content = self._entry_content(entry)
                 content_lines = content.splitlines() or [""]
                 lines = [f"{prefix} {content_lines[0]}"]
                 for line in content_lines[1:]:
                     lines.append(f"  {line}")
-                console.print("\n".join(lines))
+                renderables.append("\n".join(lines))
+
+            # 条目之间空行分隔
+            renderables.append(Text(""))
+
+        if not renderables:
+            return
+
+        # 批量输出
+        group = Group(*renderables)
+        console.print(group)
 
     async def _ui_tick(self) -> None:
         try:
@@ -1049,7 +1119,10 @@ class TerminalAgentTUI:
                 if self._render_dirty:
                     self._invalidate()
                     self._render_dirty = False
-                await asyncio.sleep(1 / 12)
+
+                # 动态帧率：busy/动画时 12fps，idle 时 4fps
+                sleep_s = 1 / 12 if self._busy or self._animator.is_active else 1 / 4
+                await asyncio.sleep(sleep_s)
         except asyncio.CancelledError:
             return
 
@@ -1129,15 +1202,29 @@ class TerminalAgentTUI:
             parts.append("bold")
         if rich_style.italic:
             parts.append("italic")
-        if rich_style.color:
-            color = rich_style.color
-            if color.type.name == "TRUECOLOR":
-                # triplet.hex 已经包含 # 前缀
-                parts.append(color.triplet.hex)
-            elif color.type.name == "STANDARD":
-                parts.append(str(color.name).lower())
-            elif color.type.name == "EIGHT_BIT":
-                parts.append(f"ansibright{color.number}" if color.number >= 8 else f"ansi{color.number}")
+        if rich_style.underline:
+            parts.append("underline")
+        if rich_style.strike:
+            parts.append("strike")
+        if rich_style.dim:
+            parts.append("dim")
+
+        # 前景色
+        if rich_style.color and rich_style.color.triplet:
+            parts.append(f"fg:{rich_style.color.triplet.hex}")
+        elif rich_style.color and rich_style.color.type.name == "STANDARD":
+            parts.append(f"fg:ansi{rich_style.color.number}")
+        elif rich_style.color and rich_style.color.type.name == "EIGHT_BIT":
+            parts.append(f"fg:ansi{rich_style.color.number}")
+
+        # 背景色
+        if rich_style.bgcolor and rich_style.bgcolor.triplet:
+            parts.append(f"bg:{rich_style.bgcolor.triplet.hex}")
+        elif rich_style.bgcolor and rich_style.bgcolor.type.name == "STANDARD":
+            parts.append(f"bg:ansi{rich_style.bgcolor.number}")
+        elif rich_style.bgcolor and rich_style.bgcolor.type.name == "EIGHT_BIT":
+            parts.append(f"bg:ansi{rich_style.bgcolor.number}")
+
         return " ".join(parts) if parts else ""
 
     def _invalidate(self) -> None:
