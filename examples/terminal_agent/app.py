@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import re
+import random
 import sys
 import time
 from bisect import bisect_right
@@ -42,7 +43,7 @@ from comate_agent_sdk.context.items import ItemType
 from comate_agent_sdk.tools import tool
 
 
-from terminal_agent.animations import StreamAnimationController, SubmissionAnimator
+from terminal_agent.animations import DEFAULT_STATUS_PHRASES, StreamAnimationController, SubmissionAnimator
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.logo import print_logo
 from terminal_agent.markdown_render import render_markdown_to_plain
@@ -65,6 +66,21 @@ def _read_env_int(name: str, default: int) -> int:
         return default
     try:
         value = int(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
+        return default
+    if value <= 0:
+        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
+        return default
+    return value
+
+
+def _read_env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
     except ValueError:
         logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
         return default
@@ -418,10 +434,18 @@ class TerminalAgentTUI:
             "exit": self._slash_exit,
         }
         self._loading_frame = 0
+        self._tool_result_flash_seconds = _read_env_float(
+            "AGENT_SDK_TUI_TOOL_RESULT_FLASH_SECONDS",
+            0.55,
+        )
+        self._tool_result_flash_gen = 0
+        self._tool_result_flash_until_monotonic: float | None = None
+        self._tool_result_flash_active = False
 
         # 初始化提交动画控制器
         self._animator = SubmissionAnimator()
         self._animation_controller = StreamAnimationController(self._animator)
+        self._tool_result_animator = SubmissionAnimator()
 
         self._closing = False
         self._printed_history_index = 0
@@ -1178,9 +1202,11 @@ class TerminalAgentTUI:
         questions: list[dict[str, Any]] | None = None
 
         async for event in self._session.query_stream(text):
+            self._maybe_cancel_tool_result_flash(event)
             # 将事件传递给动画控制器以控制动画生命周期
             await self._animation_controller.on_event(event)
             is_waiting, new_questions = self._renderer.handle_event(event)
+            self._maybe_flash_tool_result(event)
             if is_waiting:
                 waiting_for_input = True
                 if new_questions is not None:
@@ -1190,6 +1216,58 @@ class TerminalAgentTUI:
         self._renderer.finalize_turn()
         await self._animation_controller.shutdown()
         return waiting_for_input, questions
+
+    def _maybe_cancel_tool_result_flash(self, event: object) -> None:
+        if not self._tool_result_flash_active:
+            return
+
+        from comate_agent_sdk.agent.events import StopEvent, TextEvent
+
+        if isinstance(event, TextEvent) or isinstance(event, StopEvent):
+            self._schedule_background(self._stop_tool_result_flash())
+
+    def _maybe_flash_tool_result(self, event: object) -> None:
+        from comate_agent_sdk.agent.events import ToolResultEvent
+
+        if not isinstance(event, ToolResultEvent):
+            return
+        tool_name = str(event.tool or "").strip()
+        if tool_name.lower() == "todowrite":
+            return
+        if self._renderer.has_running_tools():
+            return
+        self._trigger_tool_result_flash(tool_name=tool_name or "Tool", is_error=bool(event.is_error))
+
+    def _trigger_tool_result_flash(self, *, tool_name: str, is_error: bool) -> None:
+        del is_error, tool_name
+        phrase = random.choice(DEFAULT_STATUS_PHRASES) if DEFAULT_STATUS_PHRASES else "Vibing..."
+        duration_seconds = max(0.15, float(self._tool_result_flash_seconds))
+        self._tool_result_flash_gen += 1
+        self._tool_result_flash_active = True
+        self._tool_result_flash_until_monotonic = time.monotonic() + duration_seconds
+        gen = self._tool_result_flash_gen
+        self._schedule_background(self._start_tool_result_flash(gen=gen, hint=phrase))
+
+    async def _start_tool_result_flash(self, *, gen: int, hint: str) -> None:
+        if gen != self._tool_result_flash_gen:
+            return
+        await self._tool_result_animator.start()
+        if gen != self._tool_result_flash_gen:
+            return
+        self._tool_result_animator.set_status_hint(hint)
+        self._render_dirty = True
+        self._invalidate()
+
+    async def _stop_tool_result_flash(self) -> None:
+        if not self._tool_result_flash_active:
+            return
+        self._tool_result_flash_gen += 1
+        self._tool_result_flash_active = False
+        self._tool_result_flash_until_monotonic = None
+        self._tool_result_animator.set_status_hint(None)
+        await self._tool_result_animator.stop()
+        self._render_dirty = True
+        self._invalidate()
 
     def _schedule_background(self, coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)
@@ -1614,6 +1692,15 @@ class TerminalAgentTUI:
                 # 检查动画器是否需要刷新
                 if self._animator.consume_dirty():
                     self._render_dirty = True
+                if self._tool_result_animator.consume_dirty():
+                    self._render_dirty = True
+
+                if self._tool_result_flash_active:
+                    until = self._tool_result_flash_until_monotonic
+                    if until is None or time.monotonic() >= until:
+                        self._schedule_background(self._stop_tool_result_flash())
+                    else:
+                        self._render_dirty = True
 
                 loading_line = self._renderer.loading_line().strip()
                 loading_changed = loading_line != self._last_loading_line
@@ -1658,15 +1745,12 @@ class TerminalAgentTUI:
         return [("class:status", _fit_single_line(merged, width - 1))]
 
     def _loading_text(self) -> list[tuple[str, str]]:
-        # 优先使用动画器的渲染（流光走字 + 随机 geek 术语）
-        if self._animator.is_active:
-            renderable = self._animator.renderable()
-            return self._rich_text_to_pt_fragments(renderable)
-
         # Running tools: multi-line tool panel with breathing dot.
         if self._renderer.has_running_tools():
             width = self._terminal_width()
-            entries = self._renderer.tool_panel_entries(max_lines=self._tool_panel_max_lines)
+            show_flash_line = self._tool_result_flash_active and self._tool_panel_max_lines >= 2
+            tool_max = self._tool_panel_max_lines - 1 if show_flash_line else self._tool_panel_max_lines
+            entries = self._renderer.tool_panel_entries(max_lines=max(1, tool_max))
             if not entries:
                 return [("", " ")]
 
@@ -1676,6 +1760,11 @@ class TerminalAgentTUI:
             nested_style = "fg:#9CA3AF"
 
             fragments: list[tuple[str, str]] = []
+            if show_flash_line and self._tool_result_animator.is_active:
+                renderable = self._tool_result_animator.renderable()
+                fragments.extend(self._rich_text_to_pt_fragments(renderable))
+                fragments.append(("", "\n"))
+
             last_index = len(entries) - 1
             for idx, (indent, line) in enumerate(entries):
                 if indent < 0:
@@ -1696,6 +1785,15 @@ class TerminalAgentTUI:
 
             return fragments
 
+        # 优先使用动画器的渲染（流光走字 + 随机 geek 术语）
+        if self._tool_result_animator.is_active:
+            renderable = self._tool_result_animator.renderable()
+            return self._rich_text_to_pt_fragments(renderable)
+
+        if self._animator.is_active:
+            renderable = self._animator.renderable()
+            return self._rich_text_to_pt_fragments(renderable)
+
         # 获取语义化的 loading 状态
         loading_state = self._renderer.loading_state()
         text = loading_state.text.strip()
@@ -1712,8 +1810,13 @@ class TerminalAgentTUI:
         if self._animator.is_active:
             return 1
         if self._renderer.has_running_tools():
-            lines = self._renderer.tool_panel_entries(max_lines=self._tool_panel_max_lines)
-            return max(1, len(lines))
+            show_flash_line = self._tool_result_flash_active and self._tool_panel_max_lines >= 2
+            tool_max = self._tool_panel_max_lines - 1 if show_flash_line else self._tool_panel_max_lines
+            tool_lines = self._renderer.tool_panel_entries(max_lines=max(1, tool_max))
+            total = len(tool_lines) + (1 if show_flash_line else 0)
+            return max(1, total)
+        if self._tool_result_animator.is_active:
+            return 1
         if self._renderer.loading_state().text.strip():
             return 1
         return 1
