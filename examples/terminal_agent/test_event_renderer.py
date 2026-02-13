@@ -57,11 +57,10 @@ class TestEventRenderer(unittest.TestCase):
 
         entry_types = [entry.entry_type for entry in renderer.history_entries()]
         self.assertIn("user", entry_types)
-        self.assertIn("tool_call", entry_types)
         self.assertIn("tool_result", entry_types)
         self.assertIn("assistant", entry_types)
 
-    def test_loading_line_tracks_running_task(self) -> None:
+    def test_tool_panel_tracks_running_task_and_subagent(self) -> None:
         renderer = EventRenderer()
         renderer.start_turn()
         renderer.handle_event(
@@ -71,8 +70,9 @@ class TestEventRenderer(unittest.TestCase):
                 tool_call_id="tc_task_1",
             )
         )
-        self.assertIn("⏳", renderer.loading_line())
-        self.assertIn("拆解任务", renderer.loading_line())
+        entries = renderer.tool_panel_entries(max_lines=4)
+        self.assertTrue(entries)
+        self.assertTrue(any("拆解任务" in line for _, line in entries))
 
         renderer.handle_event(
             SubagentProgressEvent(
@@ -84,7 +84,9 @@ class TestEventRenderer(unittest.TestCase):
                 tokens=180,
             )
         )
-        self.assertIn("tok", renderer.loading_line())
+        entries = renderer.tool_panel_entries(max_lines=4)
+        self.assertTrue(any("tok" in line for _, line in entries))
+        self.assertTrue(any("|_ Planner running" in line for _, line in entries))
 
         renderer.handle_event(
             ToolResultEvent(
@@ -94,7 +96,7 @@ class TestEventRenderer(unittest.TestCase):
                 is_error=False,
             )
         )
-        self.assertEqual(renderer.loading_line(), "")
+        self.assertFalse(renderer.has_running_tools())
 
     def test_todo_lines_are_folded_to_six_lines(self) -> None:
         renderer = EventRenderer()
@@ -110,7 +112,7 @@ class TestEventRenderer(unittest.TestCase):
         todo_lines = renderer.todo_lines()
         self.assertTrue(todo_lines)
         self.assertLessEqual(len(todo_lines), 6)
-        self.assertIn("折叠", todo_lines[-1])
+        self.assertIn("…", todo_lines[-1])
 
     def test_task_tool_history_hides_prompt_and_prefix_icons(self) -> None:
         renderer = EventRenderer()
@@ -135,17 +137,57 @@ class TestEventRenderer(unittest.TestCase):
             )
         )
 
-        tool_call_entry = next(
-            entry for entry in renderer.history_entries() if entry.entry_type == "tool_call"
-        )
         tool_result_entry = next(
             entry for entry in renderer.history_entries() if entry.entry_type == "tool_result"
         )
 
-        self.assertEqual(tool_call_entry.text, "研究 kimi-cli-main 实现")
-        self.assertNotIn("prompt", tool_call_entry.text.lower())
-        self.assertFalse(tool_call_entry.text.startswith("→"))
+        self.assertIn("研究 kimi-cli-main 实现", tool_result_entry.text)
+        self.assertNotIn("prompt", tool_result_entry.text.lower())
         self.assertFalse(tool_result_entry.text.startswith("✓"))
+
+    def test_tool_result_includes_error_summary(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.handle_event(
+            ToolCallEvent(
+                tool="Read",
+                args={"path": "/tmp/a.py"},
+                tool_call_id="tc_err_1",
+            )
+        )
+        renderer.handle_event(
+            ToolResultEvent(
+                tool="Read",
+                result={"error": "boom"},
+                tool_call_id="tc_err_1",
+                is_error=True,
+            )
+        )
+        tool_result_entry = next(
+            entry for entry in renderer.history_entries() if entry.entry_type == "tool_result"
+        )
+        self.assertIn("Read(", tool_result_entry.text)
+        self.assertIn("boom", tool_result_entry.text)
+
+    def test_todo_completed_appends_summary_and_hides_panel(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.handle_event(
+            ToolCallEvent(
+                tool="TodoWrite",
+                args={
+                    "todos": [
+                        {"content": "a", "status": "completed", "priority": "medium"},
+                        {"content": "b", "status": "completed", "priority": "medium"},
+                    ]
+                },
+                tool_call_id="tc_todo_2",
+            )
+        )
+        tool_results = [e for e in renderer.history_entries() if e.entry_type == "tool_result"]
+        self.assertTrue(tool_results)
+        self.assertIn("todo 2/2 completed", tool_results[-1].text)
+        self.assertFalse(renderer.has_active_todos())
 
     def test_stop_event_interrupted_appends_system_message(self) -> None:
         renderer = EventRenderer()

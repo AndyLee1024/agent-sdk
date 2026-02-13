@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +30,25 @@ from terminal_agent.models import HistoryEntry, LoadingState
 from terminal_agent.tool_view import summarize_tool_args
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_TOOL_ERROR_SUMMARY_MAX_LEN = 160
+_DEFAULT_TOOL_PANEL_MAX_LINES = 4
+_DEFAULT_TODO_PANEL_MAX_LINES = 6
+
+
+def _read_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
+        return default
+    if value <= 0:
+        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
+        return default
+    return value
 
 
 def _truncate(content: str, max_len: int = 120) -> str:
@@ -67,6 +87,17 @@ def _extract_task_title(args: dict[str, Any]) -> str:
     return subagent_name
 
 
+def _one_line(text: str) -> str:
+    return " ".join(str(text).split())
+
+
+def _tool_signature(tool_name: str, args_summary: str) -> str:
+    normalized = args_summary.strip()
+    if normalized:
+        return f"{tool_name}({normalized})"
+    return f"{tool_name}()"
+
+
 @dataclass
 class _RunningTool:
     tool_name: str
@@ -75,6 +106,9 @@ class _RunningTool:
     is_task: bool
     args_summary: str
     progress_tokens: int = 0
+    subagent_name: str = ""
+    subagent_status: str = ""
+    subagent_description: str = ""
 
 
 class EventRenderer:
@@ -87,7 +121,20 @@ class EventRenderer:
         self._assistant_buffer = ""
         self._loading_state: LoadingState = LoadingState.idle()
         self._current_todos: list[dict[str, Any]] = []
+        self._todo_started_at_monotonic: float | None = None
         self._project_root = project_root
+        self._tool_error_summary_max_len = _read_env_int(
+            "AGENT_SDK_TUI_TOOL_ERROR_SUMMARY_MAX_LEN",
+            _DEFAULT_TOOL_ERROR_SUMMARY_MAX_LEN,
+        )
+        self._tool_panel_max_lines = _read_env_int(
+            "AGENT_SDK_TUI_TOOL_PANEL_MAX_LINES",
+            _DEFAULT_TOOL_PANEL_MAX_LINES,
+        )
+        self._todo_panel_max_lines = _read_env_int(
+            "AGENT_SDK_TUI_TODO_PANEL_MAX_LINES",
+            _DEFAULT_TODO_PANEL_MAX_LINES,
+        )
 
     def start_turn(self) -> None:
         self._flush_assistant_segment()
@@ -109,8 +156,6 @@ class EventRenderer:
         self._rebuild_loading_line()
 
     def tick_progress(self) -> None:
-        if not self._running_tools:
-            return
         self._rebuild_loading_line()
 
     def refresh_loading_animation(self) -> None:
@@ -131,6 +176,12 @@ class EventRenderer:
 
     def history_entries(self) -> list[HistoryEntry]:
         return list(self._history)
+
+    def has_running_tools(self) -> bool:
+        return bool(self._running_tools)
+
+    def has_active_todos(self) -> bool:
+        return bool(self._current_todos)
 
     def loading_state(self) -> LoadingState:
         """返回语义化的 loading 状态，用于 UI 层决定渲染策略。"""
@@ -156,6 +207,92 @@ class EventRenderer:
         self._flush_assistant_segment()
         self._history.append(HistoryEntry(entry_type="assistant", text=normalized))
 
+    def tool_panel_entries(self, *, max_lines: int | None = None) -> list[tuple[int, str]]:
+        """Return panel entries for running tools.
+
+        Each entry is a tuple: (indent_level, text_without_dot_prefix).
+        indent_level == 0 means a primary tool line; >0 means nested status.
+        indent_level < 0 means a meta line (no dot prefix).
+        """
+        limit = max_lines if max_lines is not None else self._tool_panel_max_lines
+        normalized_limit = max(1, int(limit))
+        if not self._running_tools:
+            return []
+
+        now = time.monotonic()
+        entries: list[tuple[int, str]] = []
+        tool_items = list(self._running_tools.items())
+        for idx, (tool_call_id, state) in enumerate(tool_items):
+            elapsed = _format_duration(now - state.started_at_monotonic)
+            lines_to_add = 1
+            if state.is_task:
+                tokens_suffix = (
+                    f" · {_format_tokens(state.progress_tokens)}"
+                    if state.progress_tokens > 0
+                    else ""
+                )
+                has_sub = bool(state.subagent_name or state.subagent_status or state.subagent_description)
+                if has_sub:
+                    lines_to_add = 2
+            else:
+                lines_to_add = 1
+
+            if len(entries) + lines_to_add > normalized_limit:
+                remaining_tools = len(tool_items) - idx
+                entries.append((-1, f"… (+{remaining_tools})"))
+                break
+
+            if state.is_task:
+                tokens_suffix = (
+                    f" · {_format_tokens(state.progress_tokens)}"
+                    if state.progress_tokens > 0
+                    else ""
+                )
+                entries.append((0, f"{state.title} · {elapsed}{tokens_suffix}"))
+                if state.subagent_name or state.subagent_status or state.subagent_description:
+                    desc = f" {state.subagent_description}".rstrip()
+                    status = state.subagent_status or "running"
+                    name = state.subagent_name or "subagent"
+                    entries.append((1, f"|_ {name} {status}{desc}"))
+            else:
+                signature = _tool_signature(state.tool_name, state.args_summary)
+                entries.append((0, f"{signature} · {elapsed}"))
+
+        return entries[:normalized_limit]
+
+    def todo_panel_lines(self, *, max_lines: int | None = None) -> list[str]:
+        limit = max_lines if max_lines is not None else self._todo_panel_max_lines
+        normalized_limit = max(1, int(limit))
+        todos = list(self._current_todos)
+        if not todos:
+            return []
+
+        total = len(todos)
+        completed = sum(1 for item in todos if item.get("status") == "completed")
+        in_progress = sum(1 for item in todos if item.get("status") == "in_progress")
+        pending = sum(1 for item in todos if item.get("status") == "pending")
+        header = f"📋 Todo ({completed}/{total} completed · {in_progress} in_progress · {pending} pending)"
+
+        lines: list[str] = [header]
+        for item in todos:
+            content = str(item.get("content", "")).strip()
+            if not content:
+                continue
+            status = str(item.get("status", "pending")).strip().lower()
+            if status == "completed":
+                lines.append(f"  ✓ {content}")
+            elif status == "in_progress":
+                lines.append(f"  ◉ {content} ⏳")
+            else:
+                lines.append(f"  ○ {content}")
+
+        if len(lines) <= normalized_limit:
+            return lines
+
+        clipped = lines[: normalized_limit - 1]
+        clipped.append(f"  … (+{len(lines) - (normalized_limit - 1)})")
+        return clipped
+
     def _flush_assistant_segment(self) -> None:
         if not self._assistant_buffer:
             return
@@ -172,10 +309,6 @@ class EventRenderer:
         if is_task:
             title = _extract_task_title(args)
             summary = ""
-        summary_suffix = f" {summary}" if summary else ""
-        self._history.append(
-            HistoryEntry(entry_type="tool_call", text=f"{title}{summary_suffix}")
-        )
 
         self._running_tools[tool_call_id] = _RunningTool(
             tool_name=tool_name,
@@ -190,54 +323,31 @@ class EventRenderer:
         tool_name: str,
         tool_call_id: str,
         is_error: bool,
+        result: Any,
     ) -> None:
         state = self._running_tools.pop(tool_call_id, None)
         if state is None:
-            self._history.append(
-                HistoryEntry(
-                    entry_type="tool_result",
-                    text=f"{tool_name}",
-                    is_error=is_error,
-                )
-            )
+            signature = _tool_signature(tool_name, "")
+            error_suffix = ""
+            if is_error:
+                error_suffix = f" · {_truncate(_one_line(result), self._tool_error_summary_max_len)}"
+            self._history.append(HistoryEntry(entry_type="tool_result", text=f"{signature}{error_suffix}", is_error=is_error))
             return
 
         elapsed = _format_duration(time.monotonic() - state.started_at_monotonic)
-        tokens_suffix = (
-            f" · {_format_tokens(state.progress_tokens)}"
-            if state.is_task and state.progress_tokens > 0
-            else ""
-        )
-        self._history.append(
-            HistoryEntry(
-                entry_type="tool_result",
-                text=f"{state.title} · {elapsed}{tokens_suffix}",
-                is_error=is_error,
-            )
-        )
+        if state.is_task:
+            base = f"{state.title} · {elapsed}"
+        else:
+            signature = _tool_signature(state.tool_name, state.args_summary)
+            base = f"{signature} · {elapsed}"
+
+        error_suffix = ""
+        if is_error:
+            error_suffix = f" · {_truncate(_one_line(result), self._tool_error_summary_max_len)}"
+
+        self._history.append(HistoryEntry(entry_type="tool_result", text=f"{base}{error_suffix}", is_error=is_error))
 
     def _rebuild_loading_line(self) -> None:
-        if self._running_tools:
-            first_key = next(iter(self._running_tools))
-            state = self._running_tools[first_key]
-            elapsed = _format_duration(time.monotonic() - state.started_at_monotonic)
-            tokens_suffix = (
-                f" · {_format_tokens(state.progress_tokens)}"
-                if state.is_task and state.progress_tokens > 0
-                else ""
-            )
-            more = len(self._running_tools) - 1
-            more_suffix = f" (+{more})" if more > 0 else ""
-            text = f"⏳ {state.title} · {elapsed}{tokens_suffix}{more_suffix}"
-            self._loading_state = LoadingState.tool_call(
-                text=text,
-                tool_name=state.tool_name,
-                title=state.title,
-                elapsed=elapsed,
-                is_task=state.is_task,
-            )
-            return
-
         if self._thinking_content:
             text = f"🤔 {_truncate(self._thinking_content, 90)}"
             self._loading_state = LoadingState.thinking(
@@ -278,15 +388,39 @@ class EventRenderer:
             )
 
     def _update_todos(self, todos: list[dict[str, Any]]) -> None:
-        """更新当前 todo 列表状态，并将渲染后的 Rich Text 添加到历史记录。"""
-        self._current_todos = list(todos) if todos else []
+        """更新当前 todo 列表状态。
 
-        # 将 Rich Text 作为特殊 entry 添加到 history
-        todo_renderable = self.todo_renderable()
-        if todo_renderable is not None:
-            self._history.append(
-                HistoryEntry(entry_type="system", text=todo_renderable)
+        Todo panel is rendered in prompt_toolkit layout and should not spam scrollback.
+        When all todos transition to completed, append a single summary line to history.
+        """
+        normalized = list(todos) if todos else []
+        if not normalized:
+            self._current_todos = []
+            self._todo_started_at_monotonic = None
+            return
+
+        all_completed = all(str(item.get("status", "")).strip().lower() == "completed" for item in normalized)
+        if not all_completed:
+            if not self._current_todos:
+                self._todo_started_at_monotonic = time.monotonic()
+            self._current_todos = normalized
+            return
+
+        # All completed: hide panel and write a summary entry once.
+        started = self._todo_started_at_monotonic
+        elapsed_suffix = ""
+        if started is not None:
+            elapsed_suffix = f" · {_format_duration(time.monotonic() - started)}"
+        total = len(normalized)
+        self._history.append(
+            HistoryEntry(
+                entry_type="tool_result",
+                text=f"todo {total}/{total} completed{elapsed_suffix}",
+                is_error=False,
             )
+        )
+        self._current_todos = []
+        self._todo_started_at_monotonic = None
 
     def todo_renderable(self) -> RenderableType | None:
         """将当前 todo 列表渲染为 Rich 组件。
@@ -346,20 +480,7 @@ class EventRenderer:
 
     def todo_lines(self) -> list[str]:
         """返回当前 todo 列表的行列表（用于测试）。"""
-        renderable = self.todo_renderable()
-        if renderable is None:
-            return []
-        # 如果是 Rich Text 对象，返回其文本行
-        if hasattr(renderable, "plain"):
-            text = str(renderable.plain)
-        else:
-            text = str(renderable)
-        lines = text.splitlines()
-        # 如果超过 6 行，折叠显示
-        if len(lines) > 6:
-            lines = lines[:5]
-            lines.append(f"  ... 还有 {len(text.splitlines()) - 5} 个任务折叠")
-        return lines
+        return self.todo_panel_lines(max_lines=6)
 
     def handle_event(self, event: Any) -> tuple[bool, list[dict[str, Any]] | None]:
         if not isinstance(event, TextEvent):
@@ -381,12 +502,20 @@ class EventRenderer:
                     todos = extract_todos(args_dict)
                     if todos:
                         self._update_todos([{"content": t.content, "status": t.status, "priority": t.priority} for t in todos])
+                    # TodoWrite is rendered in the dedicated todo panel.
+                    self._rebuild_loading_line()
+                    return (False, None)
                 self._append_tool_call(tool_name, args_dict, tool_call_id)
-            case ToolResultEvent(tool=tool_name, result=_, tool_call_id=tool_call_id, is_error=is_error):
+            case ToolResultEvent(tool=tool_name, result=result, tool_call_id=tool_call_id, is_error=is_error):
+                if tool_name.lower() == "todowrite" and not is_error:
+                    # Successful TodoWrite should not spam scrollback.
+                    self._rebuild_loading_line()
+                    return (False, None)
                 self._append_tool_result(
                     tool_name=tool_name,
                     tool_call_id=tool_call_id,
                     is_error=is_error,
+                    result=result,
                 )
             case UsageDeltaEvent(
                 source=_,
@@ -402,9 +531,9 @@ class EventRenderer:
                 pass
             case SubagentProgressEvent(
                 tool_call_id=tool_call_id,
-                subagent_name=_,
-                description=_,
-                status=_,
+                subagent_name=subagent_name,
+                description=description,
+                status=status,
                 elapsed_ms=elapsed_ms,
                 tokens=tokens,
             ):
@@ -415,6 +544,10 @@ class EventRenderer:
                     if elapsed_ms is not None:
                         normalized = max(float(elapsed_ms), 0.0)
                         state.started_at_monotonic = time.monotonic() - (normalized / 1000)
+                    # Subagent-specific status for task tool panel.
+                    state.subagent_name = str(subagent_name or "").strip()
+                    state.subagent_status = str(status or "").strip()
+                    state.subagent_description = str(description or "").strip()
             case SubagentStopEvent(tool_call_id=_, subagent_name=_, status=_, duration_ms=_, error=_):
                 pass
             case TodoUpdatedEvent(todos=todos):

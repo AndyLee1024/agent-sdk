@@ -389,6 +389,9 @@ class TerminalAgentTUI:
         self._status_bar = status_bar
         self._renderer = renderer
 
+        self._tool_panel_max_lines = _read_env_int("AGENT_SDK_TUI_TOOL_PANEL_MAX_LINES", 4)
+        self._todo_panel_max_lines = _read_env_int("AGENT_SDK_TUI_TODO_PANEL_MAX_LINES", 6)
+
         self._busy = False
         self._waiting_for_input = False
         self._pending_questions: list[dict[str, Any]] | None = None
@@ -485,12 +488,24 @@ class TerminalAgentTUI:
 
         self._question_ui = AskUserQuestionUI()
         self._selection_ui = SelectionMenuUI()
+        self._todo_control = FormattedTextControl(text=self._todo_text)
         self._loading_control = FormattedTextControl(text=self._loading_text)
         self._status_control = FormattedTextControl(text=self._status_text)
 
+        self._todo_window = Window(
+            content=self._todo_control,
+            height=self._todo_height,
+            dont_extend_height=True,
+            style="class:loading",
+        )
+        self._todo_container = ConditionalContainer(
+            content=self._todo_window,
+            filter=Condition(lambda: self._renderer.has_active_todos()),
+        )
+
         self._loading_window = Window(
             content=self._loading_control,
-            height=1,
+            height=self._loading_height,
             dont_extend_height=True,
             style="class:loading",
         )
@@ -536,6 +551,7 @@ class TerminalAgentTUI:
 
         self._main_container = HSplit(
             [
+                self._todo_container,
                 self._loading_window,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
@@ -1273,8 +1289,9 @@ class TerminalAgentTUI:
             )
             logger.info(f"Model level switched: {event}")
 
-            # Update status bar model name
-            self._update_status_bar_model()
+            # Update status bar model name - 使用 event 中的新模型名
+            self._status_bar._model_name = new_model
+            self._invalidate()
         except Exception as e:
             logger.exception("Failed to switch model level")
             self._renderer.append_system_message(
@@ -1339,6 +1356,7 @@ class TerminalAgentTUI:
         # Rebuild main container with new selection container
         self._main_container = HSplit(
             [
+                self._todo_container,
                 self._loading_window,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
@@ -1453,7 +1471,7 @@ class TerminalAgentTUI:
         if entry.entry_type == "tool_call":
             return "→"
         if entry.entry_type == "tool_result":
-            return "✗" if entry.is_error else "✓"
+            return "●"
         return "•"
 
     def _entry_content(self, entry: HistoryEntry) -> str:
@@ -1491,6 +1509,23 @@ class TerminalAgentTUI:
         renderables: list[Any] = []
 
         for entry in entries:
+            if entry.entry_type == "tool_result":
+                content = str(entry.text)
+                content_lines = content.splitlines() or [""]
+                prefix_style = "bold red" if entry.is_error else "bold green"
+
+                line_text = Text()
+                line_text.append("● ", style=prefix_style)
+                line_text.append(content_lines[0])
+                for line in content_lines[1:]:
+                    line_text.append("\n")
+                    line_text.append("  ")
+                    line_text.append(line)
+
+                renderables.append(line_text)
+                renderables.append(Text(""))
+                continue
+
             if hasattr(entry.text, "__rich_console__"):
                 # Rich Text 对象带前缀
                 prefix = self._entry_prefix(entry)
@@ -1526,6 +1561,23 @@ class TerminalAgentTUI:
         renderables: list[Any] = []
 
         for entry in entries:
+            if entry.entry_type == "tool_result":
+                content = str(entry.text)
+                content_lines = content.splitlines() or [""]
+                prefix_style = "bold red" if entry.is_error else "bold green"
+
+                line_text = Text()
+                line_text.append("● ", style=prefix_style)
+                line_text.append(content_lines[0])
+                for line in content_lines[1:]:
+                    line_text.append("\n")
+                    line_text.append("  ")
+                    line_text.append(line)
+
+                renderables.append(line_text)
+                renderables.append(Text(""))
+                continue
+
             if hasattr(entry.text, "__rich_console__"):
                 # Rich Text 对象带前缀
                 prefix = self._entry_prefix(entry)
@@ -1569,7 +1621,10 @@ class TerminalAgentTUI:
                     self._last_loading_line = loading_line
                     self._render_dirty = True
 
-                if self._busy and (loading_line or self._animator.is_active):
+                if self._renderer.has_running_tools():
+                    # Keep repainting for breathing animation.
+                    self._render_dirty = True
+                elif self._busy and (loading_line or self._animator.is_active):
                     self._render_dirty = True
 
                 if self._render_dirty:
@@ -1577,7 +1632,8 @@ class TerminalAgentTUI:
                     self._render_dirty = False
 
                 # 动态帧率：busy/动画时 12fps，idle 时 4fps
-                sleep_s = 1 / 12 if self._busy or self._animator.is_active else 1 / 4
+                fast = self._busy or self._animator.is_active or self._renderer.has_running_tools()
+                sleep_s = 1 / 12 if fast else 1 / 4
                 await asyncio.sleep(sleep_s)
         except asyncio.CancelledError:
             return
@@ -1607,6 +1663,39 @@ class TerminalAgentTUI:
             renderable = self._animator.renderable()
             return self._rich_text_to_pt_fragments(renderable)
 
+        # Running tools: multi-line tool panel with breathing dot.
+        if self._renderer.has_running_tools():
+            width = self._terminal_width()
+            entries = self._renderer.tool_panel_entries(max_lines=self._tool_panel_max_lines)
+            if not entries:
+                return [("", " ")]
+
+            breath_phase = (self._loading_frame // 3) % 2
+            dot_style = "fg:#6B7280 bold" if breath_phase == 0 else "fg:#9CA3AF bold"
+            primary_style = "fg:#D1D5DB"
+            nested_style = "fg:#9CA3AF"
+
+            fragments: list[tuple[str, str]] = []
+            last_index = len(entries) - 1
+            for idx, (indent, line) in enumerate(entries):
+                if indent < 0:
+                    clipped = _fit_single_line(line, width - 1)
+                    fragments.append((nested_style, clipped))
+                elif indent == 0:
+                    clipped = _fit_single_line(line, max(width - 2, 8))
+                    fragments.append((dot_style, "● "))
+                    fragments.append((primary_style, clipped))
+                else:
+                    padding = "  " * indent
+                    clipped = _fit_single_line(line, max(width - get_cwidth(padding), 8))
+                    fragments.append((nested_style, padding))
+                    fragments.append((nested_style, clipped))
+
+                if idx != last_index:
+                    fragments.append(("", "\n"))
+
+            return fragments
+
         # 获取语义化的 loading 状态
         loading_state = self._renderer.loading_state()
         text = loading_state.text.strip()
@@ -1616,23 +1705,42 @@ class TerminalAgentTUI:
         width = self._terminal_width()
         clipped = _fit_single_line(text, width - 1)
 
-        # 根据状态类型决定渲染策略
-        if loading_state.type == LoadingStateType.TOOL_CALL:
-            # 工具调用：保留旋转图标动画，但工具名称静态显示
-            pulse_glyphs = ("◐", "◓", "◑", "◒")
-            pulse_idx = self._loading_frame % len(pulse_glyphs)
-            pulse = pulse_glyphs[pulse_idx]
-            # 移除原有的 ⏳ 图标，用旋转图标替代
-            display_text = clipped
-            if clipped.startswith("⏳ "):
-                display_text = clipped[2:]  # 移除 "⏳ " 前缀
-            return [
-                (f"fg:#6B7280 bold", f"{pulse} "),
-                ("fg:#96c49c bold", display_text),
-            ]
-
         # 其他状态（thinking, animation）：使用流光效果
         return _sweep_gradient_fragments(clipped, frame=self._loading_frame)
+
+    def _loading_height(self) -> int:
+        if self._animator.is_active:
+            return 1
+        if self._renderer.has_running_tools():
+            lines = self._renderer.tool_panel_entries(max_lines=self._tool_panel_max_lines)
+            return max(1, len(lines))
+        if self._renderer.loading_state().text.strip():
+            return 1
+        return 1
+
+    def _todo_text(self) -> list[tuple[str, str]]:
+        lines = self._renderer.todo_panel_lines(max_lines=self._todo_panel_max_lines)
+        if not lines:
+            return [("", " ")]
+
+        width = self._terminal_width()
+        fragments: list[tuple[str, str]] = []
+        last_index = len(lines) - 1
+        for idx, line in enumerate(lines):
+            clipped = _fit_single_line(line, width - 1)
+            style = "fg:#A7F3D0" if idx == 0 else "fg:#CBD5E1"
+            if "✓" in line:
+                style = "fg:#86EFAC"
+            elif "◉" in line:
+                style = "fg:#FDE68A"
+            fragments.append((style, clipped))
+            if idx != last_index:
+                fragments.append(("", "\n"))
+        return fragments
+
+    def _todo_height(self) -> int:
+        lines = self._renderer.todo_panel_lines(max_lines=self._todo_panel_max_lines)
+        return max(1, len(lines))
 
     def _rich_text_to_pt_fragments(self, renderable) -> list[tuple[str, str]]:
         """将 Rich Text 转换为 prompt_toolkit 的 fragments 格式."""
