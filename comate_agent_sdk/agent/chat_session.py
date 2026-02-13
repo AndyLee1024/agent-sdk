@@ -9,7 +9,8 @@ from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from comate_agent_sdk.agent.events import AgentEvent, SessionInitEvent, StopEvent
+from comate_agent_sdk.agent.events import AgentEvent, LLMSwitchedEvent, SessionInitEvent, StopEvent
+from comate_agent_sdk.agent.llm_levels import LLMLevel
 from comate_agent_sdk.agent.interrupt import SessionRunController
 from comate_agent_sdk.agent.service import AgentTemplate, AgentRuntime
 from comate_agent_sdk.context.items import ContextItem, ItemType
@@ -717,6 +718,53 @@ class ChatSession:
             },
         }
         _events_jsonl_append(self._context_jsonl, usage_reset_event)
+
+    def set_level(self, level: LLMLevel) -> LLMSwitchedEvent:
+        """Set the LLM level for this session.
+
+        The level change takes effect on the next query. This method modifies
+        the runtime's level attribute and returns an event describing the switch.
+
+        Args:
+            level: The target level ("LOW", "MID", or "HIGH")
+
+        Returns:
+            LLMSwitchedEvent: Event describing the level switch with previous
+                and new model information.
+
+        Raises:
+            ChatSessionClosedError: If the session is closed
+
+        Note:
+            - The level is validated lazily (on next run/query)
+            - If the level is not configured in llm_levels, an error will
+              be raised when the next query is executed
+            - This change is session-specific and not persisted
+        """
+        if self._closed:
+            raise ChatSessionClosedError("Cannot set level on a closed session")
+
+        # Capture previous state
+        previous_level = self._agent.level
+        previous_model = self._agent.llm.model if self._agent.llm else None
+
+        # Update the level (this will be used on next query via _effective_level)
+        self._agent.level = level
+
+        # Determine new model (may be None if level not configured)
+        new_model = None
+        if self._agent.llm_levels and level in self._agent.llm_levels:
+            new_model = self._agent.llm_levels[level].model
+
+        event = LLMSwitchedEvent(
+            previous_level=previous_level,
+            new_level=level,
+            previous_model=previous_model,
+            new_model=new_model,
+        )
+
+        logger.info(f"Session {self.session_id}: {event}")
+        return event
 
     async def send(self, message: ChatMessage) -> None:
         if self._closed:

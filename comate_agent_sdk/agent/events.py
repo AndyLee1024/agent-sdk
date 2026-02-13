@@ -21,7 +21,10 @@ Usage:
 
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Literal
+
+LLMLevel = Literal["LOW", "MID", "HIGH"]
 
 
 @dataclass
@@ -423,4 +426,58 @@ AgentEvent = (
 	| TodoUpdatedEvent
 	| PreCompactEvent
 	| CompactionMetaEvent
+)
+
+
+@dataclass
+class LLMSwitchedEvent:
+	"""Emitted when the LLM level is switched during a session.
+
+	This event is triggered when `session.set_level()` is called,
+	indicating that the next query will use a different LLM.
+	"""
+
+	previous_level: LLMLevel | None
+	"""The previous LLM level (None if not set)."""
+
+	new_level: LLMLevel
+	"""The new LLM level being switched to."""
+
+	previous_model: str | None
+	"""The name of the previous model (None if not set)."""
+
+	new_model: str | None
+	"""The name of the new model (None if level not configured)."""
+
+	timestamp: datetime = field(default_factory=datetime.now)
+	"""When the switch occurred."""
+
+	def __str__(self) -> str:
+		prev = self.previous_level or "unset"
+		new = self.new_level
+		return f'🔄 LLM switched: {prev} → {new}'
+
+
+# Union type for all events (must be at the end after all event classes are defined)
+AgentEvent = (
+	SessionInitEvent
+	| TextEvent
+	| ThinkingEvent
+	| ToolCallEvent
+	| ToolResultEvent
+	| StopEvent
+	| MessageStartEvent
+	| MessageCompleteEvent
+	| StepStartEvent
+	| StepCompleteEvent
+	| SubagentStartEvent
+	| SubagentStopEvent
+	| UsageDeltaEvent
+	| SubagentProgressEvent
+	| HiddenUserMessageEvent
+	| UserQuestionEvent
+	| TodoUpdatedEvent
+	| PreCompactEvent
+	| CompactionMetaEvent
+	| LLMSwitchedEvent
 )

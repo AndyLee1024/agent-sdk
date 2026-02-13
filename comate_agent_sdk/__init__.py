@@ -12,6 +12,7 @@ from comate_agent_sdk.agent import (
     SubagentProgressEvent,
     SessionInitEvent,
     UsageDeltaEvent,
+    LLMSwitchedEvent,
 )
 from comate_agent_sdk.context import MemoryConfig
 from comate_agent_sdk.observability import Laminar, observe, observe_debug
@@ -41,6 +42,7 @@ __all__ = [
     "SessionInitEvent",
     "UsageDeltaEvent",
     "SubagentProgressEvent",
+    "LLMSwitchedEvent",
     "Laminar",
     "observe",
     "observe_debug",

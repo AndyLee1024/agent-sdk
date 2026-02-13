@@ -10,6 +10,7 @@ from comate_agent_sdk.agent.compaction import (
 from comate_agent_sdk.agent.events import (
     AgentEvent,
     CompactionMetaEvent,
+    LLMSwitchedEvent,
     SessionInitEvent,
     StopEvent,
     PreCompactEvent,
@@ -58,6 +59,7 @@ __all__ = [
     "UserQuestionEvent",
     "PreCompactEvent",
     "CompactionMetaEvent",
+    "LLMSwitchedEvent",
     # Compaction
     "CompactionConfig",
     "CompactionResult",
