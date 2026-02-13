@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,27 +27,13 @@ from rich.text import Text
 
 from terminal_agent.models import HistoryEntry, LoadingState
 from terminal_agent.tool_view import summarize_tool_args
+from terminal_agent.env_utils import read_env_int
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TOOL_ERROR_SUMMARY_MAX_LEN = 160
 _DEFAULT_TOOL_PANEL_MAX_LINES = 4
 _DEFAULT_TODO_PANEL_MAX_LINES = 6
-
-
-def _read_env_int(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(raw.strip())
-    except ValueError:
-        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
-        return default
-    if value <= 0:
-        logger.warning(f"Invalid env var {name}={raw!r}; using default {default}.")
-        return default
-    return value
 
 
 def _truncate(content: str, max_len: int = 120) -> str:
@@ -123,15 +108,15 @@ class EventRenderer:
         self._current_todos: list[dict[str, Any]] = []
         self._todo_started_at_monotonic: float | None = None
         self._project_root = project_root
-        self._tool_error_summary_max_len = _read_env_int(
+        self._tool_error_summary_max_len = read_env_int(
             "AGENT_SDK_TUI_TOOL_ERROR_SUMMARY_MAX_LEN",
             _DEFAULT_TOOL_ERROR_SUMMARY_MAX_LEN,
         )
-        self._tool_panel_max_lines = _read_env_int(
+        self._tool_panel_max_lines = read_env_int(
             "AGENT_SDK_TUI_TOOL_PANEL_MAX_LINES",
             _DEFAULT_TOOL_PANEL_MAX_LINES,
         )
-        self._todo_panel_max_lines = _read_env_int(
+        self._todo_panel_max_lines = read_env_int(
             "AGENT_SDK_TUI_TODO_PANEL_MAX_LINES",
             _DEFAULT_TODO_PANEL_MAX_LINES,
         )

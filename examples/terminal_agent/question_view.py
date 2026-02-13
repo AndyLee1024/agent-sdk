@@ -369,6 +369,15 @@ class AskUserQuestionUI:
         return QuestionAction(kind="cancel", message=_CANCEL_MESSAGE)
 
     def build_answers_message(self) -> str:
+        if len(self._state.questions) == 1:
+            question = self._state.questions[0]
+            if (
+                question.preset_answer.strip() == _CHAT_MESSAGE
+                and not question.custom_input.strip()
+                and not question.selected_indices
+            ):
+                return _CHAT_MESSAGE
+
         lines = ["User answered Comate's questions:"]
         for idx, question in enumerate(self._state.questions, start=1):
             answer = self._question_answer_summary(question, for_preview=False)

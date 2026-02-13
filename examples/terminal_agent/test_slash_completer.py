@@ -11,10 +11,14 @@ EXAMPLES_DIR = Path(__file__).resolve().parents[1]
 if str(EXAMPLES_DIR) not in sys.path:
     sys.path.insert(0, str(EXAMPLES_DIR))
 
-from terminal_agent.app import SLASH_COMMANDS, SLASH_COMMAND_SPECS, _SlashCommandCompleter
+from terminal_agent.slash_commands import (
+    SLASH_COMMANDS,
+    SLASH_COMMAND_SPECS,
+    SlashCommandCompleter,
+)
 
 
-def _collect_suggestions(completer: _SlashCommandCompleter, text: str) -> list[str]:
+def _collect_suggestions(completer: SlashCommandCompleter, text: str) -> list[str]:
     doc = Document(text=text, cursor_position=len(text))
     event = CompleteEvent(completion_requested=True)
     return [item.text for item in completer.get_completions(doc, event)]
@@ -22,7 +26,7 @@ def _collect_suggestions(completer: _SlashCommandCompleter, text: str) -> list[s
 
 class TestSlashCommandCompleter(unittest.TestCase):
     def setUp(self) -> None:
-        self.completer = _SlashCommandCompleter(SLASH_COMMAND_SPECS)
+        self.completer = SlashCommandCompleter(SLASH_COMMAND_SPECS)
 
     def test_starts_with_slash_show_all_commands(self) -> None:
         suggestions = _collect_suggestions(self.completer, "/")

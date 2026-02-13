@@ -26,6 +26,10 @@ class StatusBar:
         normalized = str(model).strip()
         return normalized or "unknown-model"
 
+    def set_model_name(self, model_name: str) -> None:
+        normalized = str(model_name).strip()
+        self._model_name = normalized or "unknown-model"
+
     @staticmethod
     def _resolve_git_branch() -> str:
         try:

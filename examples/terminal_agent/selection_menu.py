@@ -251,7 +251,25 @@ def create_model_level_menu(
     """
     ui = SelectionMenuUI()
 
-    # 从 llm_levels 获取实际模型名称
+    title, options = build_model_level_options(
+        current_level=current_level or "MID",
+        llm_levels=llm_levels,
+    )
+
+    ui.set_options(
+        title=title,
+        options=options,
+        on_confirm=on_confirm,
+        on_cancel=on_cancel,
+    )
+    return ui
+
+
+def build_model_level_options(
+    *,
+    current_level: str,
+    llm_levels: dict[str, Any] | None,
+) -> tuple[str, list[dict[str, str]]]:
     def get_model_name(level: str) -> str:
         if llm_levels and level in llm_levels:
             llm = llm_levels[level]
@@ -278,17 +296,10 @@ def create_model_level_menu(
         },
     ]
 
-    # 标记当前选中的级别
-    if current_level:
-        for opt in options:
-            if opt["value"] == current_level.upper():
-                opt["label"] = f"{opt['label']}  (current)"
-                break
+    normalized = current_level.upper().strip() or "MID"
+    for opt in options:
+        if opt["value"] == normalized:
+            opt["label"] = f"{opt['label']}  (current)"
+            break
 
-    ui.set_options(
-        title="Select Model Level",
-        options=options,
-        on_confirm=on_confirm,
-        on_cancel=on_cancel,
-    )
-    return ui
+    return "Select Model Level", options
