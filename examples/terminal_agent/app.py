@@ -718,15 +718,26 @@ class TerminalAgentTUI:
             buffer = event.current_buffer
             cs = buffer.complete_state
 
-            # 菜单打开时：先把当前选中项写回输入框
+            # 菜单打开时：先接受补全
             if cs is not None and cs.completions:
                 completion = cs.current_completion or cs.completions[0]
                 buffer.apply_completion(completion)
                 buffer.cancel_completion()
-                return  # ✅ 不提交，留给下一次 Enter
+
+                # ✅ 决策：slash 补全 -> 立即提交；mention 补全 -> 只填入不提交
+                text_now = buffer.text
+                doc_now = buffer.document
+
+                is_mention = self._mention_completer.extract_context(doc_now.text_before_cursor) is not None
+                parsed_slash = _parse_slash_command_call(text_now)
+
+                if (parsed_slash is not None) and (not is_mention):
+                    self._submit_from_input()
+                return
 
             # 没有菜单：正常提交
             self._submit_from_input()
+
 
 
         @bindings.add("tab", filter=normal_mode)
