@@ -243,7 +243,6 @@ class StreamAnimationController:
 
         if isinstance(event, ToolCallEvent):
             self._active_tool_call_ids.add(event.tool_call_id)
-            await self._stop_if_needed(AnimationPhase.TOOL_RUNNING)
             return
 
         if isinstance(event, ToolResultEvent):

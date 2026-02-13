@@ -434,6 +434,9 @@ class TerminalAgentTUI:
             "exit": self._slash_exit,
         }
         self._loading_frame = 0
+        self._fallback_loading_phrase = random.choice(DEFAULT_STATUS_PHRASES) if DEFAULT_STATUS_PHRASES else "Thinking…"
+        self._fallback_phrase_refresh_at = 0.0
+
         self._tool_result_flash_seconds = _read_env_float(
             "AGENT_SDK_TUI_TOOL_RESULT_FLASH_SECONDS",
             0.55,
@@ -1157,6 +1160,9 @@ class TerminalAgentTUI:
         self._set_busy(True)
         self._waiting_for_input = False
         self._pending_questions = None
+        # 本轮默认 loading 文案：避免出现 Working… 这种突兀 fallback
+        self._fallback_loading_phrase = random.choice(DEFAULT_STATUS_PHRASES) if DEFAULT_STATUS_PHRASES else "Thinking…"
+        self._fallback_phrase_refresh_at = time.monotonic() + 3.0  # 每 3 秒允许换一次
 
         self._renderer.start_turn()
         self._renderer.seed_user_message(display_text if display_text is not None else text)
@@ -1687,6 +1693,12 @@ class TerminalAgentTUI:
             while not self._closing:
                 self._renderer.tick_progress()
                 self._loading_frame += 2
+                # busy 时每隔几秒换一个短语，让 loading 更“活”
+                if self._busy and time.monotonic() >= self._fallback_phrase_refresh_at:
+                    self._fallback_loading_phrase = random.choice(DEFAULT_STATUS_PHRASES) if DEFAULT_STATUS_PHRASES else "Thinking…"
+                    self._fallback_phrase_refresh_at = time.monotonic() + 3.0
+                    self._render_dirty = True
+
                 await self._drain_history_async()
 
                 # 检查动画器是否需要刷新
@@ -1711,8 +1723,9 @@ class TerminalAgentTUI:
                 if self._renderer.has_running_tools():
                     # Keep repainting for breathing animation.
                     self._render_dirty = True
-                elif self._busy and (loading_line or self._animator.is_active):
+                elif self._busy:
                     self._render_dirty = True
+
 
                 if self._render_dirty:
                     self._invalidate()
@@ -1798,13 +1811,16 @@ class TerminalAgentTUI:
         loading_state = self._renderer.loading_state()
         text = loading_state.text.strip()
         if not text:
+            if self._busy:
+                width = self._terminal_width()
+                clipped = _fit_single_line(self._fallback_loading_phrase, width - 1)
+                return _sweep_gradient_fragments(clipped, self._loading_frame)
             return [("", " ")]
+
 
         width = self._terminal_width()
         clipped = _fit_single_line(text, width - 1)
-
-        # 其他状态（thinking, animation）：使用流光效果
-        return _sweep_gradient_fragments(clipped, frame=self._loading_frame)
+        return [("class:loading", clipped)]
 
     def _loading_height(self) -> int:
         if self._animator.is_active:
