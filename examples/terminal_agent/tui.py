@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import sys
 import time
 from bisect import bisect_right
 from collections.abc import Callable
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.completion import (
     merge_completers,
 )
@@ -46,7 +48,6 @@ from terminal_agent.animations import (
 from terminal_agent.env_utils import read_env_float, read_env_int
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.history_printer import (
-    print_history_group_async,
     print_history_group_sync,
     render_history_group,
 )
@@ -205,6 +206,10 @@ class TerminalAgentTUI:
             style="class:input.line",
             get_line_prefix=_input_line_prefix,
         )
+        # Fill the entire input area with styled spaces to avoid VT100
+        # erase-to-end-of-line resetting the background to the terminal default.
+        # (prompt_toolkit renderer resets attributes before erase_end_of_line.)
+        self._input_area.window.char = " "
 
         @self._input_area.buffer.on_text_changed.add_handler
         def _trigger_completion(_buffer) -> None:
@@ -308,10 +313,10 @@ class TerminalAgentTUI:
             {
                 "": "bg:#1f232a #e5e9f0",
                 "history": "bg:#1a1e24 #d8dee9",
-                "input.pad": "bg:#3a3d42",
-                "input.prompt": "bg:#3a3d42 #f2f4f8",
-                "input.line": "bg:#3a3d42 #f2f4f8",
-                "input-line": "bg:#3a3d42 #f2f4f8",
+                "input.pad": "fg:default bg:default",
+                "input.prompt": "bg:default #f2f4f8",
+                "input.line": "bg:default #f2f4f8",
+                "input-line": "bg:default #f2f4f8",
                 "status": "bg:#2d3138 #c3ccd8",
                 "question.tabs": "bg:#30353f #c7d2fe",
                 "question.tabs.nav": "bg:#30353f #93c5fd",
@@ -1351,7 +1356,18 @@ class TerminalAgentTUI:
         )
         if group is None:
             return
-        await print_history_group_async(console, group)
+
+        def _print() -> None:
+            width = self._terminal_width()
+            out = sys.__stdout__ or sys.stdout
+            scrollback_console = Console(
+                file=out,
+                force_terminal=True,
+                width=width,
+            )
+            print_history_group_sync(scrollback_console, group)
+
+        await run_in_terminal(_print, in_executor=False)
 
     def _drain_history_sync(self) -> None:
         pending = self._pending_history_entries()
@@ -1641,7 +1657,7 @@ class TerminalAgentTUI:
         )
         try:
             # Ensure scrollback prints don't mix with the inline (full_screen=False) UI.
-            with patch_stdout(self._app):
+            with patch_stdout(raw=True):
                 await self._app.run_async()
         finally:
             self._closing = True
