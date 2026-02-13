@@ -425,8 +425,8 @@ class TestSystemTools(unittest.TestCase):
             token_cost = TokenCost(include_cost=False)
             llm_levels = {"LOW": DummyLLM()}
 
-            def fake_get(url, timeout, impersonate):
-                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>")
+            def fake_get(url, timeout, impersonate, headers=None):
+                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>", headers=SimpleNamespace())
 
             with bind_system_tool_context(
                 project_root=root,
@@ -466,8 +466,8 @@ class TestSystemTools(unittest.TestCase):
 
             llm_levels = {"LOW": ExplodingLLM()}
 
-            def fake_get(url, timeout, impersonate):
-                return SimpleNamespace(status_code=404, url=url, text="not found")
+            def fake_get(url, timeout, impersonate, headers=None):
+                return SimpleNamespace(status_code=404, url=url, text="not found", headers=SimpleNamespace())
 
             with bind_system_tool_context(
                 project_root=root,
@@ -511,8 +511,8 @@ class TestSystemTools(unittest.TestCase):
             token_cost = TokenCost(include_cost=False)
             llm_levels = {"LOW": DummyLLM()}
 
-            def fake_get(url, timeout, impersonate):
-                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>")
+            def fake_get(url, timeout, impersonate, headers=None):
+                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>", headers=SimpleNamespace())
 
             with bind_system_tool_context(
                 project_root=root,
@@ -560,8 +560,8 @@ class TestSystemTools(unittest.TestCase):
             token_cost = TokenCost(include_cost=False)
             llm_levels = {"LOW": DummyLLM()}
 
-            def fake_get(url, timeout, impersonate):
-                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>")
+            def fake_get(url, timeout, impersonate, headers=None):
+                return SimpleNamespace(status_code=200, url=url, text="<h1>Hello</h1>", headers=SimpleNamespace())
 
             with bind_system_tool_context(
                 project_root=root,

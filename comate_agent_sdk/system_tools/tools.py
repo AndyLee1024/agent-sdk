@@ -1838,48 +1838,88 @@ async def WebFetch(
         markdown = str(cached.get("markdown", ""))
         final_url = str(cached.get("final_url", url))
         status = int(cached.get("status", 200))
+        markdown_tokens = cached.get("markdown_tokens")
+        content_signal = cached.get("content_signal")
         cached_hit = True
     else:
         cached_hit = False
+        markdown_tokens = None
+        content_signal = None
         try:
             from curl_cffi import requests as crequests
         except Exception as exc:
             return err("TOOL_NOT_AVAILABLE", f"WebFetch missing dependency curl_cffi: {exc}")
 
+        # 1. 优先请求 Markdown (Cloudflare Markdown for Agents)
         try:
             response = await _io_call(
                 crequests.get,
                 url,
                 timeout=_WEBFETCH_TIMEOUT_SECONDS,
                 impersonate="chrome",
+                headers={"Accept": "text/markdown, text/html"},
             )
         except Exception as exc:
             return err("INTERNAL", f"WebFetch request failed: {exc}", retryable=True)
 
+        # 尝试获取 headers，支持 dict 或 SimpleNamespace
+        def _get_header(resp, key):
+            headers = getattr(resp, "headers", None)
+            if headers is None:
+                return None
+            if isinstance(headers, dict):
+                return headers.get(key)
+            # SimpleNamespace 等对象
+            return getattr(headers, key, None)
+
         status = int(getattr(response, "status_code", 0) or 0)
         final_url = str(getattr(response, "url", "") or url)
-        html_text = str(getattr(response, "text", "") or "")
+        markdown_tokens = _get_header(response, "x-markdown-tokens")
+        content_signal = _get_header(response, "content-signal")
 
         if status != 200:
-            preview = _truncate_text(html_text, 2000)
-            code = "NOT_FOUND" if status == 404 else "INTERNAL"
-            return err(
-                code,
-                f"HTTP {status} fetching {final_url}",
-                meta={"status": status, "preview": preview},
-            )
+            # Markdown 请求失败，尝试普通 HTML 请求
+            try:
+                response = await _io_call(
+                    crequests.get,
+                    url,
+                    timeout=_WEBFETCH_TIMEOUT_SECONDS,
+                    impersonate="chrome",
+                )
+            except Exception as exc:
+                return err("INTERNAL", f"WebFetch request failed: {exc}", retryable=True)
 
-        try:
-            from markdownify import markdownify as to_markdown
-        except Exception as exc:
-            return err("TOOL_NOT_AVAILABLE", f"WebFetch missing dependency markdownify: {exc}")
+            status = int(getattr(response, "status_code", 0) or 0)
+            final_url = str(getattr(response, "url", "") or url)
+            html_text = str(getattr(response, "text", "") or "")
+            markdown_tokens = None
+            content_signal = None
 
-        markdown = await _io_call(to_markdown, html_text)
+            if status != 200:
+                preview = _truncate_text(html_text, 2000)
+                code = "NOT_FOUND" if status == 404 else "INTERNAL"
+                return err(
+                    code,
+                    f"HTTP {status} fetching {final_url}",
+                    meta={"status": status, "preview": preview},
+                )
+
+            try:
+                from markdownify import markdownify as to_markdown
+            except Exception as exc:
+                return err("TOOL_NOT_AVAILABLE", f"WebFetch missing dependency markdownify: {exc}")
+
+            markdown = await _io_call(to_markdown, html_text)
+        else:
+            # Markdown 请求成功
+            markdown = str(getattr(response, "text", "") or "")
         _WEBFETCH_CACHE[url] = {
             "ts": now,
             "markdown": markdown,
             "final_url": final_url,
             "status": status,
+            "markdown_tokens": markdown_tokens,
+            "content_signal": content_signal,
         }
 
     artifact = await _spill_text(
@@ -1947,6 +1987,8 @@ async def WebFetch(
             "truncated_for_llm": truncated_for_llm,
             "summary_text": completion.text,
             "model_used": str(llm.model),
+            "markdown_tokens": markdown_tokens,
+            "content_signal": content_signal,
             "read_hint": (
                 f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
             ),
@@ -1959,6 +2001,8 @@ async def WebFetch(
             "cached": cached_hit,
             "truncated_for_llm": truncated_for_llm,
             "model_used": str(llm.model),
+            "markdown_tokens": markdown_tokens,
+            "content_signal": content_signal,
         },
     )
 
