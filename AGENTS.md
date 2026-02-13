@@ -1,8 +1,3 @@
-## 项目概述
-
-这是一个 agent sdk 项目， 用于以后各种agent开发的基础设施。 这是一个非常重要的项目，必须有非常优秀的的 上下文工程 实践的沉淀。 请仔细思考每一个细节。
-
-
 ## global rule
 0. 设计应该尽可能简单，而不是更简单。 Keep It Simple, Stupid。
 1. "Simplicity is the ultimate sophistication." — Leonardo da Vinci
@@ -40,3 +35,25 @@
    DRY    Don't Repeat Yourself（不要重复自己）    代码复用
    SOLID  单一职责、开闭原则等                     面向对象设计
 
+## TUI 编程铁律
+ 
+不要做 History TUI。历史永远只写入终端 scrollback，UI 只负责底部输入、补全菜单和状态栏。任何“把聊天历史放进可滚动窗口/HSplit 顶部 TextArea”的实现，一律视为回归并拒绝合并。
+
+1. History 输出的唯一通道
+
+* 只允许 `run_in_terminal(console.print(...))` 或等价的“安全打印”通道。
+* 禁止在 prompt_toolkit 布局里存在 `history_area` / `chat_window` / `messages_view` 之类承载历史文本的组件（TextArea/Window/FormattedTextControl 都不行）。
+* 禁止为历史实现滚动、重绘、diff、虚拟列表、分页等 UI 行为。所有历史回看依赖终端 scrollback 或外部日志文件。
+
+2. 布局铁律（三行模型）
+
+* Application 布局只允许：`loading_line`（可选） + `input_line` + `status_line`，外加 `CompletionsMenu` 作为 float。
+* 任何 HSplit 上方的“内容区”高度 > 1 都视为历史 TUI 试图复活。
+
+3. 输出频率铁律
+
+* 任何 history 追加必须“批量打印”，每个 tick 最多一次 `run_in_terminal()`。
+* 禁止按 token/按事件高频打印导致 UI 暂停/恢复频繁切换。
+
+ 
+ 

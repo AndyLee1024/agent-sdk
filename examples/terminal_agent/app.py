@@ -24,7 +24,7 @@ from prompt_toolkit.document import Document
 from prompt_toolkit.filters import Condition, has_completions, has_focus
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout import Float, FloatContainer, HSplit, Layout, Window
+from prompt_toolkit.layout import FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
@@ -387,7 +387,18 @@ class TerminalAgentTUI:
             filter=~self._completion_visible,
         )
 
+        # input 与 statusline 之间的分隔行：补全菜单出现时隐藏，让菜单紧贴 input 下方
+        self._input_bottom_pad_container = ConditionalContainer(
+            content=Window(height=1, char=" ", style="class:input.pad"),
+            filter=~self._completion_visible,
+        )
 
+        # 补全菜单：绘制在 statusline 区域上方（不使用 float 覆盖 input）
+        self._completion_menu = CompletionsMenu(
+            max_height=8,
+            scroll_offset=0,
+            extra_filter=self._completion_visible,
+        )
 
         self._input_container = ConditionalContainer(
             content=self._input_area,
@@ -404,28 +415,15 @@ class TerminalAgentTUI:
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
                 self._question_container,
-                Window(height=1, char=" ", style="class:input.pad"),
-                self._status_container,   
+                self._input_bottom_pad_container,
+                self._completion_menu,
+                self._status_container,
             ]
         )
 
         self._root = FloatContainer(
             content=self._main_container,
-            floats=[
-               Float(
-                    left=0,
-                    right=0,
-                    bottom=0,  
-                    content=ConditionalContainer(
-                        content=CompletionsMenu(
-                            max_height=8,      
-                            scroll_offset=0,   
-                        ),
-                        filter=self._completion_visible,   
-                    ),
-                ) 
-
-            ],
+            floats=[],
         )
 
         self._layout = Layout(self._root, focused_element=self._input_area.window)
