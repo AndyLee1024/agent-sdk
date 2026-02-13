@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from prompt_toolkit.application import run_in_terminal
 from rich.console import Console, Group
 from rich.text import Text
 
@@ -90,7 +89,7 @@ def render_history_group(
 
 
 async def print_history_group_async(console: Console, group: Group) -> None:
-    await run_in_terminal(lambda g=group: console.print(g))
+    console.print(group)
 
 
 def print_history_group_sync(console: Console, group: Group) -> None:

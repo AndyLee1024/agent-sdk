@@ -751,6 +751,10 @@ class ChatSession:
         # Update the level (this will be used on next query via _effective_level)
         self._agent.level = level
 
+        # 同步切换实际使用的 LLM 实例
+        if self._agent.llm_levels and level in self._agent.llm_levels:
+            self._agent.llm = self._agent.llm_levels[level]
+
         # Determine new model (may be None if level not configured)
         new_model = None
         if self._agent.llm_levels and level in self._agent.llm_levels:

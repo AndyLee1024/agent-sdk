@@ -75,7 +75,7 @@ class TestTUIPastePlaceholder(unittest.TestCase):
 
         display_text, submit_text = tui._resolve_submit_texts(f"  {placeholder}\n")
 
-        self.assertEqual(display_text, placeholder)
+        self.assertEqual(display_text, payload)
         self.assertEqual(submit_text, payload)
 
     def test_handle_large_paste_preserves_existing_prefix_text(self) -> None:
@@ -91,7 +91,7 @@ class TestTUIPastePlaceholder(unittest.TestCase):
         self.assertTrue(handled)
         self.assertEqual(buffer.text, f"{prefix}[Pasted Content 8 chars]")
         display_text, submit_text = tui._resolve_submit_texts(buffer.text)
-        self.assertEqual(display_text, f"{prefix}[Pasted Content 8 chars]")
+        self.assertEqual(display_text, f"{prefix}{payload}")
         self.assertEqual(submit_text, f"{prefix}{payload}")
 
     def test_whitespace_change_does_not_clear_active_placeholder_mapping(self) -> None:
@@ -179,7 +179,7 @@ class TestTUIPastePlaceholder(unittest.TestCase):
         tui._submit_from_input()
 
         self.assertEqual(captured["text"], payload)
-        self.assertEqual(captured["display_text"], placeholder)
+        self.assertEqual(captured["display_text"], payload)
 
     def test_submit_from_input_with_prefix_expands_placeholder_segment(self) -> None:
         tui = _build_tui(threshold=5)
@@ -219,7 +219,7 @@ class TestTUIPastePlaceholder(unittest.TestCase):
         tui._submit_from_input()
 
         self.assertEqual(captured["text"], f"{prefix}{payload}")
-        self.assertEqual(captured["display_text"], expected_display)
+        self.assertEqual(captured["display_text"], f"{prefix}{payload}")
 
 
 if __name__ == "__main__":

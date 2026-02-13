@@ -1,3 +1,12 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "comate-agent-sdk>=0.0.1",
+#     "rich>=14.0",
+#     "prompt-toolkit>=3.0",
+# ]
+# ///
+
 """Strong terminal agent entrypoint.
 
 该入口仅负责启动 `examples/terminal_agent/app.py`。

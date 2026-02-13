@@ -28,6 +28,7 @@ from prompt_toolkit.layout import FloatContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.containers import ConditionalContainer
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.menus import CompletionsMenu
+from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
@@ -830,7 +831,8 @@ class TerminalAgentTUI:
             payload = self._paste_payload_by_token.get(token)
             if payload is not None:
                 submit_text = raw_text.replace(placeholder, payload, 1).strip()
-                return stripped, submit_text
+                # 在 history 中展示真实发送内容，避免显示占位符文本。
+                return submit_text, submit_text
         return stripped, stripped
 
     def _handle_large_paste(self, buffer: Any) -> bool:
@@ -1638,7 +1640,9 @@ class TerminalAgentTUI:
             name="terminal-ui-tick",
         )
         try:
-            await self._app.run_async()
+            # Ensure scrollback prints don't mix with the inline (full_screen=False) UI.
+            with patch_stdout(self._app):
+                await self._app.run_async()
         finally:
             self._closing = True
             if self._ui_tick_task is not None:
