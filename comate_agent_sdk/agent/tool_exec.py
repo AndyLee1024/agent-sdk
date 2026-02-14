@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from contextlib import nullcontext
@@ -224,6 +225,90 @@ def _extract_tool_envelope(
     return None
 
 
+def _apply_hook_additional_context(agent: "AgentRuntime", additional_context: str | None) -> None:
+    if additional_context:
+        agent.add_hidden_user_message(additional_context)
+
+
+def _safe_parse_tool_args(raw: str) -> dict[str, Any]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"_raw": raw}
+    if isinstance(data, dict):
+        return data
+    return {"_raw": raw}
+
+
+def _stringify_hook_response(content: str | list[ContentPartTextParam | ContentPartImageParam]) -> str:
+    if isinstance(content, str):
+        return content
+    text_parts: list[str] = []
+    for part in content:
+        if getattr(part, "type", None) == "text":
+            text = getattr(part, "text", "")
+            if isinstance(text, str):
+                text_parts.append(text)
+    return "\n".join(text_parts)
+
+
+async def _evaluate_tool_approval(
+    agent: "AgentRuntime",
+    *,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    tool_call_id: str,
+    reason: str | None,
+) -> tuple[bool, str | None]:
+    callback = agent.tool_approval_callback
+    if callback is None:
+        return False, reason or "Tool approval is required, but no approval callback is configured."
+
+    payload = {
+        "session_id": agent._session_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_call_id": tool_call_id,
+        "cwd": str((agent.project_root or Path.cwd()).resolve()),
+        "permission_mode": str(agent.permission_mode or "default"),
+        "reason": reason,
+    }
+
+    try:
+        result = callback(**payload)
+    except TypeError:
+        try:
+            result = callback(payload)
+        except Exception as exc:
+            return False, f"Tool approval callback failed: {exc}"
+    except Exception as exc:
+        return False, f"Tool approval callback failed: {exc}"
+
+    if inspect.isawaitable(result):
+        result = await result
+
+    if isinstance(result, bool):
+        return result, reason if not result else None
+
+    if isinstance(result, str):
+        lowered = result.strip().lower()
+        if lowered in {"allow", "approved", "yes"}:
+            return True, None
+        if lowered in {"deny", "blocked", "no"}:
+            return False, reason or "Tool use denied by approval callback."
+
+    if isinstance(result, dict):
+        decision = str(result.get("decision", "")).lower().strip()
+        cb_reason = result.get("reason")
+        if decision in {"allow", "approved", "yes"}:
+            return True, None
+        if decision in {"deny", "blocked", "no"}:
+            reason_text = cb_reason if isinstance(cb_reason, str) and cb_reason else reason
+            return False, reason_text or "Tool use denied by approval callback."
+
+    return False, reason or "Tool use denied by approval callback."
+
+
 async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolMessage:
     """执行单个 tool call，返回 ToolMessage。"""
     tool_name = tool_call.function.name
@@ -249,12 +334,22 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                 error_msg += " No MCP tools are currently loaded. Check MCP server connection."
 
         logger.warning(f"工具执行失败: {error_msg}")
-        return ToolMessage(
+        tool_message = ToolMessage(
             tool_call_id=tool_call.id,
             tool_name=tool_name,
             content=error_msg,
             is_error=True,
         )
+        outcome = await agent.run_hook_event(
+            "PostToolUseFailure",
+            tool_name=tool_name,
+            tool_input=_safe_parse_tool_args(tool_call.function.arguments),
+            tool_call_id=tool_call.id,
+            error=tool_message.text,
+        )
+        if outcome is not None:
+            _apply_hook_additional_context(agent, outcome.additional_context)
+        return tool_message
 
     # Create Laminar span for tool execution
     if Laminar is not None:
@@ -289,12 +384,92 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
         llm_levels=agent.llm_levels,  # type: ignore[arg-type]
         agent_context=agent._context,
     ):
+        args: dict[str, Any] = _safe_parse_tool_args(tool_call.function.arguments)
+
+        async def _fire_post_tool_hooks(tool_message: ToolMessage) -> None:
+            if tool_message.is_error:
+                outcome = await agent.run_hook_event(
+                    "PostToolUseFailure",
+                    tool_name=tool_name,
+                    tool_input=args,
+                    tool_call_id=tool_call.id,
+                    error=tool_message.text,
+                )
+            else:
+                outcome = await agent.run_hook_event(
+                    "PostToolUse",
+                    tool_name=tool_name,
+                    tool_input=args,
+                    tool_call_id=tool_call.id,
+                    tool_response=_stringify_hook_response(tool_message.content),
+                )
+            if outcome is not None:
+                _apply_hook_additional_context(agent, outcome.additional_context)
+
         try:
             # Parse arguments
             args = json.loads(tool_call.function.arguments)
 
             # Schema-aware coerce: 修复非原生 OpenAI 模型返回的字符串化参数
             args = _coerce_tool_arguments(args, tool.definition.parameters)
+
+            pre_outcome = await agent.run_hook_event(
+                "PreToolUse",
+                tool_name=tool_name,
+                tool_input=args,
+                tool_call_id=tool_call.id,
+            )
+            if pre_outcome is not None:
+                _apply_hook_additional_context(agent, pre_outcome.additional_context)
+
+                if pre_outcome.permission_decision == "deny":
+                    deny_reason = pre_outcome.reason or "Tool use denied by hook."
+                    if Laminar is not None:
+                        Laminar.set_span_output({"error": deny_reason})
+                    tool_message = ToolMessage(
+                        tool_call_id=tool_call.id,
+                        tool_name=tool_name,
+                        content=deny_reason,
+                        is_error=True,
+                    )
+                    await _fire_post_tool_hooks(tool_message)
+                    return tool_message
+
+                if pre_outcome.permission_decision == "ask":
+                    approved, deny_reason = await _evaluate_tool_approval(
+                        agent,
+                        tool_name=tool_name,
+                        tool_input=args,
+                        tool_call_id=tool_call.id,
+                        reason=pre_outcome.reason,
+                    )
+                    if not approved:
+                        deny_text = deny_reason or "Tool use denied by approval callback."
+                        if Laminar is not None:
+                            Laminar.set_span_output({"error": deny_text})
+                        tool_message = ToolMessage(
+                            tool_call_id=tool_call.id,
+                            tool_name=tool_name,
+                            content=deny_text,
+                            is_error=True,
+                        )
+                        await _fire_post_tool_hooks(tool_message)
+                        return tool_message
+
+                if (
+                    pre_outcome.updated_input is not None
+                    and pre_outcome.permission_decision != "deny"
+                ):
+                    if not isinstance(pre_outcome.updated_input, dict):
+                        tool_message = ToolMessage(
+                            tool_call_id=tool_call.id,
+                            tool_name=tool_name,
+                            content="Error executing tool: hook updatedInput must be a JSON object",
+                            is_error=True,
+                        )
+                        await _fire_post_tool_hooks(tool_message)
+                        return tool_message
+                    args = _coerce_tool_arguments(pre_outcome.updated_input, tool.definition.parameters)
 
             # Execute the tool (with dependency overrides if configured)
             result = await tool.execute(_overrides=agent.dependency_overrides, **args)
@@ -337,6 +512,8 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                 truncation_record=truncation_record,
             )
 
+            await _fire_post_tool_hooks(tool_message)
+
             # Set span output
             if Laminar is not None:
                 if is_error:
@@ -362,24 +539,28 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
             error_msg = f"Error parsing arguments: {e}"
             if Laminar is not None:
                 Laminar.set_span_output({"error": error_msg})
-            return ToolMessage(
+            tool_message = ToolMessage(
                 tool_call_id=tool_call.id,
                 tool_name=tool_name,
                 content=error_msg,
                 is_error=True,
             )
+            await _fire_post_tool_hooks(tool_message)
+            return tool_message
         except asyncio.CancelledError:
             raise
         except Exception as e:
             error_msg = f"Error executing tool: {e}"
             if Laminar is not None:
                 Laminar.set_span_output({"error": error_msg})
-            return ToolMessage(
+            tool_message = ToolMessage(
                 tool_call_id=tool_call.id,
                 tool_name=tool_name,
                 content=error_msg,
                 is_error=True,
             )
+            await _fire_post_tool_hooks(tool_message)
+            return tool_message
 
 
 def extract_screenshot(tool_message: ToolMessage) -> str | None:

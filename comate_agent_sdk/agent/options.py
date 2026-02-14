@@ -75,7 +75,13 @@ class AgentConfig:
     memory: object | None = None  # MemoryConfig
 
     # Settings / env
-    setting_sources: tuple[Literal["user", "project"], ...] | None = ("user", "project")
+    setting_sources: tuple[Literal["user", "project", "local"], ...] | None = (
+        "user",
+        "project",
+        "local",
+    )
+    permission_mode: str = "default"
+    tool_approval_callback: Any | None = None
     env_options: EnvOptions | None = None
 
     # MCP
@@ -145,7 +151,13 @@ class RuntimeAgentOptions:
     memory: object | None = None  # MemoryConfig
 
     # Settings / env
-    setting_sources: tuple[Literal["user", "project"], ...] | None = ("user", "project")
+    setting_sources: tuple[Literal["user", "project", "local"], ...] | None = (
+        "user",
+        "project",
+        "local",
+    )
+    permission_mode: str = "default"
+    tool_approval_callback: Any | None = None
     env_options: EnvOptions | None = None
 
     # MCP
@@ -203,6 +215,8 @@ def build_runtime_options(
         skills=list(resolved_skills) if resolved_skills is not None else None,
         memory=resolved_memory,
         setting_sources=config.setting_sources,
+        permission_mode=config.permission_mode,
+        tool_approval_callback=config.tool_approval_callback,
         env_options=config.env_options,
         mcp_enabled=config.mcp_enabled,
         mcp_servers=config.mcp_servers,

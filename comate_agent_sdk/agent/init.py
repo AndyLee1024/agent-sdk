@@ -396,6 +396,20 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
 
     _setup_env_info(runtime)
 
+    from comate_agent_sdk.agent.hooks.engine import HookEngine
+    from comate_agent_sdk.agent.hooks.loader import load_hook_config_from_sources
+
+    hook_config = load_hook_config_from_sources(
+        project_root=runtime.project_root,
+        sources=runtime.setting_sources,
+    )
+    runtime._hook_engine = HookEngine(
+        config=hook_config,
+        project_root=runtime.project_root,
+        session_id=runtime._session_id,
+        permission_mode=runtime.permission_mode,
+    )
+
 
 # 兼容旧调用路径
 agent_post_init = init_runtime_from_template

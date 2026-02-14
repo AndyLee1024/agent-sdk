@@ -758,6 +758,315 @@ agent = Agent(
 )
 ```
 
+## Hook 系统
+
+Hook 系统允许你在 Agent 执行过程中插入自定义逻辑，实现诸如权限控制、日志记录、内容增强等功能。
+
+### 概述
+
+Hook 系统支持两种类型的 handler：
+
+| 类型 | 说明 | 适用场景 |
+|------|------|----------|
+| `command` | 执行外部命令 | 跨语言集成、权限控制 |
+| `python` | 执行 Python 回调函数 | 快速原型、性能敏感 |
+
+### 配置来源
+
+Hook 配置通过以下顺序加载（后者优先级更高）：
+
+1. **user** - `~/.agent/settings.json`
+2. **project** - `{project}/.agent/settings.json`
+3. **local** - `{project}/.agent/local-settings.json`
+
+### 事件类型
+
+| 事件名 | 触发时机 | 支持 matcher |
+|--------|----------|---------------|
+| `SessionStart` | 会话开始时 | ❌ |
+| `UserPromptSubmit` | 用户提交 prompt 时 | ❌ |
+| `PreToolUse` | 工具执行前 | ✅ |
+| `PostToolUse` | 工具执行成功后 | ✅ |
+| `PostToolUseFailure` | 工具执行失败后 | ✅ |
+| `Stop` | Agent 停止前 | ❌ |
+| `SessionEnd` | 会话结束时 | ❌ |
+| `SubagentStart` | 子代理启动时 | ❌ |
+| `SubagentStop` | 子代理停止时 | ❌ |
+
+### 配置格式
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .agent/hooks/validate_tool.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Matcher 匹配规则
+
+`matcher` 支持正则表达式，用于过滤特定工具：
+
+| Matcher 示例 | 匹配的工具 |
+|-------------|-----------|
+| `"*"` | 所有工具 |
+| `"^Read$"` | 仅 Read |
+| `"Read\|Grep\|Bash"` | Read、Grep 或 Bash |
+| `"^Bash.*"` | Bash 开头的工具 |
+| `".*File.*"` | 包含 File 的工具 |
+
+### Command Hook
+
+#### 输入
+
+Command hook 通过 **stdin** 接收 JSON 格式的输入：
+
+```json
+{
+  "session_id": "xxx",
+  "cwd": "/path/to/project",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Read",
+  "tool_input": {"file_path": "main.py"},
+  "tool_call_id": "call_xxx"
+}
+```
+
+#### 输出
+
+Command hook 通过 **stdout** 返回 JSON 结果：
+
+```json
+{
+  "additionalContext": "返回给 LLM 的额外上下文",
+  "permissionDecision": "allow",
+  "updatedInput": {"file_path": "main.py"},
+  "reason": "拒绝/询问的原因"
+}
+```
+
+#### 阻止执行
+
+**方式一：Exit Code 2 + stderr**
+
+```python
+#!/usr/bin/env python3
+import sys
+
+print("禁止执行此操作", file=sys.stderr)
+sys.exit(2)
+```
+
+**方式二：JSON 返回 deny**
+
+```json
+{
+  "permissionDecision": "deny",
+  "reason": "禁止访问敏感文件"
+}
+```
+
+**方式三：JSON 返回 ask + 用户拒绝**
+
+```json
+{
+  "permissionDecision": "ask",
+  "reason": "需要用户确认"
+}
+```
+
+#### 完整示例：阻止访问 .env 文件
+
+```python
+#!/usr/bin/env python3
+"""阻止访问 .env 文件的 Hook"""
+import sys
+import json
+
+# 读取 hook 输入
+hook_input = json.load(sys.stdin)
+tool_name = hook_input.get("tool_name", "")
+tool_input = hook_input.get("tool_input", {})
+
+# 检查是否访问 .env
+file_path = str(tool_input.get("file_path", ""))
+if ".env" in file_path or ".env" in file_path:
+    print(json.dumps({
+        "additionalContext": "⚠️ 注意：此操作试图读取 .env 文件，可能包含敏感信息",
+        "permissionDecision": "allow",
+        "reason": "检测到 .env 文件访问"
+    }))
+else:
+    print(json.dumps({
+        "permissionDecision": "allow"
+    }))
+```
+
+### Python Hook
+
+#### 注册方式
+
+```python
+from comate_agent_sdk import Agent, AgentConfig
+from comate_agent_sdk.agent.hooks.models import HookInput, HookResult
+
+def my_pre_tool_hook(hook_input: HookInput) -> HookResult:
+    print(f"Tool: {hook_input.tool_name}")
+    return HookResult(permission_decision="allow")
+
+agent = Agent(config=AgentConfig(...))
+agent.register_python_hook(
+    event_name="PreToolUse",
+    callback=my_pre_tool_hook,
+    matcher="Bash",  # 可选，默认 "*"
+    order=0,          # 可选，执行顺序
+    name="my_hook",   # 可选，hook 名称
+)
+```
+
+#### 回调函数签名
+
+```python
+from comate_agent_sdk.agent.hooks.models import HookInput, HookResult
+
+def hook_callback(hook_input: HookInput) -> HookResult | dict | None:
+    # hook_input 包含事件相关数据
+    # 返回值可以是：
+    # - HookResult 对象
+    # - dict (会自动转换为 HookResult)
+    # - None (忽略此 hook)
+    return HookResult(
+        additional_context="额外上下文",
+        permission_decision="allow",  # allow/ask/deny
+        updated_input={"key": "value"},  # 修改后的参数
+        reason="原因",
+    )
+
+# 支持异步
+async def async_hook_callback(hook_input: HookInput) -> HookResult:
+    # 异步逻辑
+    return HookResult(permission_decision="allow")
+```
+
+### HookResult 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `additional_context` | `str \| None` | 返回给 LLM 的额外上下文 |
+| `permission_decision` | `Literal["allow", "ask", "deny"]` | 权限决策 |
+| `updated_input` | `dict \| None` | 修改后的工具参数 |
+| `reason` | `str \| None` | 拒绝/询问的原因 |
+
+### 权限模式
+
+通过 `permission_mode` 配置不同的权限级别：
+
+```python
+from comate_agent_sdk import AgentConfig
+
+agent = Agent(
+    config=AgentConfig(
+        permission_mode="default",  # 默认模式
+    )
+)
+```
+
+Hook 可以通过 `hook_input.permission_mode` 获取当前权限模式。
+
+### 工具审批回调
+
+当 Hook 返回 `permissionDecision: "ask"` 时，可以使用 `tool_approval_callback` 配置审批逻辑：
+
+```python
+from comate_agent_sdk import AgentConfig
+
+async def approve_tool(session_id: str, tool_name: str, tool_input: dict, **kwargs):
+    # 自定义审批逻辑
+    if tool_name == "Bash" and "rm" in str(tool_input):
+        return False
+    return True
+
+agent = Agent(
+    config=AgentConfig(
+        tool_approval_callback=approve_tool,
+    )
+)
+```
+
+### 完整配置示例
+
+**~/.agent/settings.json (用户级)**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/log_tool.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**项目级 .claude/settings.json**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/check_file_access.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/check_command.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/log_result.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 ## MCP 集成
 
 ### 创建 MCP 服务器

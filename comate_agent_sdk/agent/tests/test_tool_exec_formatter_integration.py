@@ -21,6 +21,14 @@ class _FakeAgent:
         self._token_cost = None
         self.llm_levels = None
         self._context = None
+        self.permission_mode = "default"
+        self.tool_approval_callback = None
+
+    async def run_hook_event(self, event_name: str, **kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+    def add_hidden_user_message(self, content: str) -> None:
+        _ = content
 
 
 class TestToolExecFormatterIntegration(unittest.IsolatedAsyncioTestCase):

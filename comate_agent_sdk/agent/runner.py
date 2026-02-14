@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -329,17 +330,108 @@ async def precheck_and_compact(
     return compacted, event, _build_compaction_meta_events(agent, policy)
 
 
+def _apply_hook_additional_context(agent: "AgentRuntime", additional_context: str | None) -> None:
+    if additional_context:
+        agent.add_hidden_user_message(additional_context)
+        agent.drain_hidden_user_messages()
+
+
+async def _fire_session_start_if_needed(agent: "AgentRuntime") -> None:
+    if agent._hooks_session_started:
+        return
+    outcome = await agent.run_hook_event("SessionStart")
+    agent._hooks_session_started = True
+    if outcome is not None:
+        _apply_hook_additional_context(agent, outcome.additional_context)
+
+
+async def _fire_user_prompt_submit(agent: "AgentRuntime", message: str) -> None:
+    outcome = await agent.run_hook_event("UserPromptSubmit", prompt=message)
+    if outcome is not None:
+        _apply_hook_additional_context(agent, outcome.additional_context)
+
+
+def _resolve_subagent_hook_payload(tool_call: ToolCall) -> tuple[str, str]:
+    try:
+        args = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError:
+        args = {}
+
+    subagent_name = args.get("subagent_type", "Task")
+    description = args.get("description", subagent_name)
+
+    if not isinstance(subagent_name, str) or not subagent_name.strip():
+        subagent_name = "Task"
+    if not isinstance(description, str) or not description.strip():
+        description = subagent_name
+    return subagent_name.strip(), description.strip()
+
+
+async def _fire_subagent_hook(
+    agent: "AgentRuntime",
+    *,
+    event_name: str,
+    tool_call: ToolCall,
+    subagent_status: str | None = None,
+) -> None:
+    subagent_name, description = _resolve_subagent_hook_payload(tool_call)
+    outcome = await agent.run_hook_event(
+        event_name,
+        tool_call_id=tool_call.id,
+        subagent_name=subagent_name,
+        subagent_description=description,
+        subagent_status=subagent_status,
+    )
+    if outcome is not None:
+        _apply_hook_additional_context(agent, outcome.additional_context)
+
+
+async def _maybe_block_stop(agent: "AgentRuntime", stop_reason: str) -> bool:
+    outcome = await agent.run_hook_event(
+        "Stop",
+        stop_reason=stop_reason,
+        stop_hook_active=agent._stop_hook_block_count > 0,
+    )
+    if outcome is None or not outcome.should_block_stop:
+        agent.reset_stop_hook_state()
+        return False
+
+    should_continue = agent.mark_stop_blocked_once()
+    block_reason = outcome.reason or f"Stop blocked by hook: {stop_reason}"
+    agent.add_hidden_user_message(block_reason)
+    agent.drain_hidden_user_messages()
+    _apply_hook_additional_context(agent, outcome.additional_context)
+    if not should_continue:
+        logger.warning(
+            f"Stop hook blocked {agent._stop_hook_block_count} times, forcing stop (reason={stop_reason})"
+        )
+        agent.reset_stop_hook_state()
+        return False
+    return True
+
+
 async def query(agent: "AgentRuntime", message: str) -> str:
     """非流式执行：发送消息并返回最终文本。"""
+    await _fire_session_start_if_needed(agent)
+    agent.reset_stop_hook_state()
+
     # Add the user message to context
     agent._context.add_message(UserMessage(content=message))
 
     # 注册初始 TODO 提醒（如果需要）
     agent._context.register_initial_todo_reminder_if_needed()
+    await _fire_user_prompt_submit(agent, message)
 
     iterations = 0
 
-    while iterations < agent.max_iterations:
+    while True:
+        if iterations >= agent.max_iterations:
+            summary = await generate_max_iterations_summary(agent)
+            if await _maybe_block_stop(agent, "max_iterations"):
+                iterations = max(0, agent.max_iterations - 1)
+                continue
+            return summary
+
         iterations += 1
 
         # Destroy ephemeral messages from previous iteration before LLM sees them again
@@ -361,6 +453,8 @@ async def query(agent: "AgentRuntime", message: str) -> str:
             if pre_compact_event:
                 logger.info(f"Pre-compact event: {pre_compact_event}")
             _log_compaction_meta_events(compaction_meta_events)
+            if await _maybe_block_stop(agent, "completed"):
+                continue
             return response.content or ""
 
         # Execute tool calls (Task calls can run in parallel when contiguous)
@@ -378,6 +472,9 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                     idx += 1
 
                 semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
+
+                for tc in group:
+                    await _fire_subagent_hook(agent, event_name="SubagentStart", tool_call=tc)
 
                 async def _run(tc: ToolCall) -> tuple[str, ToolMessage]:
                     async with semaphore:
@@ -406,6 +503,13 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                 for tc in group:
                     tool_result = results_by_id[tc.id]
                     agent._context.add_message(tool_result)
+                    agent.drain_hidden_user_messages()
+                    await _fire_subagent_hook(
+                        agent,
+                        event_name="SubagentStop",
+                        tool_call=tc,
+                        subagent_status="error" if tool_result.is_error else "completed",
+                    )
 
                     # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
                     if agent._context.has_pending_skill_items:
@@ -419,8 +523,19 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                 continue
 
             # Default: serial execution
+            if tool_name == "Task":
+                await _fire_subagent_hook(agent, event_name="SubagentStart", tool_call=tool_call)
+
             tool_result = await execute_tool_call(agent, tool_call)
             agent._context.add_message(tool_result)
+            agent.drain_hidden_user_messages()
+            if tool_name == "Task":
+                await _fire_subagent_hook(
+                    agent,
+                    event_name="SubagentStop",
+                    tool_call=tool_call,
+                    subagent_status="error" if tool_result.is_error else "completed",
+                )
 
             # 新增:预检查压缩
             compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
@@ -439,6 +554,3 @@ async def query(agent: "AgentRuntime", message: str) -> str:
         if pre_compact_event:
             logger.info(f"Pre-compact event: {pre_compact_event}")
         _log_compaction_meta_events(compaction_meta_events)
-
-    # Max iterations reached - generate summary of what was accomplished
-    return await generate_max_iterations_summary(agent)

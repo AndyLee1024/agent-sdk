@@ -22,6 +22,7 @@ from comate_agent_sdk.llm.messages import (
     ContentPartTextParam,
     ToolCall,
     ToolMessage,
+    UserMessage,
 )
 from comate_agent_sdk.observability import observe
 from comate_agent_sdk.tokens import TokenCost, UsageSummary
@@ -31,6 +32,7 @@ logger = logging.getLogger("comate_agent_sdk.agent")
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.events import AgentEvent
+    from comate_agent_sdk.agent.hooks.models import AggregatedHookOutcome, HookInput
     from comate_agent_sdk.agent.interrupt import SessionRunController
     from comate_agent_sdk.context.env import EnvOptions
     from comate_agent_sdk.llm.views import ChatInvokeCompletion
@@ -206,6 +208,12 @@ class AgentRuntime:
     _context_fs: ContextFileSystem | None = field(default=None, repr=False, init=False)
     _session_id: str = field(default="", repr=False, init=False)
     _run_controller: "SessionRunController | None" = field(default=None, repr=False, init=False)
+    _hook_engine: Any | None = field(default=None, repr=False, init=False)
+    _pending_hidden_user_messages: list[str] = field(default_factory=list, repr=False, init=False)
+    _hooks_session_started: bool = field(default=False, repr=False, init=False)
+    _hooks_session_ended: bool = field(default=False, repr=False, init=False)
+    _stop_hook_block_count: int = field(default=0, repr=False, init=False)
+    _stop_hook_block_limit: int = field(default=3, repr=False, init=False)
 
     # MCP internal state
     _mcp_manager: Any | None = field(default=None, repr=False, init=False)
@@ -451,12 +459,28 @@ class AgentRuntime:
         self.options.memory = value
 
     @property
-    def setting_sources(self) -> tuple[Literal["user", "project"], ...] | None:
+    def setting_sources(self) -> tuple[Literal["user", "project", "local"], ...] | None:
         return self.options.setting_sources
 
     @setting_sources.setter
-    def setting_sources(self, value: tuple[Literal["user", "project"], ...] | None) -> None:
+    def setting_sources(self, value: tuple[Literal["user", "project", "local"], ...] | None) -> None:
         self.options.setting_sources = value
+
+    @property
+    def permission_mode(self) -> str:
+        return self.options.permission_mode
+
+    @permission_mode.setter
+    def permission_mode(self, value: str) -> None:
+        self.options.permission_mode = value
+
+    @property
+    def tool_approval_callback(self) -> Any | None:
+        return self.options.tool_approval_callback
+
+    @tool_approval_callback.setter
+    def tool_approval_callback(self, value: Any | None) -> None:
+        self.options.tool_approval_callback = value
 
     @property
     def env_options(self) -> "EnvOptions | None":
@@ -602,6 +626,64 @@ class AgentRuntime:
             categories=categories,
             compaction_enabled=compaction_enabled,
         )
+
+    def add_hidden_user_message(self, content: str) -> None:
+        text = content.strip()
+        if not text:
+            return
+        self._context.add_message(UserMessage(content=text, is_meta=True))
+        self._pending_hidden_user_messages.append(text)
+
+    def drain_hidden_user_messages(self) -> list[str]:
+        if not self._pending_hidden_user_messages:
+            return []
+        pending = list(self._pending_hidden_user_messages)
+        self._pending_hidden_user_messages.clear()
+        return pending
+
+    def build_hook_input(self, event_name: str, **kwargs: Any) -> "HookInput":
+        from comate_agent_sdk.agent.hooks.models import HookInput
+
+        cwd = str((self.project_root or Path.cwd()).resolve())
+        return HookInput(
+            session_id=self._session_id,
+            cwd=cwd,
+            permission_mode=str(self.permission_mode or "default"),
+            hook_event_name=event_name,
+            **kwargs,
+        )
+
+    async def run_hook_event(self, event_name: str, **kwargs: Any) -> "AggregatedHookOutcome | None":
+        if self._hook_engine is None:
+            return None
+        hook_input = self.build_hook_input(event_name, **kwargs)
+        return await self._hook_engine.run_event(event_name, hook_input)
+
+    def register_python_hook(
+        self,
+        *,
+        event_name: str,
+        callback: Any,
+        matcher: str = "*",
+        order: int = 0,
+        name: str | None = None,
+    ) -> None:
+        if self._hook_engine is None:
+            raise ValueError("Hook engine is not initialized")
+        self._hook_engine.register_python_hook(
+            event_name=event_name,
+            callback=callback,
+            matcher=matcher,
+            order=order,
+            name=name,
+        )
+
+    def reset_stop_hook_state(self) -> None:
+        self._stop_hook_block_count = 0
+
+    def mark_stop_blocked_once(self) -> bool:
+        self._stop_hook_block_count += 1
+        return self._stop_hook_block_count <= self._stop_hook_block_limit
 
     def _resolve_system_prompt(self) -> str:
         return resolve_system_prompt(self.system_prompt, role=self.role)

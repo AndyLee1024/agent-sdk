@@ -1,10 +1,17 @@
 """Settings 配置文件加载
 
-从 ~/.agent/settings.json（user级）和 {project_root}/.agent/settings.json（project级）
+从 ~/.agent/settings.json（user 级）、
+{project_root}/.agent/settings.json（project 级）、
+{project_root}/.agent/settings.local.json（local 级）
 加载 LLM 配置，支持分层覆盖。
 
 优先级（从高到低）：
-    代码参数 llm_levels= > project/.agent/settings.json > ~/.agent/settings.json > 环境变量 > 默认值
+    代码参数 llm_levels=
+    > project/.agent/settings.local.json
+    > project/.agent/settings.json
+    > ~/.agent/settings.json
+    > 环境变量
+    > 默认值
 """
 
 from __future__ import annotations
@@ -17,12 +24,13 @@ from typing import Literal
 
 logger = logging.getLogger("comate_agent_sdk.agent.settings")
 
-SettingSource = Literal["user", "project"]
-DEFAULT_SETTING_SOURCES: tuple[SettingSource, ...] = ("user", "project")
+SettingSource = Literal["user", "project", "local"]
+DEFAULT_SETTING_SOURCES: tuple[SettingSource, ...] = ("user", "project", "local")
 
 # 用户级配置路径
 USER_SETTINGS_PATH: Path = Path.home() / ".agent" / "settings.json"
 USER_AGENTS_MD_PATH: Path = Path.home() / ".agent" / "AGENTS.md"
+LOCAL_SETTINGS_FILENAME = "settings.local.json"
 
 
 @dataclass
@@ -143,6 +151,7 @@ def resolve_settings(
 
     user_settings: SettingsConfig | None = None
     project_settings: SettingsConfig | None = None
+    local_settings: SettingsConfig | None = None
 
     if "user" in sources:
         user_settings = load_settings_file(USER_SETTINGS_PATH)
@@ -155,17 +164,24 @@ def resolve_settings(
         if project_settings:
             logger.debug(f"加载 project settings: {project_path}")
 
-    # 合并：project 完全覆盖 user
-    if project_settings is None:
-        result = user_settings  # 可能也是 None
-    elif user_settings is None:
-        result = project_settings
-    else:
-        # 两者都有：project 字段非 None 时完全覆盖 user 对应字段
+    if "local" in sources:
+        local_path = root / ".agent" / LOCAL_SETTINGS_FILENAME
+        local_settings = load_settings_file(local_path)
+        if local_settings:
+            logger.debug(f"加载 local settings: {local_path}")
+
+    # 合并：local > project > user（字段级覆盖）
+    result: SettingsConfig | None = None
+    for cfg in (user_settings, project_settings, local_settings):
+        if cfg is None:
+            continue
+        if result is None:
+            result = cfg
+            continue
         result = SettingsConfig(
-            llm_levels=project_settings.llm_levels if project_settings.llm_levels is not None else user_settings.llm_levels,
-            llm_levels_base_url=project_settings.llm_levels_base_url if project_settings.llm_levels_base_url is not None else user_settings.llm_levels_base_url,
-            llm_levels_api_key=project_settings.llm_levels_api_key if project_settings.llm_levels_api_key is not None else user_settings.llm_levels_api_key,
+            llm_levels=cfg.llm_levels if cfg.llm_levels is not None else result.llm_levels,
+            llm_levels_base_url=cfg.llm_levels_base_url if cfg.llm_levels_base_url is not None else result.llm_levels_base_url,
+            llm_levels_api_key=cfg.llm_levels_api_key if cfg.llm_levels_api_key is not None else result.llm_levels_api_key,
         )
 
     # 输出配置加载日志

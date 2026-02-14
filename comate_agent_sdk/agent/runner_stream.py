@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Literal
 
 from comate_agent_sdk.agent.events import (
     AgentEvent,
+    HiddenUserMessageEvent,
     PreCompactEvent,
     StepCompleteEvent,
     StepStartEvent,
@@ -116,6 +117,52 @@ def _is_interrupt_requested(agent: "AgentRuntime") -> bool:
     return bool(controller.is_interrupted)
 
 
+async def _drain_hidden_events(agent: "AgentRuntime") -> AsyncIterator[AgentEvent]:
+    for content in agent.drain_hidden_user_messages():
+        yield HiddenUserMessageEvent(content=content)
+
+
+async def _fire_session_start_if_needed(agent: "AgentRuntime") -> None:
+    if agent._hooks_session_started:
+        return
+    outcome = await agent.run_hook_event("SessionStart")
+    agent._hooks_session_started = True
+    if outcome is not None and outcome.additional_context:
+        agent.add_hidden_user_message(outcome.additional_context)
+
+
+async def _fire_user_prompt_submit(agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]) -> None:
+    prompt = message if isinstance(message, str) else "[multi-modal]"
+    outcome = await agent.run_hook_event("UserPromptSubmit", prompt=prompt)
+    if outcome is not None and outcome.additional_context:
+        agent.add_hidden_user_message(outcome.additional_context)
+
+
+async def _run_stop_hook(agent: "AgentRuntime", stop_reason: str) -> bool:
+    outcome = await agent.run_hook_event(
+        "Stop",
+        stop_reason=stop_reason,
+        stop_hook_active=agent._stop_hook_block_count > 0,
+    )
+    if outcome is None or not outcome.should_block_stop:
+        agent.reset_stop_hook_state()
+        return False
+
+    should_continue = agent.mark_stop_blocked_once()
+    block_reason = outcome.reason or f"Stop blocked by hook: {stop_reason}"
+    agent.add_hidden_user_message(block_reason)
+    if outcome.additional_context:
+        agent.add_hidden_user_message(outcome.additional_context)
+
+    if not should_continue:
+        logger.warning(
+            f"Stop hook blocked {agent._stop_hook_block_count} times, forcing stop (reason={stop_reason})"
+        )
+        agent.reset_stop_hook_state()
+        return False
+    return True
+
+
 async def query_stream(
     agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]
 ) -> AsyncIterator[AgentEvent]:
@@ -166,6 +213,8 @@ async def query_stream(
     async def _yield_interrupted_stop() -> AsyncIterator[AgentEvent]:
         async for usage_event in _drain_usage_events():
             yield usage_event
+        async for hidden_event in _drain_hidden_events(agent):
+            yield hidden_event
         yield StopEvent(reason="interrupted")
 
     async def _emit_cancelled_task(tool_call_id: str) -> AsyncIterator[AgentEvent]:
@@ -194,6 +243,17 @@ async def query_stream(
                 duration_ms=elapsed_ms,
                 error="Interrupted by user",
             )
+            hook_outcome = await agent.run_hook_event(
+                "SubagentStop",
+                tool_call_id=tool_call_id,
+                subagent_name=subagent_name,
+                subagent_description=description,
+                subagent_status="cancelled",
+            )
+            if hook_outcome is not None and hook_outcome.additional_context:
+                agent.add_hidden_user_message(hook_outcome.additional_context)
+            async for hidden_event in _drain_hidden_events(agent):
+                yield hidden_event
         yield StepCompleteEvent(
             step_id=tool_call_id,
             status="cancelled",
@@ -203,15 +263,38 @@ async def query_stream(
     usage_observer_id = agent._token_cost.subscribe_usage(_on_usage_entry)
 
     try:
+        await _fire_session_start_if_needed(agent)
+        agent.reset_stop_hook_state()
+        async for hidden_event in _drain_hidden_events(agent):
+            yield hidden_event
+
         # Add the user message to context (supports both string and multi-modal content)
         agent._context.add_message(UserMessage(content=message))
 
         # 注册初始 TODO 提醒（如果需要）
         agent._context.register_initial_todo_reminder_if_needed()
+        await _fire_user_prompt_submit(agent, message)
+        async for hidden_event in _drain_hidden_events(agent):
+            yield hidden_event
 
         iterations = 0
 
-        while iterations < agent.max_iterations:
+        while True:
+            if iterations >= agent.max_iterations:
+                summary = await generate_max_iterations_summary(agent)
+                async for usage_event in _drain_usage_events():
+                    yield usage_event
+                yield TextEvent(content=summary)
+                if await _run_stop_hook(agent, "max_iterations"):
+                    async for hidden_event in _drain_hidden_events(agent):
+                        yield hidden_event
+                    iterations = max(0, agent.max_iterations - 1)
+                    continue
+                async for hidden_event in _drain_hidden_events(agent):
+                    yield hidden_event
+                yield StopEvent(reason="max_iterations")
+                return
+
             if _is_interrupt_requested(agent):
                 async for event in _yield_interrupted_stop():
                     yield event
@@ -280,6 +363,12 @@ async def query_stream(
                     yield compaction_meta_event
                 if response.content:
                     yield TextEvent(content=response.content)
+                if await _run_stop_hook(agent, "completed"):
+                    async for hidden_event in _drain_hidden_events(agent):
+                        yield hidden_event
+                    continue
+                async for hidden_event in _drain_hidden_events(agent):
+                    yield hidden_event
                 yield StopEvent(reason="completed")
                 return
 
@@ -339,6 +428,15 @@ async def query_stream(
                             source_prefix=source_prefix,
                             started_at_monotonic=time.monotonic(),
                         )
+                        hook_outcome = await agent.run_hook_event(
+                            "SubagentStart",
+                            tool_call_id=tc.id,
+                            subagent_name=subagent_name,
+                            subagent_description=description,
+                            subagent_status="running",
+                        )
+                        if hook_outcome is not None and hook_outcome.additional_context:
+                            agent.add_hidden_user_message(hook_outcome.additional_context)
 
                         yield StepStartEvent(
                             step_id=tc.id,
@@ -366,6 +464,8 @@ async def query_stream(
                             elapsed_ms=0.0,
                             tokens=0,
                         )
+                        async for hidden_event in _drain_hidden_events(agent):
+                            yield hidden_event
 
                     semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
 
@@ -437,6 +537,15 @@ async def query_stream(
                                     stop_status = "timeout"
                                 else:
                                     stop_status = "error"
+                            hook_outcome = await agent.run_hook_event(
+                                "SubagentStop",
+                                tool_call_id=tc.id,
+                                subagent_name=subagent_name,
+                                subagent_description=description,
+                                subagent_status=stop_status,
+                            )
+                            if hook_outcome is not None and hook_outcome.additional_context:
+                                agent.add_hidden_user_message(hook_outcome.additional_context)
 
                             yield SubagentProgressEvent(
                                 tool_call_id=tc.id,
@@ -469,6 +578,8 @@ async def query_stream(
                                 status="error" if tool_result.is_error else "completed",
                                 duration_ms=duration_ms,
                             )
+                            async for hidden_event in _drain_hidden_events(agent):
+                                yield hidden_event
 
                             results_by_id[tc.id] = tool_result
 
@@ -536,6 +647,15 @@ async def query_stream(
                         source_prefix=task_source_prefix,
                         started_at_monotonic=time.monotonic(),
                     )
+                    hook_outcome = await agent.run_hook_event(
+                        "SubagentStart",
+                        tool_call_id=tool_call.id,
+                        subagent_name=task_subagent_name,
+                        subagent_description=task_description,
+                        subagent_status="running",
+                    )
+                    if hook_outcome is not None and hook_outcome.additional_context:
+                        agent.add_hidden_user_message(hook_outcome.additional_context)
                     yield SubagentStartEvent(
                         tool_call_id=tool_call.id,
                         subagent_name=task_subagent_name,
@@ -549,6 +669,8 @@ async def query_stream(
                         elapsed_ms=0.0,
                         tokens=0,
                     )
+                    async for hidden_event in _drain_hidden_events(agent):
+                        yield hidden_event
 
                 step_start_time = time.time()
                 tool_result_task = asyncio.create_task(execute_tool_call(agent, tool_call))
@@ -589,6 +711,8 @@ async def query_stream(
                 tool_result = await tool_result_task
                 step_duration_ms = (time.time() - step_start_time) * 1000
                 agent._context.add_message(tool_result)
+                async for hidden_event in _drain_hidden_events(agent):
+                    yield hidden_event
 
                 # 新增:预检查压缩
                 compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
@@ -613,6 +737,15 @@ async def query_stream(
                             stop_status = "timeout"
                         else:
                             stop_status = "error"
+                    hook_outcome = await agent.run_hook_event(
+                        "SubagentStop",
+                        tool_call_id=tool_call.id,
+                        subagent_name=task_subagent_name,
+                        subagent_description=task_description,
+                        subagent_status=stop_status,
+                    )
+                    if hook_outcome is not None and hook_outcome.additional_context:
+                        agent.add_hidden_user_message(hook_outcome.additional_context)
                     yield SubagentProgressEvent(
                         tool_call_id=tool_call.id,
                         subagent_name=task_subagent_name,
@@ -643,6 +776,8 @@ async def query_stream(
                     status="error" if tool_result.is_error else "completed",
                     duration_ms=step_duration_ms,
                 )
+                async for hidden_event in _drain_hidden_events(agent):
+                    yield hidden_event
 
                 # Check if this was TodoWrite - if so, yield TodoUpdatedEvent
                 if tool_name == "TodoWrite" and not tool_result.is_error:
@@ -704,6 +839,13 @@ async def query_stream(
                         )
                         async for usage_event in _drain_usage_events():
                             yield usage_event
+                        if await _run_stop_hook(agent, "waiting_for_input"):
+                            async for hidden_event in _drain_hidden_events(agent):
+                                yield hidden_event
+                            idx += 1
+                            continue
+                        async for hidden_event in _drain_hidden_events(agent):
+                            yield hidden_event
                         yield StopEvent(reason="waiting_for_input")
                         return
 
@@ -718,11 +860,5 @@ async def query_stream(
             for compaction_meta_event in compaction_meta_events:
                 yield compaction_meta_event
 
-        # Max iterations reached - generate summary of what was accomplished
-        summary = await generate_max_iterations_summary(agent)
-        async for usage_event in _drain_usage_events():
-            yield usage_event
-        yield TextEvent(content=summary)
-        yield StopEvent(reason="max_iterations")
     finally:
         agent._token_cost.unsubscribe_usage(usage_observer_id)
