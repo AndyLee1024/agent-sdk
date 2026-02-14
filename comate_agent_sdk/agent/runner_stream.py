@@ -19,6 +19,8 @@ from comate_agent_sdk.agent.events import (
     SubagentProgressEvent,
     SubagentStartEvent,
     SubagentStopEvent,
+    SubagentToolCallEvent,
+    SubagentToolResultEvent,
     TextEvent,
     ThinkingEvent,
     TodoUpdatedEvent,
@@ -55,6 +57,30 @@ class _RunningTaskState:
     source_prefix: str
     started_at_monotonic: float
     tokens: int = 0
+    usage_tracking_mode: Literal["queue", "stream"] = "queue"
+
+
+def _source_matches_prefix(*, source: str, source_prefix: str) -> bool:
+    if not source or not source_prefix:
+        return False
+    return source == source_prefix or source.startswith(f"{source_prefix}:")
+
+
+def _usage_belongs_to_task(event: UsageDeltaEvent, state: _RunningTaskState) -> bool:
+    return _source_matches_prefix(source=event.source, source_prefix=state.source_prefix)
+
+
+def _usage_delta_tokens_for_progress(event: UsageDeltaEvent) -> int:
+    """Subagent progress uses effective token consumption.
+
+    We intentionally exclude cached prompt tokens to avoid inflated progress
+    numbers when prompt cache hits are high.
+    """
+    prompt_tokens = max(int(event.delta_prompt_tokens), 0)
+    cached_prompt_tokens = max(int(event.delta_prompt_cached_tokens), 0)
+    completion_tokens = max(int(event.delta_completion_tokens), 0)
+    prompt_new_tokens = max(prompt_tokens - cached_prompt_tokens, 0)
+    return prompt_new_tokens + completion_tokens
 
 
 def _resolve_task_metadata(
@@ -162,6 +188,7 @@ async def query_stream(
 ) -> AsyncIterator[AgentEvent]:
     """流式执行：发送消息并逐步产出事件。"""
     usage_queue: asyncio.Queue[UsageDeltaEvent] = asyncio.Queue()
+    subagent_event_queue: asyncio.Queue[AgentEvent] = asyncio.Queue()
     running_tasks: dict[str, _RunningTaskState] = {}
     usage_poll_interval_seconds = 0.08
 
@@ -187,11 +214,14 @@ async def query_stream(
             except asyncio.QueueEmpty:
                 break
             yield event
-            delta_tokens = max(int(event.delta_total_tokens), 0)
+            delta_tokens = _usage_delta_tokens_for_progress(event)
             if delta_tokens <= 0:
                 continue
             for state in running_tasks.values():
-                if not event.source.startswith(state.source_prefix):
+                # 流式 Task 的 token 由子流直接累计，避免在全局 usage 队列中重复累计。
+                if state.usage_tracking_mode == "stream":
+                    continue
+                if not _usage_belongs_to_task(event, state):
                     continue
                 state.tokens += delta_tokens
                 elapsed_ms = (time.monotonic() - state.started_at_monotonic) * 1000
@@ -203,6 +233,146 @@ async def query_stream(
                     elapsed_ms=elapsed_ms,
                     tokens=state.tokens,
                 )
+                break  # 找到匹配的 task 后立即停止，避免重复累加
+
+    async def _drain_subagent_events() -> AsyncIterator[AgentEvent]:
+        """排空 subagent 事件队列（用于并行执行时的流式事件）"""
+        while True:
+            try:
+                event = subagent_event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            yield event
+
+    async def _execute_task_streaming(
+        agent: AgentRuntime,
+        tool_call: ToolCall,
+        meta: tuple[str, str],
+    ) -> ToolMessage:
+        """流式执行 Task 工具（用于并行执行）"""
+        subagent_name, description = meta
+
+        # 获取参数
+        try:
+            args = json.loads(tool_call.function.arguments)
+        except json.JSONDecodeError:
+            args = {"_raw": tool_call.function.arguments}
+
+        subagent_type = args.get("subagent_type", "")
+        prompt = args.get("prompt", "")
+
+        # 获取 _create_subagent_runtime 方法
+        task_tool = agent._tool_map.get("Task")
+        create_runtime_func = getattr(task_tool, "_create_subagent_runtime", None)
+
+        if create_runtime_func is None:
+            return ToolMessage(
+                tool_call_id=tool_call.id,
+                content="Error: Task tool is not properly configured for streaming",
+                is_error=True,
+            )
+
+        try:
+            # 创建 subagent runtime
+            subagent_runtime, agent_def = await create_runtime_func(subagent_type, tool_call.id)
+
+            current_task_state = running_tasks.get(tool_call.id)
+            if current_task_state is not None:
+                current_task_state.usage_tracking_mode = "stream"
+                runtime_source_prefix = getattr(subagent_runtime, "_subagent_source_prefix", None)
+                if isinstance(runtime_source_prefix, str) and runtime_source_prefix:
+                    current_task_state.source_prefix = runtime_source_prefix
+
+            # 流式执行
+            result_text = ""
+            tool_call_times: dict[str, float] = {}
+
+            timeout = agent_def.timeout if agent_def and agent_def.timeout else None
+            stream = subagent_runtime.query_stream(prompt)
+
+            if timeout:
+                stream = asyncio.wait_for(stream, timeout=timeout)
+
+            async for event in stream:
+                # 流式分支只累计当前 task source_prefix 命中的 usage，避免并行串算。
+                if isinstance(event, UsageDeltaEvent):
+                    if current_task_state is not None and _usage_belongs_to_task(event, current_task_state):
+                        delta_tokens = _usage_delta_tokens_for_progress(event)
+                        current_task_state.tokens += delta_tokens
+                        elapsed_ms = (time.monotonic() - current_task_state.started_at_monotonic) * 1000
+                        # 将 SubagentProgressEvent 放入队列
+                        subagent_event_queue.put_nowait(
+                            SubagentProgressEvent(
+                                tool_call_id=tool_call.id,
+                                subagent_name=subagent_name,
+                                description=description,
+                                status="running",
+                                elapsed_ms=elapsed_ms,
+                                tokens=current_task_state.tokens,
+                            )
+                        )
+                    continue
+
+                # 封装 ToolCallEvent → SubagentToolCallEvent
+                if isinstance(event, ToolCallEvent):
+                    tool_call_times[event.tool_call_id] = time.time()
+                    subagent_event_queue.put_nowait(
+                        SubagentToolCallEvent(
+                            parent_tool_call_id=tool_call.id,
+                            subagent_name=subagent_name,
+                            tool=event.tool,
+                            args=event.args,
+                            tool_call_id=event.tool_call_id,
+                        )
+                    )
+                    continue
+
+                # 封装 ToolResultEvent → SubagentToolResultEvent
+                if isinstance(event, ToolResultEvent):
+                    start_time = tool_call_times.get(event.tool_call_id, time.time())
+                    duration_ms = (time.time() - start_time) * 1000
+                    subagent_event_queue.put_nowait(
+                        SubagentToolResultEvent(
+                            parent_tool_call_id=tool_call.id,
+                            subagent_name=subagent_name,
+                            tool=event.tool,
+                            tool_call_id=event.tool_call_id,
+                            is_error=event.is_error,
+                            duration_ms=duration_ms,
+                        )
+                    )
+                    continue
+
+                # 收集 TextEvent 作为最终结果
+                if isinstance(event, TextEvent):
+                    result_text += event.content
+                    continue
+
+            # 构造 ToolMessage
+            return ToolMessage(
+                tool_call_id=tool_call.id,
+                tool_name="Task",
+                content=result_text or "(no output)",
+                is_error=False,
+            )
+
+        except asyncio.TimeoutError:
+            error_msg = f"Error: Subagent '{subagent_name}' timeout after {timeout}s"
+            return ToolMessage(
+                tool_call_id=tool_call.id,
+                tool_name="Task",
+                content=error_msg,
+                is_error=True,
+            )
+        except Exception as e:
+            error_msg = f"Error in subagent '{subagent_name}': {e}"
+            logger.error(error_msg, exc_info=True)
+            return ToolMessage(
+                tool_call_id=tool_call.id,
+                tool_name="Task",
+                content=error_msg,
+                is_error=True,
+            )
 
     async def _yield_interrupted_stop() -> AsyncIterator[AgentEvent]:
         async for usage_event in _drain_usage_events():
@@ -459,10 +629,18 @@ async def query_stream(
 
                     semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
 
+                    # 检查是否启用流式 Task
+                    task_tool = agent._tool_map.get("Task")
+                    is_streaming = getattr(task_tool, "_is_streaming_task", False)
+
                     async def _run(tc: ToolCall) -> tuple[ToolCall, ToolMessage, float]:
                         start = time.time()
                         async with semaphore:
-                            tool_result = await execute_tool_call(agent, tc)
+                            # 流式执行 Task
+                            if is_streaming:
+                                tool_result = await _execute_task_streaming(agent, tc, meta_by_id[tc.id])
+                            else:
+                                tool_result = await execute_tool_call(agent, tc)
                         duration_ms = (time.time() - start) * 1000
                         return tc, tool_result, duration_ms
 
@@ -473,6 +651,8 @@ async def query_stream(
                     while pending:
                         async for usage_event in _drain_usage_events():
                             yield usage_event
+                        async for subagent_event in _drain_subagent_events():
+                            yield subagent_event
 
                         if _is_interrupt_requested(agent):
                             for fut in pending:
@@ -508,6 +688,8 @@ async def query_stream(
 
                         async for usage_event in _drain_usage_events():
                             yield usage_event
+                        async for subagent_event in _drain_subagent_events():
+                            yield subagent_event
 
                         if not done:
                             continue
@@ -606,6 +788,12 @@ async def query_stream(
                 )
 
                 is_task = tool_name == "Task"
+                # 检查 Task 工具是否启用了流式模式
+                is_task_stream = False
+                if is_task:
+                    task_tool = agent._tool_map.get("Task")
+                    is_task_stream = getattr(task_tool, "_is_streaming_task", False)
+
                 task_subagent_name = "Task"
                 task_description = tool_name
                 if is_task:
@@ -661,42 +849,168 @@ async def query_stream(
                         yield hidden_event
 
                 step_start_time = time.time()
-                tool_result_task = asyncio.create_task(execute_tool_call(agent, tool_call))
-                while True:
-                    async for usage_event in _drain_usage_events():
-                        yield usage_event
 
-                    if _is_interrupt_requested(agent):
-                        tool_result_task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await tool_result_task
+                # === Task 流式处理：流式执行 ===
+                if is_task_stream:
+                    # 获取 subagent runtime 创建函数
+                    create_runtime_func = getattr(
+                        agent._tool_map.get("Task"),
+                        "_create_subagent_runtime",
+                        None,
+                    )
+                    if create_runtime_func is None:
+                        error_msg = "Error: Task tool is not properly configured for streaming"
+                        tool_result = ToolMessage(
+                            tool_call_id=tool_call.id,
+                            tool_name="Task",
+                            content=error_msg,
+                            is_error=True,
+                        )
+                    else:
+                        # 创建 subagent runtime
+                        subagent_type = args_dict.get("subagent_type", "")
+                        prompt = args_dict.get("prompt", "")
 
-                        step_duration_ms = (time.time() - step_start_time) * 1000
-                        if is_task:
-                            async for event in _emit_cancelled_task(tool_call.id):
-                                yield event
-                        else:
-                            yield StepCompleteEvent(
-                                step_id=tool_call.id,
-                                status="cancelled",
-                                duration_ms=step_duration_ms,
+                        try:
+                            subagent_runtime, agent_def = await create_runtime_func(
+                                subagent_type, tool_call.id
                             )
 
-                        async for event in _yield_interrupted_stop():
-                            yield event
-                        return
+                            current_task_state = running_tasks.get(tool_call.id)
+                            if current_task_state is not None:
+                                current_task_state.usage_tracking_mode = "stream"
+                                runtime_source_prefix = getattr(subagent_runtime, "_subagent_source_prefix", None)
+                                if isinstance(runtime_source_prefix, str) and runtime_source_prefix:
+                                    current_task_state.source_prefix = runtime_source_prefix
 
-                    done, _ = await asyncio.wait(
-                        {tool_result_task},
-                        timeout=usage_poll_interval_seconds,
-                        return_when=asyncio.ALL_COMPLETED,
-                    )
-                    async for usage_event in _drain_usage_events():
-                        yield usage_event
-                    if done:
-                        break
+                            # 流式执行
+                            result_text = ""
+                            tool_call_times: dict[str, float] = {}
 
-                tool_result = await tool_result_task
+                            timeout = agent_def.timeout if agent_def and agent_def.timeout else None
+                            stream = subagent_runtime.query_stream(prompt)
+
+                            if timeout:
+                                stream = asyncio.wait_for(stream, timeout=timeout)
+
+                            async for event in stream:
+                                # 检查中断
+                                if _is_interrupt_requested(agent):
+                                    break
+
+                                # 流式分支只累计当前 task source_prefix 命中的 usage。
+                                if isinstance(event, UsageDeltaEvent):
+                                    if current_task_state is not None and _usage_belongs_to_task(event, current_task_state):
+                                        delta_tokens = _usage_delta_tokens_for_progress(event)
+                                        current_task_state.tokens += delta_tokens
+                                        elapsed_ms = (time.monotonic() - current_task_state.started_at_monotonic) * 1000
+                                        yield SubagentProgressEvent(
+                                            tool_call_id=tool_call.id,
+                                            subagent_name=task_subagent_name,
+                                            description=task_description,
+                                            status="running",
+                                            elapsed_ms=elapsed_ms,
+                                            tokens=current_task_state.tokens,
+                                        )
+                                    continue
+
+                                # 封装 ToolCallEvent → SubagentToolCallEvent
+                                if isinstance(event, ToolCallEvent):
+                                    tool_call_times[event.tool_call_id] = time.time()
+                                    yield SubagentToolCallEvent(
+                                        parent_tool_call_id=tool_call.id,
+                                        subagent_name=task_subagent_name,
+                                        tool=event.tool,
+                                        args=event.args,
+                                        tool_call_id=event.tool_call_id,
+                                    )
+                                    continue
+
+                                # 封装 ToolResultEvent → SubagentToolResultEvent
+                                if isinstance(event, ToolResultEvent):
+                                    start_time = tool_call_times.get(event.tool_call_id, time.time())
+                                    duration_ms = (time.time() - start_time) * 1000
+                                    yield SubagentToolResultEvent(
+                                        parent_tool_call_id=tool_call.id,
+                                        subagent_name=task_subagent_name,
+                                        tool=event.tool,
+                                        tool_call_id=event.tool_call_id,
+                                        is_error=event.is_error,
+                                        duration_ms=duration_ms,
+                                    )
+                                    continue
+
+                                # 收集 TextEvent 作为最终结果
+                                if isinstance(event, TextEvent):
+                                    result_text += event.content
+                                    continue
+
+                                # 其他事件（ThinkingEvent、StopEvent 等）忽略
+
+                            # 构造 ToolMessage
+                            tool_result = ToolMessage(
+                                tool_call_id=tool_call.id,
+                                tool_name="Task",
+                                content=result_text or "(no output)",
+                                is_error=False,
+                            )
+
+                        except asyncio.TimeoutError:
+                            error_msg = f"Error: Subagent '{task_subagent_name}' timeout after {timeout}s"
+                            tool_result = ToolMessage(
+                                tool_call_id=tool_call.id,
+                                tool_name="Task",
+                                content=error_msg,
+                                is_error=True,
+                            )
+                        except Exception as e:
+                            error_msg = f"Error in subagent '{task_subagent_name}': {e}"
+                            logger.error(error_msg, exc_info=True)
+                            tool_result = ToolMessage(
+                                tool_call_id=tool_call.id,
+                                tool_name="Task",
+                                content=error_msg,
+                                is_error=True,
+                            )
+
+                # === Task 或普通工具：调用 execute_tool_call ===
+                else:
+                    tool_result_task = asyncio.create_task(execute_tool_call(agent, tool_call))
+                    while True:
+                        async for usage_event in _drain_usage_events():
+                            yield usage_event
+
+                        if _is_interrupt_requested(agent):
+                            tool_result_task.cancel()
+                            with suppress(asyncio.CancelledError):
+                                await tool_result_task
+
+                            step_duration_ms = (time.time() - step_start_time) * 1000
+                            if is_task:
+                                async for event in _emit_cancelled_task(tool_call.id):
+                                    yield event
+                            else:
+                                yield StepCompleteEvent(
+                                    step_id=tool_call.id,
+                                    status="cancelled",
+                                    duration_ms=step_duration_ms,
+                                )
+
+                            async for event in _yield_interrupted_stop():
+                                yield event
+                            return
+
+                        done, _ = await asyncio.wait(
+                            {tool_result_task},
+                            timeout=usage_poll_interval_seconds,
+                            return_when=asyncio.ALL_COMPLETED,
+                        )
+                        async for usage_event in _drain_usage_events():
+                            yield usage_event
+                        if done:
+                            break
+
+                    tool_result = await tool_result_task
                 step_duration_ms = (time.time() - step_start_time) * 1000
                 agent._context.add_message(tool_result)
                 async for hidden_event in _drain_hidden_events(agent):

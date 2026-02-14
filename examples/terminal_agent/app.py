@@ -50,6 +50,7 @@ def _build_agent() -> Agent:
         config=AgentConfig(
             role="software_engineering",
             env_options=EnvOptions(system_env=True, git_env=True),
+            use_streaming_task=True,  # 启用流式 Task（实时显示嵌套工具调用）
             mcp_servers={
                 "context7": {
                     "type": "http",

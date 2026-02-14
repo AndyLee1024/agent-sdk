@@ -52,6 +52,7 @@ def create_task_tool(
     parent_dependency_overrides: DependencyOverrides | None = None,
     parent_llm_levels: dict[LLMLevel, BaseChatModel] | None = None,
     parent_token_cost: TokenCost | None = None,
+    use_streaming_task: bool = False,
 ) -> Tool:
     """创建 Task 工具，用于启动 Subagent
 
@@ -61,6 +62,9 @@ def create_task_tool(
         tool_registry: 全局工具注册表
         parent_llm: 父 Agent 的 LLM 实例
         parent_dependency_overrides: 父 Agent 的依赖覆盖（会继承给 Subagent）
+        parent_llm_levels: 父 Agent 的三档模型池
+        parent_token_cost: 父 Agent 的 token cost
+        use_streaming_task: 是否使用流式 Task（发射子事件，用于实时 UI 显示）
 
     Returns:
         Task 工具实例
@@ -98,21 +102,11 @@ def create_task_tool(
 
         return resolved, missing
 
-    @tool(
-        "Launch subagent for complex multi-step tasks. Must specify subagent_type. Write detailed prompt (stateless, one reply only). Result NOT visible to user, you must summarize. Don't use for simple Read/Grep/Glob operations.",
-        usage_rules=_TASK_USAGE_RULES,
-    )
-    async def Task(
+    async def _execute_subagent_task(
         subagent_type: str,
         prompt: str,
-        description: str = "",
     ) -> str:
-        """
-        Args:
-            subagent_type: The name of the subagent to launch (e.g., "code-reviewer", "researcher")
-            prompt: The task for the subagent to perform
-            description: A short (3-5 word) description of the task
-        """
+        """共享的 subagent 执行逻辑（Task 和 TaskStream 都使用）"""
         # 延迟导入避免循环依赖
         from comate_agent_sdk.agent import AgentConfig, AgentTemplate
         from comate_agent_sdk.tools.system_context import get_system_tool_context
@@ -206,7 +200,102 @@ def create_task_tool(
             logger.error(error_msg, exc_info=True)
             return error_msg
 
+    @tool(
+        "Launch subagent for complex multi-step tasks. Must specify subagent_type. Write detailed prompt (stateless, one reply only). Result NOT visible to user, you must summarize. Don't use for simple Read/Grep/Glob operations.",
+        usage_rules=_TASK_USAGE_RULES,
+    )
+    async def Task(
+        subagent_type: str,
+        prompt: str,
+        description: str = "",
+    ) -> str:
+        """
+        Args:
+            subagent_type: The name of the subagent to launch (e.g., "code-reviewer", "researcher")
+            prompt: The task for the subagent to perform
+            description: A short (3-5 word) description of the task
+        """
+        return await _execute_subagent_task(subagent_type, prompt)
+
+    # 标记 Task 工具
     setattr(Task, _INTERNAL_TASK_TOOL_MARKER_ATTR, _INTERNAL_TASK_TOOL_MARKER_VALUE)
+
+    # 如果启用流式 Task，附加必要的方法和标记
+    if use_streaming_task:
+        # 为 Task 附加 subagent runtime 创建函数（供 runner_stream.py 使用）
+        async def _create_subagent_runtime_for_streaming(
+            subagent_type: str,
+            tool_call_id: str | None,
+        ):
+            """创建 subagent runtime（闭包，可访问外部变量）"""
+            # 延迟导入避免循环依赖
+            from comate_agent_sdk.agent import AgentConfig, AgentTemplate
+
+            if subagent_type not in agent_map:
+                available = ", ".join(agent_map.keys())
+                raise ValueError(f"Unknown subagent '{subagent_type}'. Available: {available}")
+
+            agent_def = agent_map[subagent_type]
+
+            # 解析模型
+            llm = resolve_model(
+                model=agent_def.model,
+                level=agent_def.level,
+                parent_llm=parent_llm,
+                llm_levels=parent_llm_levels,
+            )
+
+            # 解析工具
+            tools, missing_tools = _resolve_subagent_tools(agent_def)
+
+            if missing_tools:
+                logger.warning(
+                    f"Subagent '{subagent_type}' requested missing tool(s): {missing_tools}"
+                )
+
+            logger.info(
+                f"Creating subagent runtime '{subagent_type}' with {len(tools)} tool(s): "
+                f"{[t.name for t in tools]}"
+            )
+
+            # 创建 SubagentTemplate
+            subagent_template = AgentTemplate(
+                name=agent_def.name,
+                llm=llm,
+                config=AgentConfig(
+                    tools=tuple(tools),
+                    system_prompt=agent_def.prompt,
+                    max_iterations=agent_def.max_iterations,
+                    compaction=agent_def.compaction,
+                    dependency_overrides=parent_dependency_overrides,
+                    llm_levels=parent_llm_levels,
+                    agents=(),
+                ),
+            )
+            subagent_runtime = subagent_template.create_runtime(
+                parent_token_cost=parent_token_cost,
+                is_subagent=True,
+                name=agent_def.name,
+                subagent_run_id=tool_call_id,
+            )
+
+            # Subagent Skills 筛选
+            if agent_def.skills is not None and subagent_runtime.skills:
+                allowed_skill_names = set(agent_def.skills)
+                subagent_runtime.skills = [
+                    s for s in subagent_runtime.skills if s.name in allowed_skill_names
+                ]
+                subagent_runtime._rebuild_skill_tool()
+                logger.info(
+                    f"Filtered subagent '{subagent_type}' skills to: {[s.name for s in subagent_runtime.skills]}"
+                )
+
+            return subagent_runtime, agent_def
+
+        setattr(Task, "_is_streaming_task", True)
+        setattr(Task, "_create_subagent_runtime", _create_subagent_runtime_for_streaming)
+        logger.info("Task tool configured for streaming (with SubagentToolCallEvent support)")
+
     return Task
 
 

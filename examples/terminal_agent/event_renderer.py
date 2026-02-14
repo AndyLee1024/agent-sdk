@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from comate_agent_sdk.agent.events import (
     PreCompactEvent,
@@ -13,6 +13,8 @@ from comate_agent_sdk.agent.events import (
     SubagentProgressEvent,
     SubagentStartEvent,
     SubagentStopEvent,
+    SubagentToolCallEvent,
+    SubagentToolResultEvent,
     TextEvent,
     ThinkingEvent,
     TodoUpdatedEvent,
@@ -84,6 +86,16 @@ def _tool_signature(tool_name: str, args_summary: str) -> str:
 
 
 @dataclass
+class _SubagentTool:
+    """Subagent 内部的工具调用"""
+    tool_name: str
+    args_summary: str
+    started_at_monotonic: float
+    status: Literal["running", "completed", "error"] = "running"
+    duration_ms: float = 0.0
+
+
+@dataclass
 class _RunningTool:
     tool_name: str
     title: str
@@ -94,6 +106,8 @@ class _RunningTool:
     subagent_name: str = ""
     subagent_status: str = ""
     subagent_description: str = ""
+    nested_tools: list[tuple[str, _SubagentTool]] = field(default_factory=list)
+    show_init: bool = False
 
 
 class EventRenderer:
@@ -172,8 +186,12 @@ class EventRenderer:
         total_lines = 0
         for tool_call_id, state in self._running_tools.items():
             if state.is_task:
-                has_sub = bool(state.subagent_name or state.subagent_status or state.subagent_description)
-                total_lines += 2 if has_sub else 1
+                total_lines += 1  # 主标题行
+                # 嵌套工具（最多 3 个）
+                total_lines += min(len(state.nested_tools), 3)
+                # init 行（仅在创建后、首个有效子事件前显示）
+                if state.show_init:
+                    total_lines += 1
             else:
                 total_lines += 1
         return total_lines
@@ -229,9 +247,10 @@ class EventRenderer:
                     if state.progress_tokens > 0
                     else ""
                 )
-                has_sub = bool(state.subagent_name or state.subagent_status or state.subagent_description)
-                if has_sub:
-                    lines_to_add = 2
+                # 主标题行 + 嵌套工具（最多 3 个）+ 状态行（如果有状态）
+                lines_to_add = 1 + min(len(state.nested_tools), 3)
+                if state.show_init:
+                    lines_to_add += 1
             else:
                 lines_to_add = 1
 
@@ -246,12 +265,25 @@ class EventRenderer:
                     if state.progress_tokens > 0
                     else ""
                 )
-                entries.append((0, f"{state.title} · {elapsed}{tokens_suffix}"))
-                if state.subagent_name or state.subagent_status or state.subagent_description:
-                    desc = f" {state.subagent_description}".rstrip()
-                    status = state.subagent_status or "running"
-                    name = state.subagent_name or "subagent"
-                    entries.append((1, f"|_ {name} {status}{desc}"))
+                # 格式：SubagentName(描述)
+                subagent_name = state.subagent_name or "Task"
+                description = state.subagent_description or state.title
+                title = f"{subagent_name}({description})"
+                entries.append((0, f"{title} · {elapsed}{tokens_suffix}"))
+
+                # 嵌套工具调用（最多显示最近 3 个）
+                for child_id, child_tool in state.nested_tools[-3:]:
+                    signature = _tool_signature(child_tool.tool_name, child_tool.args_summary)
+                    if child_tool.status == "running":
+                        child_elapsed = _format_duration(now - child_tool.started_at_monotonic)
+                        entries.append((1, f"|_ {signature} · {child_elapsed}"))
+                    else:
+                        icon = "✓" if child_tool.status == "completed" else "✗"
+                        child_duration = _format_duration(child_tool.duration_ms / 1000)
+                        entries.append((1, f"|_ {icon} {signature} · {child_duration}"))
+
+                if state.show_init:
+                    entries.append((1, "|_ init"))
             else:
                 signature = _tool_signature(state.tool_name, state.args_summary)
                 entries.append((0, f"{signature} · {elapsed}"))
@@ -335,6 +367,7 @@ class EventRenderer:
             started_at_monotonic=time.monotonic(),
             is_task=is_task,
             args_summary=summary,
+            show_init=is_task,
         )
 
     def _append_tool_result(
@@ -567,8 +600,51 @@ class EventRenderer:
                     state.subagent_name = str(subagent_name or "").strip()
                     state.subagent_status = str(status or "").strip()
                     state.subagent_description = str(description or "").strip()
+                    # 首个有效子事件后移除 init 占位。
+                    progress_status = str(status or "").strip().lower()
+                    has_activity = bool(tokens and int(tokens) > 0) or bool(
+                        elapsed_ms and float(elapsed_ms) > 0.0
+                    )
+                    if has_activity or progress_status in {"completed", "error", "timeout", "cancelled"}:
+                        state.show_init = False
             case SubagentStopEvent(tool_call_id=_, subagent_name=_, status=_, duration_ms=_, error=_):
                 pass
+            case SubagentToolCallEvent(
+                parent_tool_call_id=parent_tool_call_id,
+                subagent_name=_,
+                tool=tool,
+                args=args,
+                tool_call_id=tool_call_id,
+            ):
+                # 将嵌套工具调用添加到父 Task 的 nested_tools
+                parent_state = self._running_tools.get(parent_tool_call_id)
+                if parent_state is not None:
+                    args_summary = summarize_tool_args(tool, args, self._project_root).strip()
+                    nested_tool = _SubagentTool(
+                        tool_name=tool,
+                        args_summary=args_summary,
+                        started_at_monotonic=time.monotonic(),
+                        status="running",
+                    )
+                    parent_state.nested_tools.append((tool_call_id, nested_tool))
+                    parent_state.show_init = False
+            case SubagentToolResultEvent(
+                parent_tool_call_id=parent_tool_call_id,
+                subagent_name=_,
+                tool=_,
+                tool_call_id=tool_call_id,
+                is_error=is_error,
+                duration_ms=duration_ms,
+            ):
+                # 更新嵌套工具的状态
+                parent_state = self._running_tools.get(parent_tool_call_id)
+                if parent_state is not None:
+                    for nested_id, nested_tool in parent_state.nested_tools:
+                        if nested_id == tool_call_id:
+                            nested_tool.status = "error" if is_error else "completed"
+                            nested_tool.duration_ms = duration_ms
+                            parent_state.show_init = False
+                            break
             case TodoUpdatedEvent(todos=todos):
                 self._update_todos(todos)
             case UserQuestionEvent(questions=questions, tool_call_id=_):

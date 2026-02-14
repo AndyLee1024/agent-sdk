@@ -304,6 +304,56 @@ class SubagentProgressEvent:
 
 
 @dataclass
+class SubagentToolCallEvent:
+	"""Emitted when a tool call occurs inside a subagent (TaskStream only)."""
+
+	parent_tool_call_id: str
+	"""The tool_call_id of the parent Task/TaskStream call."""
+
+	subagent_name: str
+	"""The name of the subagent making the tool call."""
+
+	tool: str
+	"""The name of the tool being called."""
+
+	args: dict[str, Any]
+	"""The arguments passed to the tool."""
+
+	tool_call_id: str
+	"""The tool_call_id within the subagent's context."""
+
+	def __str__(self) -> str:
+		return f'🔧 Subagent tool call: {self.subagent_name}.{self.tool}'
+
+
+@dataclass
+class SubagentToolResultEvent:
+	"""Emitted when a tool result is received inside a subagent (TaskStream only)."""
+
+	parent_tool_call_id: str
+	"""The tool_call_id of the parent Task/TaskStream call."""
+
+	subagent_name: str
+	"""The name of the subagent that called the tool."""
+
+	tool: str
+	"""The name of the tool that was called."""
+
+	tool_call_id: str
+	"""The tool_call_id within the subagent's context."""
+
+	is_error: bool = False
+	"""Whether the tool call resulted in an error."""
+
+	duration_ms: float = 0.0
+	"""Duration of the tool call in milliseconds."""
+
+	def __str__(self) -> str:
+		icon = '✅' if not self.is_error else '❌'
+		return f'{icon} Subagent tool result: {self.subagent_name}.{self.tool}'
+
+
+@dataclass
 class HiddenUserMessageEvent:
 	"""Emitted when the agent injects a hidden user message (ex: incomplete todos prompt).
 	Hidden messages are saved to history and sent to the LLM but not displayed in the UI.
@@ -474,6 +524,8 @@ AgentEvent = (
 	| SubagentStopEvent
 	| UsageDeltaEvent
 	| SubagentProgressEvent
+	| SubagentToolCallEvent
+	| SubagentToolResultEvent
 	| HiddenUserMessageEvent
 	| UserQuestionEvent
 	| TodoUpdatedEvent

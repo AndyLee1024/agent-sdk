@@ -70,7 +70,7 @@ def setup_subagents(agent: "AgentRuntime") -> None:
     ]
     agent._tool_map.pop("Task", None)
 
-    # 创建 Task 工具
+    # 创建 Task 工具（根据配置决定是否流式）
     task_tool = create_task_tool(
         agents=agent.agents,
         parent_tools=agent.tools,
@@ -79,6 +79,7 @@ def setup_subagents(agent: "AgentRuntime") -> None:
         parent_dependency_overrides=agent.dependency_overrides,  # type: ignore
         parent_llm_levels=agent.llm_levels,
         parent_token_cost=agent._token_cost,
+        use_streaming_task=agent.options.use_streaming_task,
     )
 
     # 添加到工具列表

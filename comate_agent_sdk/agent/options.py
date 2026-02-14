@@ -69,6 +69,8 @@ class AgentConfig:
     # Task (subagent) 并行执行配置
     task_parallel_enabled: bool = True
     task_parallel_max_concurrency: int = 4
+    use_streaming_task: bool = False
+    """是否使用流式 Task（发射 SubagentToolCallEvent 等子事件，用于实时 UI 显示）"""
 
     # Skills / memory
     skills: tuple[Any, ...] | None = None  # tuple[SkillDefinition, ...]
@@ -145,6 +147,8 @@ class RuntimeAgentOptions:
     # Task (subagent) 并行执行配置
     task_parallel_enabled: bool = True
     task_parallel_max_concurrency: int = 4
+    use_streaming_task: bool = False
+    """是否使用流式 Task（发射 SubagentToolCallEvent 等子事件，用于实时 UI 显示）"""
 
     # Skills / memory
     skills: list | None = None  # list[SkillDefinition]
@@ -212,6 +216,7 @@ def build_runtime_options(
         project_root=config.project_root,
         task_parallel_enabled=config.task_parallel_enabled,
         task_parallel_max_concurrency=config.task_parallel_max_concurrency,
+        use_streaming_task=config.use_streaming_task,
         skills=list(resolved_skills) if resolved_skills is not None else None,
         memory=resolved_memory,
         setting_sources=config.setting_sources,

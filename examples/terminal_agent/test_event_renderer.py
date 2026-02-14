@@ -73,6 +73,7 @@ class TestEventRenderer(unittest.TestCase):
         entries = renderer.tool_panel_entries(max_lines=4)
         self.assertTrue(entries)
         self.assertTrue(any("拆解任务" in line for _, line in entries))
+        self.assertTrue(any("|_ init" in line for _, line in entries))
 
         renderer.handle_event(
             SubagentProgressEvent(
@@ -86,7 +87,7 @@ class TestEventRenderer(unittest.TestCase):
         )
         entries = renderer.tool_panel_entries(max_lines=4)
         self.assertTrue(any("tok" in line for _, line in entries))
-        self.assertTrue(any("|_ Planner running" in line for _, line in entries))
+        self.assertFalse(any("|_ init" in line for _, line in entries))
 
         renderer.handle_event(
             ToolResultEvent(
