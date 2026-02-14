@@ -94,7 +94,6 @@ class HookEngine:
         if not groups:
             return AggregatedHookOutcome(event_name=normalized)
 
-        additional_context_parts: list[str] = []
         ask_seen = False
         ask_reason: str | None = None
         allow_seen = False
@@ -114,12 +113,10 @@ class HookEngine:
                         outcome.permission_decision = "deny"
                         outcome.reason = block_reason
                         outcome.updated_input = None
-                        outcome.additional_context = _join_context(additional_context_parts)
                         return outcome
                     if normalized == "Stop":
                         outcome.decision = "block"
                         outcome.reason = block_reason
-                        outcome.additional_context = _join_context(additional_context_parts)
                         return outcome
                     logger.warning(
                         f"hook exit code 2 ignored for event={normalized}, handler={handler.name or handler.source}"
@@ -130,9 +127,6 @@ class HookEngine:
                 if result is None:
                     continue
 
-                if result.additional_context:
-                    additional_context_parts.append(result.additional_context)
-
                 if normalized == "PreToolUse":
                     if result.updated_input is not None:
                         updated_input = result.updated_input
@@ -142,7 +136,6 @@ class HookEngine:
                         outcome.permission_decision = "deny"
                         outcome.reason = result.reason or "blocked by hook"
                         outcome.updated_input = None
-                        outcome.additional_context = _join_context(additional_context_parts)
                         return outcome
                     if decision == "ask":
                         ask_seen = True
@@ -157,7 +150,6 @@ class HookEngine:
                 if normalized == "Stop" and result.decision == "block":
                     outcome.decision = "block"
                     outcome.reason = result.reason or "blocked by stop hook"
-                    outcome.additional_context = _join_context(additional_context_parts)
                     return outcome
 
         if normalized == "PreToolUse":
@@ -169,7 +161,6 @@ class HookEngine:
                 outcome.reason = allow_reason
             outcome.updated_input = updated_input if outcome.permission_decision != "deny" else None
 
-        outcome.additional_context = _join_context(additional_context_parts)
         return outcome
 
     def _matches_group(self, group: HookMatcherGroup, event_name: str, tool_name: str | None) -> bool:
@@ -316,10 +307,3 @@ def _coerce_hook_result(raw: Any) -> HookResult | None:
         return HookResult.from_mapping(raw)
     logger.warning(f"python hook 返回值不支持，已忽略: {type(raw).__name__}")
     return None
-
-
-def _join_context(parts: list[str]) -> str | None:
-    clean = [part.strip() for part in parts if part and part.strip()]
-    if not clean:
-        return None
-    return "\n".join(clean)

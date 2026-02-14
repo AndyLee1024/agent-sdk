@@ -850,7 +850,6 @@ Command hook 通过 **stdout** 返回 JSON 结果：
 
 ```json
 {
-  "additionalContext": "返回给 LLM 的额外上下文",
   "permissionDecision": "allow",
   "updatedInput": {"file_path": "main.py"},
   "reason": "拒绝/询问的原因"
@@ -904,9 +903,8 @@ tool_input = hook_input.get("tool_input", {})
 file_path = str(tool_input.get("file_path", ""))
 if ".env" in file_path or ".env" in file_path:
     print(json.dumps({
-        "additionalContext": "⚠️ 注意：此操作试图读取 .env 文件，可能包含敏感信息",
-        "permissionDecision": "allow",
-        "reason": "检测到 .env 文件访问"
+        "permissionDecision": "deny",
+        "reason": "禁止访问 .env 文件"
     }))
 else:
     print(json.dumps({
@@ -948,7 +946,6 @@ def hook_callback(hook_input: HookInput) -> HookResult | dict | None:
     # - dict (会自动转换为 HookResult)
     # - None (忽略此 hook)
     return HookResult(
-        additional_context="额外上下文",
         permission_decision="allow",  # allow/ask/deny
         updated_input={"key": "value"},  # 修改后的参数
         reason="原因",
@@ -964,10 +961,61 @@ async def async_hook_callback(hook_input: HookInput) -> HookResult:
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `additional_context` | `str \| None` | 返回给 LLM 的额外上下文 |
 | `permission_decision` | `Literal["allow", "ask", "deny"]` | 权限决策 |
 | `updated_input` | `dict \| None` | 修改后的工具参数 |
 | `reason` | `str \| None` | 拒绝/询问的原因 |
+
+### 拒绝工具时的错误返回
+
+当 Hook 返回 `permissionDecision: "deny"` 时，系统会自动：
+
+1. 设置 `ToolMessage.is_error = true`
+2. 将 `reason` 字段的内容作为 tool result 的 `content` 返回
+
+#### Hook 返回方式
+
+**Python Hook：**
+```python
+from comate_agent_sdk.agent.hooks.models import HookResult
+
+def my_pre_tool_hook(hook_input: HookInput) -> HookResult:
+    tool_input = hook_input.get("tool_input", {})
+    file_path = str(tool_input.get("file_path", ""))
+
+    if ".env" in file_path:
+        return HookResult(
+            permission_decision="deny",
+            reason="禁止访问 .env 文件，此文件可能包含敏感凭证",
+        )
+
+    return HookResult(permission_decision="allow")
+```
+
+**Command Hook：**
+```bash
+#!/bin/bash
+file_path=$1
+
+if [[ "$file_path" == *.env ]]; then
+    echo '{"permissionDecision": "deny", "reason": "禁止访问 .env 文件"}'
+    exit 0
+fi
+
+echo '{"permissionDecision": "allow"}'
+```
+
+#### 最终输出效果
+
+序列化到 Anthropic 协议时：
+
+```json
+{
+  "type": "tool_result",
+  "tool_use_id": "toolu_xxx",
+  "content": "禁止访问 .env 文件，此文件可能包含敏感凭证",
+  "is_error": true
+}
+```
 
 ### 权限模式
 

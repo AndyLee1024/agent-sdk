@@ -62,13 +62,13 @@ class TestHooksMatcherRegex(unittest.IsolatedAsyncioTestCase):
     async def test_matcher_is_ignored_for_non_tool_events(self) -> None:
         config = HookConfig(
             events={
-                "SessionStart": [
+                "Stop": [
                     HookMatcherGroup(
                         matcher="^NeverMatch$",
                         hooks=[
                             HookHandlerSpec(
                                 type="python",
-                                callback=lambda _: HookResult(additional_context="session-started"),
+                                callback=lambda _: HookResult(decision="block", reason="session-started"),
                             )
                         ],
                     )
@@ -78,12 +78,14 @@ class TestHooksMatcherRegex(unittest.IsolatedAsyncioTestCase):
         engine = HookEngine(config=config, project_root=Path.cwd(), session_id="s1")
 
         outcome = await engine.run_event(
-            "SessionStart",
+            "Stop",
             HookInput(
                 session_id="s1",
                 cwd=str(Path.cwd()),
                 permission_mode="default",
-                hook_event_name="SessionStart",
+                hook_event_name="Stop",
+                stop_reason="completed",
             ),
         )
-        self.assertEqual(outcome.additional_context, "session-started")
+        self.assertEqual(outcome.decision, "block")
+        self.assertEqual(outcome.reason, "session-started")

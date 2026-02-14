@@ -122,44 +122,16 @@ async def _drain_hidden_events(agent: "AgentRuntime") -> AsyncIterator[AgentEven
         yield HiddenUserMessageEvent(content=content)
 
 
-def _apply_hook_additional_context(
-    agent: "AgentRuntime",
-    additional_context: str | None,
-    *,
-    hook_name: str,
-    related_tool_call_id: str | None = None,
-) -> None:
-    if not additional_context:
-        return
-    agent.add_hook_hidden_user_message(
-        additional_context,
-        hook_name=hook_name,
-        related_tool_call_id=related_tool_call_id,
-    )
-
-
 async def _fire_session_start_if_needed(agent: "AgentRuntime") -> None:
     if agent._hooks_session_started:
         return
-    outcome = await agent.run_hook_event("SessionStart")
+    await agent.run_hook_event("SessionStart")
     agent._hooks_session_started = True
-    if outcome is not None:
-        _apply_hook_additional_context(
-            agent,
-            outcome.additional_context,
-            hook_name="SessionStart",
-        )
 
 
 async def _fire_user_prompt_submit(agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]) -> None:
     prompt = message if isinstance(message, str) else "[multi-modal]"
-    outcome = await agent.run_hook_event("UserPromptSubmit", prompt=prompt)
-    if outcome is not None:
-        _apply_hook_additional_context(
-            agent,
-            outcome.additional_context,
-            hook_name="UserPromptSubmit",
-        )
+    await agent.run_hook_event("UserPromptSubmit", prompt=prompt)
 
 
 async def _run_stop_hook(agent: "AgentRuntime", stop_reason: str) -> bool:
@@ -175,11 +147,6 @@ async def _run_stop_hook(agent: "AgentRuntime", stop_reason: str) -> bool:
     should_continue = agent.mark_stop_blocked_once()
     block_reason = outcome.reason or f"Stop blocked by hook: {stop_reason}"
     agent.add_hidden_user_message(block_reason)
-    _apply_hook_additional_context(
-        agent,
-        outcome.additional_context,
-        hook_name="Stop",
-    )
 
     if not should_continue:
         logger.warning(
@@ -270,20 +237,13 @@ async def query_stream(
                 duration_ms=elapsed_ms,
                 error="Interrupted by user",
             )
-            hook_outcome = await agent.run_hook_event(
+            await agent.run_hook_event(
                 "SubagentStop",
                 tool_call_id=tool_call_id,
                 subagent_name=subagent_name,
                 subagent_description=description,
                 subagent_status="cancelled",
             )
-            if hook_outcome is not None:
-                _apply_hook_additional_context(
-                    agent,
-                    hook_outcome.additional_context,
-                    hook_name="SubagentStop",
-                    related_tool_call_id=tool_call_id,
-                )
             async for hidden_event in _drain_hidden_events(agent):
                 yield hidden_event
         yield StepCompleteEvent(
@@ -460,20 +420,13 @@ async def query_stream(
                             source_prefix=source_prefix,
                             started_at_monotonic=time.monotonic(),
                         )
-                        hook_outcome = await agent.run_hook_event(
+                        await agent.run_hook_event(
                             "SubagentStart",
                             tool_call_id=tc.id,
                             subagent_name=subagent_name,
                             subagent_description=description,
                             subagent_status="running",
                         )
-                        if hook_outcome is not None:
-                            _apply_hook_additional_context(
-                                agent,
-                                hook_outcome.additional_context,
-                                hook_name="SubagentStart",
-                                related_tool_call_id=tc.id,
-                            )
 
                         yield StepStartEvent(
                             step_id=tc.id,
@@ -574,20 +527,13 @@ async def query_stream(
                                     stop_status = "timeout"
                                 else:
                                     stop_status = "error"
-                            hook_outcome = await agent.run_hook_event(
+                            await agent.run_hook_event(
                                 "SubagentStop",
                                 tool_call_id=tc.id,
                                 subagent_name=subagent_name,
                                 subagent_description=description,
                                 subagent_status=stop_status,
                             )
-                            if hook_outcome is not None:
-                                _apply_hook_additional_context(
-                                    agent,
-                                    hook_outcome.additional_context,
-                                    hook_name="SubagentStop",
-                                    related_tool_call_id=tc.id,
-                                )
 
                             yield SubagentProgressEvent(
                                 tool_call_id=tc.id,
@@ -691,20 +637,13 @@ async def query_stream(
                         source_prefix=task_source_prefix,
                         started_at_monotonic=time.monotonic(),
                     )
-                    hook_outcome = await agent.run_hook_event(
+                    await agent.run_hook_event(
                         "SubagentStart",
                         tool_call_id=tool_call.id,
                         subagent_name=task_subagent_name,
                         subagent_description=task_description,
                         subagent_status="running",
                     )
-                    if hook_outcome is not None:
-                        _apply_hook_additional_context(
-                            agent,
-                            hook_outcome.additional_context,
-                            hook_name="SubagentStart",
-                            related_tool_call_id=tool_call.id,
-                        )
                     yield SubagentStartEvent(
                         tool_call_id=tool_call.id,
                         subagent_name=task_subagent_name,
@@ -786,20 +725,13 @@ async def query_stream(
                             stop_status = "timeout"
                         else:
                             stop_status = "error"
-                    hook_outcome = await agent.run_hook_event(
+                    await agent.run_hook_event(
                         "SubagentStop",
                         tool_call_id=tool_call.id,
                         subagent_name=task_subagent_name,
                         subagent_description=task_description,
                         subagent_status=stop_status,
                     )
-                    if hook_outcome is not None:
-                        _apply_hook_additional_context(
-                            agent,
-                            hook_outcome.additional_context,
-                            hook_name="SubagentStop",
-                            related_tool_call_id=tool_call.id,
-                        )
                     yield SubagentProgressEvent(
                         tool_call_id=tool_call.id,
                         subagent_name=task_subagent_name,

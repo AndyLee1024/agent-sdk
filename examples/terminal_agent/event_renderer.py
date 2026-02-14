@@ -165,6 +165,19 @@ class EventRenderer:
     def has_running_tools(self) -> bool:
         return bool(self._running_tools)
 
+    def compute_required_tool_panel_lines(self) -> int:
+        """计算显示所有 running tools 所需的最小行数。"""
+        if not self._running_tools:
+            return 0
+        total_lines = 0
+        for tool_call_id, state in self._running_tools.items():
+            if state.is_task:
+                has_sub = bool(state.subagent_name or state.subagent_status or state.subagent_description)
+                total_lines += 2 if has_sub else 1
+            else:
+                total_lines += 1
+        return total_lines
+
     def has_active_todos(self) -> bool:
         return bool(self._current_todos)
 
@@ -288,6 +301,27 @@ class EventRenderer:
         self._assistant_buffer += text
 
     def _append_tool_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
+        self._running_tools[tool_call_id] = self._make_running_tool(tool_name, args)
+
+    def restore_tool_call(self, tool_call_id: str, tool_name: str, args_summary: str) -> None:
+        """Restore a tool call from history (for resume).
+
+        This is used when restoring from a saved session to show tool calls
+        that were in progress.
+        """
+        is_task = tool_name.lower() == "task"
+        title = _extract_task_title(args_summary) if is_task else tool_name
+
+        self._running_tools[tool_call_id] = _RunningTool(
+            tool_name=tool_name,
+            title=title,
+            started_at_monotonic=time.monotonic(),  # Use current time for resumed sessions
+            is_task=is_task,
+            args_summary=args_summary,
+        )
+
+    def _make_running_tool(self, tool_name: str, args: dict[str, Any]) -> _RunningTool:
+        """Create a _RunningTool from tool name and args dict."""
         title = tool_name
         is_task = tool_name.lower() == "task"
         summary = summarize_tool_args(tool_name, args, self._project_root).strip()
@@ -295,7 +329,7 @@ class EventRenderer:
             title = _extract_task_title(args)
             summary = ""
 
-        self._running_tools[tool_call_id] = _RunningTool(
+        return _RunningTool(
             tool_name=tool_name,
             title=title,
             started_at_monotonic=time.monotonic(),

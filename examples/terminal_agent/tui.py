@@ -37,11 +37,15 @@ from prompt_toolkit.widgets import TextArea
 from rich.console import Console
 
 from comate_agent_sdk.context.items import ItemType
+from comate_agent_sdk.llm.messages import AssistantMessage
 from comate_agent_sdk.agent import ChatSession
 from comate_agent_sdk.agent.llm_levels import ALL_LEVELS
 
 from terminal_agent.animations import (
     DEFAULT_STATUS_PHRASES,
+    PULSE_COLORS,
+    PULSE_GLYPHS,
+    _cyan_sweep_text,
     StreamAnimationController,
     SubmissionAnimator,
 )
@@ -72,7 +76,7 @@ from terminal_agent.slash_commands import (
     parse_slash_command_call,
 )
 from terminal_agent.status_bar import StatusBar
-from terminal_agent.text_effects import fit_single_line, sweep_gradient_fragments
+from terminal_agent.text_effects import fit_single_line
 
 console = Console()
 logger = logging.getLogger(__name__)
@@ -746,6 +750,25 @@ class TerminalAgentTUI:
                     self._renderer.seed_user_message(content)
                 continue
 
+            # Handle tool calls restoration
+            message = getattr(item, "message", None)
+            if isinstance(message, AssistantMessage) and message.tool_calls:
+                for tc in message.tool_calls:
+                    tool_name = tc.function.name
+                    args_str = tc.function.arguments
+                    # Parse arguments as dict for summarize_tool_args
+                    try:
+                        import json
+                        args_dict = json.loads(args_str) if args_str else {}
+                    except json.JSONDecodeError:
+                        args_dict = {"_raw": args_str}
+                    args_summary = self._summarize_tool_args(tool_name, args_dict)
+                    self._renderer.restore_tool_call(
+                        tool_call_id=tc.id,
+                        tool_name=tool_name,
+                        args_summary=args_summary,
+                    )
+
             assistant_text = self._extract_assistant_text(item).strip()
             if assistant_text:
                 self._renderer.append_assistant_message(assistant_text)
@@ -753,6 +776,12 @@ class TerminalAgentTUI:
                 self._renderer.append_system_message("(tool call only message)")
 
         self._drain_history_sync()
+
+    def _summarize_tool_args(self, tool_name: str, args: dict[str, Any]) -> str:
+        """Summarize tool arguments for display in history."""
+        from terminal_agent.tool_view import summarize_tool_args
+        summary = summarize_tool_args(tool_name, args, self._renderer._project_root).strip()
+        return summary
 
     @staticmethod
     def _extract_assistant_text(item: Any) -> str:
@@ -1475,11 +1504,12 @@ class TerminalAgentTUI:
             show_flash_line = (
                 self._tool_result_flash_active and self._tool_panel_max_lines >= 2
             )
-            tool_max = (
-                self._tool_panel_max_lines - 1
-                if show_flash_line
-                else self._tool_panel_max_lines
-            )
+            # 动态计算所需行数，但至少保留配置值作为最小值
+            required_lines = self._renderer.compute_required_tool_panel_lines()
+            base_max = self._tool_panel_max_lines
+            tool_max = max(required_lines, base_max)
+            if show_flash_line:
+                tool_max = max(tool_max + 1, self._tool_panel_max_lines)
             entries = self._renderer.tool_panel_entries(max_lines=max(1, tool_max))
             if not entries:
                 return [("", " ")]
@@ -1529,15 +1559,28 @@ class TerminalAgentTUI:
         text = loading_state.text.strip()
         if not text:
             if self._busy:
-                width = self._terminal_width()
-                clipped = fit_single_line(self._fallback_loading_phrase, width - 1)
-                return sweep_gradient_fragments(clipped, self._loading_frame)
+                return self._animated_loading_fragments(self._fallback_loading_phrase)
             return [("", " ")]
 
+        return self._animated_loading_fragments(text)
 
+    def _animated_loading_fragments(self, phrase: str) -> list[tuple[str, str]]:
+        """用与 SubmissionAnimator 一致的流光走字 + 脉冲 glyph 渲染 loading 文案."""
         width = self._terminal_width()
-        clipped = fit_single_line(text, width - 1)
-        return [("class:loading", clipped)]
+        clipped = fit_single_line(phrase, width - 4)  # 留出 glyph + 空格
+
+        frame = self._loading_frame
+        pulse_idx = frame % len(PULSE_COLORS)
+        glyph = PULSE_GLYPHS[pulse_idx]
+        glyph_color = PULSE_COLORS[pulse_idx]
+
+        # 构建 Rich Text（与 SubmissionAnimator.renderable 相同结构）
+        from rich.text import Text as RichText
+
+        dot = RichText(f"{glyph} ", style=f"bold {glyph_color}")
+        sweep = _cyan_sweep_text(clipped, frame=frame)
+        combined = RichText.assemble(dot, sweep)
+        return self._rich_text_to_pt_fragments(combined)
 
     def _loading_height(self) -> int:
         if self._animator.is_active:
@@ -1546,11 +1589,12 @@ class TerminalAgentTUI:
             show_flash_line = (
                 self._tool_result_flash_active and self._tool_panel_max_lines >= 2
             )
-            tool_max = (
-                self._tool_panel_max_lines - 1
-                if show_flash_line
-                else self._tool_panel_max_lines
-            )
+            # 动态计算所需行数，但至少保留配置值作为最小值
+            required_lines = self._renderer.compute_required_tool_panel_lines()
+            base_max = self._tool_panel_max_lines
+            tool_max = max(required_lines, base_max)
+            if show_flash_line:
+                tool_max = max(tool_max + 1, self._tool_panel_max_lines)
             tool_lines = self._renderer.tool_panel_entries(max_lines=max(1, tool_max))
             total = len(tool_lines) + (1 if show_flash_line else 0)
             return max(1, total)

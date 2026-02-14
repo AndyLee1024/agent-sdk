@@ -225,21 +225,6 @@ def _extract_tool_envelope(
     return None
 
 
-def _apply_hook_additional_context(
-    agent: "AgentRuntime",
-    additional_context: str | None,
-    *,
-    hook_name: str,
-    related_tool_call_id: str | None = None,
-) -> None:
-    if additional_context:
-        agent.add_hook_hidden_user_message(
-            additional_context,
-            hook_name=hook_name,
-            related_tool_call_id=related_tool_call_id,
-        )
-
-
 def _safe_parse_tool_args(raw: str) -> dict[str, Any]:
     try:
         data = json.loads(raw)
@@ -350,20 +335,13 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
             content=error_msg,
             is_error=True,
         )
-        outcome = await agent.run_hook_event(
+        await agent.run_hook_event(
             "PostToolUseFailure",
             tool_name=tool_name,
             tool_input=_safe_parse_tool_args(tool_call.function.arguments),
             tool_call_id=tool_call.id,
             error=tool_message.text,
         )
-        if outcome is not None:
-            _apply_hook_additional_context(
-                agent,
-                outcome.additional_context,
-                hook_name="PostToolUseFailure",
-                related_tool_call_id=tool_call.id,
-            )
         return tool_message
 
     # Create Laminar span for tool execution
@@ -403,7 +381,7 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
 
         async def _fire_post_tool_hooks(tool_message: ToolMessage) -> None:
             if tool_message.is_error:
-                outcome = await agent.run_hook_event(
+                await agent.run_hook_event(
                     "PostToolUseFailure",
                     tool_name=tool_name,
                     tool_input=args,
@@ -411,19 +389,12 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                     error=tool_message.text,
                 )
             else:
-                outcome = await agent.run_hook_event(
+                await agent.run_hook_event(
                     "PostToolUse",
                     tool_name=tool_name,
                     tool_input=args,
                     tool_call_id=tool_call.id,
                     tool_response=_stringify_hook_response(tool_message.content),
-                )
-            if outcome is not None:
-                _apply_hook_additional_context(
-                    agent,
-                    outcome.additional_context,
-                    hook_name="PostToolUseFailure" if tool_message.is_error else "PostToolUse",
-                    related_tool_call_id=tool_call.id,
                 )
 
         try:
@@ -440,13 +411,6 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                 tool_call_id=tool_call.id,
             )
             if pre_outcome is not None:
-                _apply_hook_additional_context(
-                    agent,
-                    pre_outcome.additional_context,
-                    hook_name="PreToolUse",
-                    related_tool_call_id=tool_call.id,
-                )
-
                 if pre_outcome.permission_decision == "deny":
                     deny_reason = pre_outcome.reason or "Tool use denied by hook."
                     if Laminar is not None:

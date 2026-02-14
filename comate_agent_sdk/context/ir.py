@@ -613,7 +613,7 @@ class ContextIR:
         hook_name: str | None = None,
         related_tool_call_id: str | None = None,
     ) -> None:
-        """添加 hook additional_context，若处于 tool barrier 则延迟注入。"""
+        """添加 hook hidden 用户消息，若处于 tool barrier 则延迟注入。"""
         text = content.strip()
         if not text:
             return

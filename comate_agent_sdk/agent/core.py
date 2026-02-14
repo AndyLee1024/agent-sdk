@@ -641,7 +641,7 @@ class AgentRuntime:
         hook_name: str | None = None,
         related_tool_call_id: str | None = None,
     ) -> None:
-        """Hook additional_context 注入入口（自动遵循 tool barrier）。"""
+        """Hook hidden user message 注入入口（自动遵循 tool barrier）。"""
         self._context.add_hook_hidden_user_message(
             content,
             hook_name=hook_name,

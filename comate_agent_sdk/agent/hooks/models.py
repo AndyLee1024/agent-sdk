@@ -124,7 +124,6 @@ class HookInput:
 
 @dataclass(slots=True)
 class HookResult:
-    additional_context: str | None = None
     permission_decision: PermissionDecision | None = None
     updated_input: dict[str, Any] | None = None
     decision: StopDecision | None = None
@@ -132,10 +131,13 @@ class HookResult:
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "HookResult":
+        if "additionalContext" in raw or "additional_context" in raw:
+            raise ValueError(
+                "Hook result field 'additionalContext' has been removed; use 'reason' where applicable."
+            )
         permission_decision = raw.get("permissionDecision", raw.get("permission_decision"))
         decision = raw.get("decision")
         return cls(
-            additional_context=cast(str | None, raw.get("additionalContext", raw.get("additional_context"))),
             permission_decision=cast(PermissionDecision | None, permission_decision),
             updated_input=cast(dict[str, Any] | None, raw.get("updatedInput", raw.get("updated_input"))),
             decision=cast(StopDecision | None, decision),
@@ -146,7 +148,6 @@ class HookResult:
 @dataclass(slots=True)
 class AggregatedHookOutcome:
     event_name: str
-    additional_context: str | None = None
     permission_decision: PermissionDecision | None = None
     updated_input: dict[str, Any] | None = None
     decision: StopDecision | None = None

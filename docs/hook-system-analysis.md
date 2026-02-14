@@ -43,7 +43,6 @@ AggregatedHookOutcome 聚合结果
 
 ```
 AggregatedHookOutcome
-    ├── additional_context → 注入为隐藏用户消息
     ├── permission_decision=deny → 阻止工具执行
     ├── permission_decision=ask → 调用 tool_approval_callback
     └── updated_input → 修改工具参数后执行
@@ -94,7 +93,6 @@ AggregatedHookOutcome
 ```python
 def my_hook(hook_input: HookInput) -> HookResult | dict | None:
     return HookResult(
-        additional_context="额外上下文",
         permission_decision="allow",  # allow/ask/deny
         updated_input={"key": "value"},
         reason="原因",
@@ -112,7 +110,6 @@ def my_hook(hook_input: HookInput) -> HookResult | dict | None:
 
 | 字段 | 说明 |
 |------|------|
-| `additional_context` | 返回给 LLM 的额外上下文 |
 | `permission_decision` | allow / ask / deny |
 | `updated_input` | 修改后的工具参数 |
 | `reason` | 拒绝/询问的原因 |
@@ -121,9 +118,9 @@ def my_hook(hook_input: HookInput) -> HookResult | dict | None:
 
 ## 三、发现的问题
 
-### 问题 1: additional_context 消息顺序问题（已修复）
+### 问题 1: Hook 隐藏消息顺序问题（已修复）
 
-**问题描述**: Hook 返回的 `additional_context` 可能插入到 tool_call 和 tool_result 之间，导致 LLM API 调用失败。
+**问题描述**: Hook 隐藏消息可能插入到 tool_call 和 tool_result 之间，导致 LLM API 调用失败。
 
 **修复方案**: Tool Barrier + Pending Hook Injections
 
@@ -137,7 +134,7 @@ elif isinstance(message, ToolMessage):
 ```
 
 ```
-有进行中的 tool_call → additional_context 存入 pending
+有进行中的 tool_call → hook 隐藏消息存入 pending
 tool_result 返回后 → pending flush 到 conversation
 ```
 
@@ -160,14 +157,14 @@ async def _execute_python_handler(self, handler, hook_input):
 
 ## 四、待优化点
 
-### 4.1 additional_context 在 deny 时多余
+### 4.1 PreToolUse deny 的反馈通道
 
 当 `permissionDecision = "deny"` 时：
 - `reason` 字段已经说明了拒绝原因
-- `additional_context` 是多余的
-- 但当前实现仍会 pending 并 flush
+- 应通过 `ToolMessage(is_error=True)` 返回给模型
+- 不需要额外 hidden 消息注入
 
-**建议**: deny 时直接丢弃 additional_context，不需要 pending。
+**建议**: deny 时只保留 tool_result 反馈，避免重复信号。
 
 ---
 
@@ -180,4 +177,4 @@ async def _execute_python_handler(self, handler, hook_input):
 | Hook 模型定义 | `agent/hooks/models.py` |
 | Tool Barrier | `context/ir.py` |
 | Hook 入口 | `agent/core.py:637` |
-| Hook 应用 | `agent/tool_exec.py:228` |
+| Hook 应用 | `agent/tool_exec.py` |
