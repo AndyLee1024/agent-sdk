@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from comate_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
 from comate_agent_sdk.context.items import (
@@ -68,6 +68,17 @@ _MESSAGE_TYPE_MAP: dict[type, ItemType] = {
 }
 
 
+@dataclass(slots=True)
+class PendingHookInjection:
+    """延迟注入的 hook meta message。"""
+
+    content: str
+    origin: Literal["hook"] = "hook"
+    hook_name: str | None = None
+    related_tool_call_id: str | None = None
+    created_turn: int = 0
+
+
 @dataclass
 class ContextIR:
     """Context 中间表示
@@ -104,6 +115,9 @@ class ContextIR:
     _todo_turn_number_at_update: int = 0
     _todo_empty_reminder_start_turn: int = 0  # 空 todo 提醒开始的轮次
     _memory_item: ContextItem | None = field(default=None, repr=False)
+    _inflight_tool_call_ids: set[str] = field(default_factory=set, repr=False)
+    _pending_hook_injections: list[PendingHookInjection] = field(default_factory=list, repr=False)
+    _flushed_hook_injection_texts: list[str] = field(default_factory=list, repr=False)
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
 
@@ -577,7 +591,96 @@ class ContextIR:
             detail=f"message added: {item_type.value}",
         ))
 
+        # Tool barrier tracking:
+        # - assistant(tool_calls) opens barrier
+        # - tool_result closes corresponding ids and flushes deferred hook injections when barrier cleared
+        if isinstance(message, AssistantMessage) and message.tool_calls:
+            for tool_call in message.tool_calls:
+                if tool_call.id:
+                    self._inflight_tool_call_ids.add(tool_call.id)
+        elif isinstance(message, ToolMessage):
+            if message.tool_call_id:
+                self._inflight_tool_call_ids.discard(message.tool_call_id)
+            self._flush_pending_hook_injections_if_unblocked()
+            self._flush_pending_skill_items_if_unblocked()
+
         return item
+
+    def add_hook_hidden_user_message(
+        self,
+        content: str,
+        *,
+        hook_name: str | None = None,
+        related_tool_call_id: str | None = None,
+    ) -> None:
+        """添加 hook additional_context，若处于 tool barrier 则延迟注入。"""
+        text = content.strip()
+        if not text:
+            return
+
+        if self._inflight_tool_call_ids:
+            self._pending_hook_injections.append(
+                PendingHookInjection(
+                    content=text,
+                    hook_name=hook_name,
+                    related_tool_call_id=related_tool_call_id,
+                    created_turn=self._turn_number,
+                )
+            )
+            return
+
+        self._append_hook_injection_message(
+            text=text,
+            hook_name=hook_name,
+            related_tool_call_id=related_tool_call_id,
+            created_turn=self._turn_number,
+        )
+
+    def _append_hook_injection_message(
+        self,
+        *,
+        text: str,
+        hook_name: str | None,
+        related_tool_call_id: str | None,
+        created_turn: int,
+    ) -> None:
+        """将 hook 注入消息立即落盘，并登记为已 flush 文本供 runtime 发事件。"""
+        metadata = {
+            "origin": "hook",
+            "hook_name": hook_name,
+            "related_tool_call_id": related_tool_call_id,
+            "created_turn": created_turn,
+        }
+        self.add_message(
+            UserMessage(content=text, is_meta=True),
+            metadata=metadata,
+        )
+        self._flushed_hook_injection_texts.append(text)
+
+    def _flush_pending_hook_injections_if_unblocked(self) -> None:
+        """tool barrier 解除时，批量刷入延迟的 hook 注入。"""
+        if self._inflight_tool_call_ids:
+            return
+        if not self._pending_hook_injections:
+            return
+
+        pending = list(self._pending_hook_injections)
+        self._pending_hook_injections.clear()
+        for injection in pending:
+            self._append_hook_injection_message(
+                text=injection.content,
+                hook_name=injection.hook_name,
+                related_tool_call_id=injection.related_tool_call_id,
+                created_turn=injection.created_turn,
+            )
+
+    def pop_flushed_hook_injection_texts(self) -> list[str]:
+        """弹出已刷入 context 的 hook 注入文本（供 UI hidden event 使用）。"""
+        if not self._flushed_hook_injection_texts:
+            return []
+        texts = list(self._flushed_hook_injection_texts)
+        self._flushed_hook_injection_texts.clear()
+        return texts
 
     def set_turn_number(self, turn_number: int) -> None:
         """设置/纠正 turn_number（单调不减）。
@@ -698,15 +801,23 @@ class ContextIR:
             metadata={"skill_name": skill_name},
         )
 
-        self._pending_skill_items = [metadata_item, prompt_item]
+        self._pending_skill_items.extend([metadata_item, prompt_item])
         return [metadata_item, prompt_item]
 
     def flush_pending_skill_items(self) -> None:
-        """将待注入的 Skill items 刷入 conversation"""
+        """将待注入的 Skill items 刷入 conversation（tool barrier 内会延迟）。"""
+        self._flush_pending_skill_items_if_unblocked()
+
+    def _flush_pending_skill_items_if_unblocked(self) -> None:
+        """tool barrier 解除时，批量刷入 Skill pending items。"""
+        if self._inflight_tool_call_ids:
+            return
         if not self._pending_skill_items:
             return
 
-        for item in self._pending_skill_items:
+        pending = list(self._pending_skill_items)
+        self._pending_skill_items = []
+        for item in pending:
             self.conversation.items.append(item)
             self.event_bus.emit(ContextEvent(
                 event_type=EventType.ITEM_ADDED,
@@ -714,8 +825,6 @@ class ContextIR:
                 item_id=item.id,
                 detail=f"skill item flushed: {item.item_type.value}",
             ))
-
-        self._pending_skill_items = []
 
     @property
     def has_pending_skill_items(self) -> bool:
@@ -882,6 +991,9 @@ class ContextIR:
         self.header.items.clear()
         self.conversation.items.clear()
         self._pending_skill_items.clear()
+        self._pending_hook_injections.clear()
+        self._inflight_tool_call_ids.clear()
+        self._flushed_hook_injection_texts.clear()
         self.reminders.clear()
         self._todo_state.clear()
         self._memory_item = None

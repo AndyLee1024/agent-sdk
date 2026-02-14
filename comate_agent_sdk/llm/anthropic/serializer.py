@@ -28,6 +28,7 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
     UserMessage,
 )
+from comate_agent_sdk.llm.protocol_invariants import validate_tool_call_sequence
 
 NonSystemMessage = UserMessage | AssistantMessage | ToolMessage
 
@@ -463,6 +464,7 @@ class AnthropicMessageSerializer:
             A tuple of (messages, system_message) where system_message is extracted
             from any SystemMessage or DeveloperMessage in the list.
         """
+        validate_tool_call_sequence(messages, provider="anthropic")
         messages = [m.model_copy(deep=True) for m in messages]
 
         # Separate system/developer messages from normal messages

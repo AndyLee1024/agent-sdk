@@ -225,9 +225,19 @@ def _extract_tool_envelope(
     return None
 
 
-def _apply_hook_additional_context(agent: "AgentRuntime", additional_context: str | None) -> None:
+def _apply_hook_additional_context(
+    agent: "AgentRuntime",
+    additional_context: str | None,
+    *,
+    hook_name: str,
+    related_tool_call_id: str | None = None,
+) -> None:
     if additional_context:
-        agent.add_hidden_user_message(additional_context)
+        agent.add_hook_hidden_user_message(
+            additional_context,
+            hook_name=hook_name,
+            related_tool_call_id=related_tool_call_id,
+        )
 
 
 def _safe_parse_tool_args(raw: str) -> dict[str, Any]:
@@ -348,7 +358,12 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
             error=tool_message.text,
         )
         if outcome is not None:
-            _apply_hook_additional_context(agent, outcome.additional_context)
+            _apply_hook_additional_context(
+                agent,
+                outcome.additional_context,
+                hook_name="PostToolUseFailure",
+                related_tool_call_id=tool_call.id,
+            )
         return tool_message
 
     # Create Laminar span for tool execution
@@ -404,7 +419,12 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                     tool_response=_stringify_hook_response(tool_message.content),
                 )
             if outcome is not None:
-                _apply_hook_additional_context(agent, outcome.additional_context)
+                _apply_hook_additional_context(
+                    agent,
+                    outcome.additional_context,
+                    hook_name="PostToolUseFailure" if tool_message.is_error else "PostToolUse",
+                    related_tool_call_id=tool_call.id,
+                )
 
         try:
             # Parse arguments
@@ -420,7 +440,12 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                 tool_call_id=tool_call.id,
             )
             if pre_outcome is not None:
-                _apply_hook_additional_context(agent, pre_outcome.additional_context)
+                _apply_hook_additional_context(
+                    agent,
+                    pre_outcome.additional_context,
+                    hook_name="PreToolUse",
+                    related_tool_call_id=tool_call.id,
+                )
 
                 if pre_outcome.permission_decision == "deny":
                     deny_reason = pre_outcome.reason or "Tool use denied by hook."

@@ -200,10 +200,28 @@ class HookEngine:
         if callback is None:
             return _HandlerExecution()
 
-        try:
-            result = callback(hook_input)
+        timeout = max(1, int(handler.timeout or 10))
+
+        async def _run_callback() -> Any:
+            if inspect.iscoroutinefunction(callback):
+                result = callback(hook_input)
+                if inspect.isawaitable(result):
+                    return await result
+                return result
+
+            result = await asyncio.to_thread(callback, hook_input)
             if inspect.isawaitable(result):
-                result = await result
+                return await result
+            return result
+
+        try:
+            result = await asyncio.wait_for(_run_callback(), timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"python hook 超时 event={hook_input.hook_event_name}, "
+                f"handler={handler.name or callback}, timeout={timeout}s"
+            )
+            return _HandlerExecution()
         except Exception as exc:
             logger.warning(f"python hook 执行失败 {handler.name or callback}: {exc}", exc_info=True)
             return _HandlerExecution()

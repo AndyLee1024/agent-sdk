@@ -634,7 +634,27 @@ class AgentRuntime:
         self._context.add_message(UserMessage(content=text, is_meta=True))
         self._pending_hidden_user_messages.append(text)
 
+    def add_hook_hidden_user_message(
+        self,
+        content: str,
+        *,
+        hook_name: str | None = None,
+        related_tool_call_id: str | None = None,
+    ) -> None:
+        """Hook additional_context 注入入口（自动遵循 tool barrier）。"""
+        self._context.add_hook_hidden_user_message(
+            content,
+            hook_name=hook_name,
+            related_tool_call_id=related_tool_call_id,
+        )
+        flushed = self._context.pop_flushed_hook_injection_texts()
+        if flushed:
+            self._pending_hidden_user_messages.extend(flushed)
+
     def drain_hidden_user_messages(self) -> list[str]:
+        flushed = self._context.pop_flushed_hook_injection_texts()
+        if flushed:
+            self._pending_hidden_user_messages.extend(flushed)
         if not self._pending_hidden_user_messages:
             return []
         pending = list(self._pending_hidden_user_messages)

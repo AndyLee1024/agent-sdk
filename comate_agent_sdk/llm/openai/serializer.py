@@ -28,6 +28,7 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
     UserMessage,
 )
+from comate_agent_sdk.llm.protocol_invariants import validate_tool_call_sequence
 
 
 class OpenAIMessageSerializer:
@@ -297,4 +298,5 @@ class OpenAIMessageSerializer:
     def serialize_messages(
         messages: list[BaseMessage],
     ) -> list[ChatCompletionMessageParam]:
+        validate_tool_call_sequence(messages, provider="openai")
         return [OpenAIMessageSerializer.serialize(m) for m in messages]

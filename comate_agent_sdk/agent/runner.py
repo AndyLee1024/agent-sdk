@@ -330,9 +330,19 @@ async def precheck_and_compact(
     return compacted, event, _build_compaction_meta_events(agent, policy)
 
 
-def _apply_hook_additional_context(agent: "AgentRuntime", additional_context: str | None) -> None:
+def _apply_hook_additional_context(
+    agent: "AgentRuntime",
+    additional_context: str | None,
+    *,
+    hook_name: str,
+    related_tool_call_id: str | None = None,
+) -> None:
     if additional_context:
-        agent.add_hidden_user_message(additional_context)
+        agent.add_hook_hidden_user_message(
+            additional_context,
+            hook_name=hook_name,
+            related_tool_call_id=related_tool_call_id,
+        )
         agent.drain_hidden_user_messages()
 
 
@@ -342,13 +352,21 @@ async def _fire_session_start_if_needed(agent: "AgentRuntime") -> None:
     outcome = await agent.run_hook_event("SessionStart")
     agent._hooks_session_started = True
     if outcome is not None:
-        _apply_hook_additional_context(agent, outcome.additional_context)
+        _apply_hook_additional_context(
+            agent,
+            outcome.additional_context,
+            hook_name="SessionStart",
+        )
 
 
 async def _fire_user_prompt_submit(agent: "AgentRuntime", message: str) -> None:
     outcome = await agent.run_hook_event("UserPromptSubmit", prompt=message)
     if outcome is not None:
-        _apply_hook_additional_context(agent, outcome.additional_context)
+        _apply_hook_additional_context(
+            agent,
+            outcome.additional_context,
+            hook_name="UserPromptSubmit",
+        )
 
 
 def _resolve_subagent_hook_payload(tool_call: ToolCall) -> tuple[str, str]:
@@ -383,7 +401,12 @@ async def _fire_subagent_hook(
         subagent_status=subagent_status,
     )
     if outcome is not None:
-        _apply_hook_additional_context(agent, outcome.additional_context)
+        _apply_hook_additional_context(
+            agent,
+            outcome.additional_context,
+            hook_name=event_name,
+            related_tool_call_id=tool_call.id,
+        )
 
 
 async def _maybe_block_stop(agent: "AgentRuntime", stop_reason: str) -> bool:
@@ -400,7 +423,11 @@ async def _maybe_block_stop(agent: "AgentRuntime", stop_reason: str) -> bool:
     block_reason = outcome.reason or f"Stop blocked by hook: {stop_reason}"
     agent.add_hidden_user_message(block_reason)
     agent.drain_hidden_user_messages()
-    _apply_hook_additional_context(agent, outcome.additional_context)
+    _apply_hook_additional_context(
+        agent,
+        outcome.additional_context,
+        hook_name="Stop",
+    )
     if not should_continue:
         logger.warning(
             f"Stop hook blocked {agent._stop_hook_block_count} times, forcing stop (reason={stop_reason})"

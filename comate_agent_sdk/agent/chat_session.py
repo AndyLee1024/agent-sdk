@@ -784,7 +784,10 @@ class ChatSession:
             outcome = await self._agent.run_hook_event("SessionEnd")
             self._agent._hooks_session_ended = True
             if outcome is not None and outcome.additional_context:
-                self._agent.add_hidden_user_message(outcome.additional_context)
+                self._agent.add_hook_hidden_user_message(
+                    outcome.additional_context,
+                    hook_name="SessionEnd",
+                )
         # Runtime may be reused across ChatSession instances.
         self._agent._hooks_session_started = False
         self._agent._hooks_session_ended = False
