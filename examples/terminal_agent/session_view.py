@@ -16,12 +16,18 @@ def _truncate(content: str, max_len: int = 1400) -> str:
 
 
 def _extract_assistant_text(item) -> str:
-    content = item.content_text or ""
-    if content:
-        return str(content)
+    """从 ContextItem 提取用于显示的文本（不含 tool_calls JSON）"""
     message = getattr(item, "message", None)
     if message is None:
         return ""
+
+    # 优先使用 message.text（纯文本，不含 tool_calls）
+    if hasattr(message, "text"):
+        text = message.text
+        if isinstance(text, str):
+            return text
+
+    # 回退：处理非标准 content
     msg_content = getattr(message, "content", "")
     if isinstance(msg_content, str):
         return msg_content
@@ -31,6 +37,7 @@ def _extract_assistant_text(item) -> str:
             if isinstance(part, dict) and part.get("type") == "text":
                 text_parts.append(str(part.get("text", "")))
         return "".join(text_parts)
+
     return ""
 
 

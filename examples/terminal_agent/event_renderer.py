@@ -335,21 +335,19 @@ class EventRenderer:
     def _append_tool_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
         self._running_tools[tool_call_id] = self._make_running_tool(tool_name, args)
 
-    def restore_tool_call(self, tool_call_id: str, tool_name: str, args_summary: str) -> None:
-        """Restore a tool call from history (for resume).
+    def append_static_tool_result(self, signature: str, is_error: bool = False) -> None:
+        """追加静态工具结果（用于历史恢复，无计时器）
 
-        This is used when restoring from a saved session to show tool calls
-        that were in progress.
+        Args:
+            signature: 工具签名，例如 "Read(path=xxx)"
+            is_error: 是否为错误结果
         """
-        is_task = tool_name.lower() == "task"
-        title = _extract_task_title(args_summary) if is_task else tool_name
-
-        self._running_tools[tool_call_id] = _RunningTool(
-            tool_name=tool_name,
-            title=title,
-            started_at_monotonic=time.monotonic(),  # Use current time for resumed sessions
-            is_task=is_task,
-            args_summary=args_summary,
+        self._history.append(
+            HistoryEntry(
+                entry_type="tool_result",
+                text=signature,
+                is_error=is_error,
+            )
         )
 
     def _make_running_tool(self, tool_name: str, args: dict[str, Any]) -> _RunningTool:

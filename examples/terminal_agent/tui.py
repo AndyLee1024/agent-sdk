@@ -737,12 +737,16 @@ class TerminalAgentTUI:
         history = [
             item
             for item in items
-            if item.item_type in (ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE)
+            if item.item_type in (ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE, ItemType.TOOL_RESULT)
         ]
         if not history:
             return
 
         self._renderer.append_system_message(f"history loaded: {len(history)} messages")
+
+        # 维护 tool_call_id 映射，用于匹配工具调用和结果
+        tool_call_info: dict[str, tuple[str, str]] = {}  # tool_call_id → (tool_name, args_summary)
+
         for item in history:
             if item.item_type == ItemType.USER_MESSAGE:
                 content = str(item.content_text or "").strip()
@@ -750,30 +754,49 @@ class TerminalAgentTUI:
                     self._renderer.seed_user_message(content)
                 continue
 
-            # Handle tool calls restoration
-            message = getattr(item, "message", None)
-            if isinstance(message, AssistantMessage) and message.tool_calls:
-                for tc in message.tool_calls:
-                    tool_name = tc.function.name
-                    args_str = tc.function.arguments
-                    # Parse arguments as dict for summarize_tool_args
-                    try:
-                        import json
-                        args_dict = json.loads(args_str) if args_str else {}
-                    except json.JSONDecodeError:
-                        args_dict = {"_raw": args_str}
-                    args_summary = self._summarize_tool_args(tool_name, args_dict)
-                    self._renderer.restore_tool_call(
-                        tool_call_id=tc.id,
-                        tool_name=tool_name,
-                        args_summary=args_summary,
-                    )
+            # 处理 AssistantMessage - 提取 tool_calls 信息但不渲染为动态组件
+            if item.item_type == ItemType.ASSISTANT_MESSAGE:
+                message = getattr(item, "message", None)
+                if isinstance(message, AssistantMessage) and message.tool_calls:
+                    for tc in message.tool_calls:
+                        tool_name = tc.function.name
+                        args_str = tc.function.arguments
+                        try:
+                            import json
+                            args_dict = json.loads(args_str) if args_str else {}
+                        except json.JSONDecodeError:
+                            args_dict = {"_raw": args_str}
+                        args_summary = self._summarize_tool_args(tool_name, args_dict)
+                        # 存储映射，不调用 restore_tool_call（避免加入 _running_tools）
+                        tool_call_info[tc.id] = (tool_name, args_summary)
 
-            assistant_text = self._extract_assistant_text(item).strip()
-            if assistant_text:
-                self._renderer.append_assistant_message(assistant_text)
-            else:
-                self._renderer.append_system_message("(tool call only message)")
+                # 显示 assistant text
+                assistant_text = self._extract_assistant_text(item).strip()
+                if assistant_text:
+                    self._renderer.append_assistant_message(assistant_text)
+                continue
+
+            # 处理 TOOL_RESULT - 直接输出静态文本（无计时器）
+            if item.item_type == ItemType.TOOL_RESULT:
+                message = getattr(item, "message", None)
+                if message is None:
+                    continue
+
+                tool_call_id = getattr(message, "tool_call_id", None)
+                is_error = getattr(message, "is_error", False)
+
+                # 从映射中获取工具信息
+                if tool_call_id and tool_call_id in tool_call_info:
+                    tool_name, args_summary = tool_call_info[tool_call_id]
+                    signature = f"{tool_name}({args_summary})" if args_summary else f"{tool_name}()"
+                else:
+                    # 回退：直接使用 tool_name
+                    tool_name = getattr(message, "tool_name", item.tool_name or "UnknownTool")
+                    signature = f"{tool_name}()"
+
+                # 直接追加静态 HistoryEntry（无计时器）
+                self._renderer.append_static_tool_result(signature, is_error)
+                continue
 
         self._drain_history_sync()
 
@@ -785,12 +808,18 @@ class TerminalAgentTUI:
 
     @staticmethod
     def _extract_assistant_text(item: Any) -> str:
-        content = item.content_text or ""
-        if content:
-            return str(content)
+        """从 ContextItem 提取用于显示的文本（不含 tool_calls JSON）"""
         message = getattr(item, "message", None)
         if message is None:
             return ""
+
+        # 优先使用 message.text（纯文本，不含 tool_calls）
+        if hasattr(message, "text"):
+            text = message.text
+            if isinstance(text, str):
+                return text
+
+        # 回退：处理非标准 content
         msg_content = getattr(message, "content", "")
         if isinstance(msg_content, str):
             return msg_content
@@ -800,6 +829,7 @@ class TerminalAgentTUI:
                 if isinstance(part, dict) and part.get("type") == "text":
                     text_parts.append(str(part.get("text", "")))
             return "".join(text_parts)
+
         return ""
 
     def _clear_input_area(self) -> None:
