@@ -134,6 +134,10 @@ class EventRenderer:
             "AGENT_SDK_TUI_TODO_PANEL_MAX_LINES",
             _DEFAULT_TODO_PANEL_MAX_LINES,
         )
+        self._diff_max_lines = read_env_int(
+            "AGENT_SDK_TUI_DIFF_MAX_LINES",
+            50,
+        )
 
     def start_turn(self) -> None:
         self._flush_assistant_segment()
@@ -335,13 +339,27 @@ class EventRenderer:
     def _append_tool_call(self, tool_name: str, args: dict[str, Any], tool_call_id: str) -> None:
         self._running_tools[tool_call_id] = self._make_running_tool(tool_name, args)
 
-    def append_static_tool_result(self, signature: str, is_error: bool = False) -> None:
-        """追加静态工具结果（用于历史恢复，无计时器）
+    def append_static_tool_result(
+        self,
+        signature: str,
+        is_error: bool = False,
+        diff_lines: list[str] | None = None,
+    ) -> None:
+        """Append a tool result to history as a static entry (no timer).
 
         Args:
             signature: 工具签名，例如 "Read(path=xxx)"
             is_error: 是否为错误结果
+            diff_lines: optional diff lines for Edit/MultiEdit
         """
+        if not is_error and diff_lines and len(diff_lines) > 0:
+            text_obj = Text(signature)
+            text_obj.append("\n")
+            text_obj.append(self._render_diff_text(diff_lines, max_lines=self._diff_max_lines))
+            self._history.append(
+                HistoryEntry(entry_type="tool_result", text=text_obj, is_error=False)
+            )
+            return
         self._history.append(
             HistoryEntry(
                 entry_type="tool_result",
@@ -374,6 +392,7 @@ class EventRenderer:
         tool_call_id: str,
         is_error: bool,
         result: Any,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         state = self._running_tools.pop(tool_call_id, None)
         if state is None:
@@ -388,14 +407,84 @@ class EventRenderer:
         if state.is_task:
             base = f"{state.title} · {elapsed}"
         else:
-            signature = _tool_signature(state.tool_name, state.args_summary)
+            display_name = "Update" if state.tool_name in ("Edit", "MultiEdit") else state.tool_name
+            summary = state.args_summary
+            # Append line range for Edit/MultiEdit
+            if display_name == "Update" and metadata:
+                sl = metadata.get("start_line")
+                el = metadata.get("end_line")
+                if isinstance(sl, int) and sl > 0:
+                    line_suffix = f":L{sl}-L{el}" if isinstance(el, int) and el > sl else f":L{sl}"
+                    summary = f"{summary}{line_suffix}" if summary else line_suffix
+            signature = _tool_signature(display_name, summary)
             base = f"{signature} · {elapsed}"
 
         error_suffix = ""
         if is_error:
             error_suffix = f" · {_truncate(_one_line(result), self._tool_error_summary_max_len)}"
 
+        # Render diff for Edit/MultiEdit if metadata contains diff lines
+        if not is_error and metadata:
+            diff_lines = metadata.get("diff")
+            if isinstance(diff_lines, list) and len(diff_lines) > 0:
+                text_obj = Text(f"{base}{error_suffix}")
+                text_obj.append("\n")
+                text_obj.append(self._render_diff_text(diff_lines, max_lines=self._diff_max_lines))
+                self._history.append(
+                    HistoryEntry(entry_type="tool_result", text=text_obj, is_error=False)
+                )
+                return
+
         self._history.append(HistoryEntry(entry_type="tool_result", text=f"{base}{error_suffix}", is_error=is_error))
+
+    @staticmethod
+    def _render_diff_text(diff_lines: list[str], max_lines: int = 50) -> Text:
+        """Render diff lines as colored Rich Text with line numbers."""
+        import re
+
+        result = Text()
+        total_lines = len(diff_lines)
+        displayed_lines = diff_lines[:max_lines] if max_lines > 0 else diff_lines
+
+        old_line = 0
+        new_line = 0
+        hunk_pattern = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+        for line in displayed_lines:
+            if line.startswith("---") or line.startswith("+++"):
+                result.append(line, style="dim")
+                result.append("\n")
+                continue
+
+            m = hunk_pattern.match(line)
+            if m:
+                old_line = int(m.group(1))
+                new_line = int(m.group(2))
+                result.append(line, style="cyan")
+                result.append("\n")
+                continue
+
+            if line.startswith("-"):
+                result.append(f"{old_line:>4} ", style="dim")
+                result.append(line, style="red")
+                result.append("\n")
+                old_line += 1
+            elif line.startswith("+"):
+                result.append(f"{new_line:>4} ", style="dim")
+                result.append(line, style="green")
+                result.append("\n")
+                new_line += 1
+            else:
+                result.append(f"{new_line:>4} ", style="dim")
+                result.append(line, style="dim")
+                result.append("\n")
+                old_line += 1
+                new_line += 1
+
+        if max_lines > 0 and total_lines > max_lines:
+            result.append(f"... ({total_lines - max_lines} more lines)", style="dim italic")
+
+        return result
 
     def _rebuild_loading_line(self) -> None:
         if self._thinking_content:
@@ -556,7 +645,7 @@ class EventRenderer:
                     self._rebuild_loading_line()
                     return (False, None)
                 self._append_tool_call(tool_name, args_dict, tool_call_id)
-            case ToolResultEvent(tool=tool_name, result=result, tool_call_id=tool_call_id, is_error=is_error):
+            case ToolResultEvent(tool=tool_name, result=result, tool_call_id=tool_call_id, is_error=is_error, metadata=metadata):
                 if tool_name.lower() == "todowrite" and not is_error:
                     # Successful TodoWrite should not spam scrollback.
                     self._rebuild_loading_line()
@@ -566,6 +655,7 @@ class EventRenderer:
                     tool_call_id=tool_call_id,
                     is_error=is_error,
                     result=result,
+                    metadata=metadata,
                 )
             case UsageDeltaEvent(
                 source=_,

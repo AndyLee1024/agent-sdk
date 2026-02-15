@@ -251,9 +251,11 @@ def summarize_tool_args(
     if lowered == "edit":
         path = _lookup_arg(args, "file_path", "path")
         path_display = _normalize_path_for_display(path, project_root)
-        old_len = len(str(_lookup_arg(args, "old_string") or ""))
-        new_len = len(str(_lookup_arg(args, "new_string") or ""))
-        return f"path={path_display} old_len={old_len} new_len={new_len}" if path_display else _compact_json(args)
+        return path_display or _compact_json(args)
+    if lowered == "multiedit":
+        path = _lookup_arg(args, "file_path", "path")
+        path_display = _normalize_path_for_display(path, project_root)
+        return path_display or _compact_json(args)
     if lowered == "read":
         path = _lookup_arg(args, "file_path", "path")
         path_display = _normalize_path_for_display(path, project_root)

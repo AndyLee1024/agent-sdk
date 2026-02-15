@@ -110,6 +110,9 @@ class ToolResultEvent:
 	screenshot_base64: str | None = None
 	"""Base64-encoded screenshot if this was a browser tool."""
 
+	metadata: dict[str, Any] | None = None
+	"""Optional metadata for tool-specific data (e.g., diff for Edit/MultiEdit)."""
+
 	def __str__(self) -> str:
 		prefix = '❌' if self.is_error else '✓'
 		preview = self.result[:80] + '...' if len(self.result) > 80 else self.result

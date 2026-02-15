@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from comate_agent_sdk.agent.events import (
     AgentEvent,
@@ -1282,12 +1282,31 @@ async def query_stream(
                     )
 
                 screenshot_base64 = extract_screenshot(tool_result)
+                # Extract diff metadata for Edit/MultiEdit tools
+                diff_metadata: dict[str, Any] | None = None
+                if tool_name in ("Edit", "MultiEdit") and not tool_result.is_error:
+                    payload = tool_result.raw_envelope
+                    if isinstance(payload, dict):
+                        data = payload.get("data", {})
+                        if isinstance(data, dict):
+                            diff_lines = data.get("diff")
+                            meta: dict[str, Any] = {}
+                            if isinstance(diff_lines, list) and len(diff_lines) > 0:
+                                meta["diff"] = diff_lines
+                            sl = data.get("start_line")
+                            el = data.get("end_line")
+                            if isinstance(sl, int) and sl > 0:
+                                meta["start_line"] = sl
+                                meta["end_line"] = el if isinstance(el, int) else sl
+                            if meta:
+                                diff_metadata = meta
                 yield ToolResultEvent(
                     tool=tool_name,
                     result=tool_result.text,
                     tool_call_id=tool_call.id,
                     is_error=tool_result.is_error,
                     screenshot_base64=screenshot_base64,
+                    metadata=diff_metadata,
                 )
 
                 yield StepCompleteEvent(

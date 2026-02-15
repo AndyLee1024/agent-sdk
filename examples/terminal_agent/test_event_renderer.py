@@ -200,6 +200,106 @@ class TestEventRenderer(unittest.TestCase):
         self.assertTrue(system_entries)
         self.assertIn("中断", system_entries[-1].text)
 
+    def test_edit_tool_result_with_diff_renders_rich_text(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.handle_event(
+            ToolCallEvent(
+                tool="Edit",
+                args={"file_path": "/tmp/test.py", "old_string": "old", "new_string": "new"},
+                tool_call_id="tc_edit_1",
+            )
+        )
+        diff_metadata = {
+            "diff": [
+                "--- /tmp/test.py",
+                "+++ /tmp/test.py",
+                "@@ -1,3 +1,3 @@",
+                " line1",
+                "-old",
+                "+new",
+                " line3",
+            ]
+        }
+        renderer.handle_event(
+            ToolResultEvent(
+                tool="Edit",
+                result="ok",
+                tool_call_id="tc_edit_1",
+                is_error=False,
+                metadata=diff_metadata,
+            )
+        )
+
+        tool_results = [e for e in renderer.history_entries() if e.entry_type == "tool_result"]
+        self.assertTrue(tool_results)
+        from rich.text import Text
+        last_result = tool_results[-1]
+        self.assertIsInstance(last_result.text, Text)
+        plain_text = last_result.text.plain
+        self.assertIn("+new", plain_text)
+        self.assertIn("-old", plain_text)
+        self.assertIn("@@", plain_text)
+
+    def test_edit_tool_result_error_no_diff(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.handle_event(
+            ToolCallEvent(
+                tool="Edit",
+                args={"file_path": "/tmp/test.py", "old_string": "missing", "new_string": "new"},
+                tool_call_id="tc_edit_err",
+            )
+        )
+        diff_metadata = {"diff": ["-old", "+new"]}
+        renderer.handle_event(
+            ToolResultEvent(
+                tool="Edit",
+                result="old_string not found",
+                tool_call_id="tc_edit_err",
+                is_error=True,
+                metadata=diff_metadata,
+            )
+        )
+
+        tool_results = [e for e in renderer.history_entries() if e.entry_type == "tool_result"]
+        self.assertTrue(tool_results)
+        last_result = tool_results[-1]
+        self.assertTrue(last_result.is_error)
+        # Should be a plain string, not Rich Text, since error results don't show diff
+        self.assertIsInstance(last_result.text, str)
+
+    def test_render_diff_text_truncation(self) -> None:
+        diff_lines = [f"+added_line_{i}" for i in range(100)]
+        result = EventRenderer._render_diff_text(diff_lines, max_lines=10)
+        plain = result.plain
+        self.assertIn("+added_line_0", plain)
+        self.assertIn("+added_line_9", plain)
+        self.assertNotIn("+added_line_10", plain)
+        self.assertIn("90 more lines", plain)
+
+    def test_render_diff_text_colors(self) -> None:
+        diff_lines = [
+            "--- a/file.py",
+            "+++ b/file.py",
+            "@@ -1,3 +1,3 @@",
+            " context",
+            "-removed",
+            "+added",
+        ]
+        result = EventRenderer._render_diff_text(diff_lines, max_lines=50)
+        # Check that each span has the correct style
+        spans = result._spans
+        plain = result.plain
+        # Verify green style for added line
+        added_start = plain.index("+added")
+        green_spans = [s for s in spans if s.style == "green" and s.start <= added_start < s.end]
+        self.assertTrue(green_spans, "'+added' should be styled green")
+        # Verify red style for removed line
+        removed_start = plain.index("-removed")
+        red_spans = [s for s in spans if s.style == "red" and s.start <= removed_start < s.end]
+        self.assertTrue(red_spans, "'-removed' should be styled red")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

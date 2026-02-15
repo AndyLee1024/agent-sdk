@@ -46,9 +46,19 @@ def render_history_group(
     renderables: list[Any] = []
     for entry in entries:
         if entry.entry_type == "tool_result":
+            prefix_style = "bold red" if entry.is_error else "bold green"
+
+            if isinstance(entry.text, Text):
+                # Rich Text object — preserve styled content (e.g. colored diff)
+                line_text = Text()
+                line_text.append("● ", style=prefix_style)
+                line_text.append_text(entry.text)
+                renderables.append(line_text)
+                renderables.append(Text(""))
+                continue
+
             content = str(entry.text)
             content_lines = content.splitlines() or [""]
-            prefix_style = "bold red" if entry.is_error else "bold green"
 
             line_text = Text()
             line_text.append("● ", style=prefix_style)

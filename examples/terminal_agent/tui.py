@@ -794,8 +794,20 @@ class TerminalAgentTUI:
                     tool_name = getattr(message, "tool_name", item.tool_name or "UnknownTool")
                     signature = f"{tool_name}()"
 
+                # Extract diff from raw_envelope for Edit/MultiEdit
+                diff_lines: list[str] | None = None
+                if tool_name in ("Edit", "MultiEdit") and not is_error:
+                    raw_envelope = getattr(item, "metadata", {}) or {}
+                    envelope = raw_envelope.get("tool_raw_envelope")
+                    if isinstance(envelope, dict):
+                        data = envelope.get("data", {})
+                        if isinstance(data, dict):
+                            diff = data.get("diff")
+                            if isinstance(diff, list) and len(diff) > 0:
+                                diff_lines = diff
+
                 # 直接追加静态 HistoryEntry（无计时器）
-                self._renderer.append_static_tool_result(signature, is_error)
+                self._renderer.append_static_tool_result(signature, is_error, diff_lines=diff_lines)
                 continue
 
         self._drain_history_sync()

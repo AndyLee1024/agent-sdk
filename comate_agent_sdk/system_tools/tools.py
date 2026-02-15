@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import hashlib
 import json
 import logging
@@ -1052,6 +1053,35 @@ async def Write(
     )
 
 
+
+def _generate_unified_diff(
+    before: str,
+    after: str,
+    fromfile: str = "",
+    tofile: str = "",
+) -> list[str]:
+    """Generate unified diff lines between two strings."""
+    before_lines = before.splitlines(keepends=True)
+    after_lines = after.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        before_lines,
+        after_lines,
+        fromfile=fromfile,
+        tofile=tofile,
+    )
+    return [line.rstrip("\n") for line in diff]
+
+
+def _find_edit_line_range(content: str, old_string: str) -> tuple[int, int]:
+    """Find 1-based start and end line numbers of old_string in content."""
+    pos = content.find(old_string)
+    if pos < 0:
+        return (0, 0)
+    start_line = content[:pos].count("\n") + 1
+    end_line = start_line + old_string.count("\n")
+    return (start_line, end_line)
+
+
 @tool("Performs exact string replacement in a file.", name="Edit", usage_rules=EDIT_USAGE_RULES)
 async def Edit(
     params: EditInput,
@@ -1087,6 +1117,8 @@ async def Edit(
                 f"old_string appears {count} times; provide a more specific old_string or set replace_all=true",
             )
 
+        start_line, end_line = _find_edit_line_range(before, params.old_string)
+
         if params.replace_all:
             after = before.replace(params.old_string, params.new_string)
             replacements = count
@@ -1099,12 +1131,18 @@ async def Edit(
     before_sha = _sha256_text(before)
     after_sha = _sha256_text(after)
     relpath = to_safe_relpath(path, roots=root_refs)
+    diff_lines = _generate_unified_diff(
+        before, after, fromfile=params.file_path, tofile=params.file_path
+    )
     return ok(
         data={
             "replacements": replacements,
             "before_sha256": before_sha,
             "after_sha256": after_sha,
             "relpath": relpath,
+            "diff": diff_lines,
+            "start_line": start_line,
+            "end_line": end_line,
         },
         meta={
             "file_path": params.file_path,
@@ -1143,6 +1181,7 @@ async def MultiEdit(
             if not await _require_read(ctx, path):
                 return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
             content = await _read_text(path)
+            initial_content = content
             before_hash = _sha256_text(content)
             edits = params.edits
             created = False
@@ -1154,11 +1193,14 @@ async def MultiEdit(
                     "File does not exist; first edit.old_string must be empty to create a file",
                 )
             content = edits[0].new_string
+            initial_content = ""
             before_hash = None
             edits = edits[1:]
             created = True
 
         total_replacements = 0
+        min_line = float("inf")
+        max_line = 0
         for idx, op in enumerate(edits):
             if op.old_string == "":
                 return err(
@@ -1184,6 +1226,11 @@ async def MultiEdit(
                     f"edits[{idx}] old_string appears {count} times; use replace_all=true or provide more context",
                 )
 
+            sl, el = _find_edit_line_range(content, op.old_string)
+            if sl > 0:
+                min_line = min(min_line, sl)
+                max_line = max(max_line, el)
+
             if op.replace_all:
                 content = content.replace(op.old_string, op.new_string)
                 total_replacements += count
@@ -1195,6 +1242,14 @@ async def MultiEdit(
 
     after_hash = _sha256_text(content)
     relpath = to_safe_relpath(path, roots=root_refs)
+    start_line = int(min_line) if min_line != float("inf") else 0
+    end_line_val = max_line
+    if created:
+        diff_lines: list[str] = []
+    else:
+        diff_lines = _generate_unified_diff(
+            initial_content, content, fromfile=params.file_path, tofile=params.file_path
+        )
     return ok(
         data={
             "total_replacements": total_replacements,
@@ -1203,6 +1258,9 @@ async def MultiEdit(
             "after_sha256": after_hash,
             "bytes": len(content.encode("utf-8")),
             "relpath": relpath,
+            "diff": diff_lines,
+            "start_line": start_line,
+            "end_line": end_line_val,
         },
         meta={
             "file_path": params.file_path,
