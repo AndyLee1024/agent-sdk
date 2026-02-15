@@ -606,6 +606,49 @@ class ContextIR:
 
         return item
 
+    @property
+    def has_tool_barrier(self) -> bool:
+        """当前是否处于 tool barrier 中。
+
+        Tool barrier 表示 committed history 中存在尚未闭合的 tool_call_id。
+        也可由 runner 在执行工具前通过 begin_tool_barrier() 显式开启，
+        用于防止注入消息插入到 tool_calls 与 tool_results 之间。
+        """
+        return bool(self._inflight_tool_call_ids)
+
+    def begin_tool_barrier(self, tool_call_ids: list[str]) -> None:
+        """显式开启 tool barrier（KISS：仅设置 inflight ids）。
+
+        说明：
+        - runner 在执行工具前可调用此方法，把本轮预期的 tool_call_id
+          预先写入 inflight 集合，从而让 hook/runtime 注入在 barrier 期间被延迟。
+        - barrier 会在对应 ToolMessage 落库（add_message）后逐个释放；
+          当 inflight 为空时，延迟注入会自动 flush。
+        """
+        normalized = {str(tool_call_id).strip() for tool_call_id in tool_call_ids if str(tool_call_id).strip()}
+        if not normalized:
+            return
+        self._inflight_tool_call_ids = set(normalized)
+
+    def clear_tool_barrier(self, *, flush: bool = True) -> None:
+        """强制清理 tool barrier（主要用于策略重试/回滚）。
+
+        Args:
+            flush: True 表示清理后立即 flush pending injections；
+                False 表示丢弃 pending injections（仅清理未提交的注入，不影响已落库 messages）。
+        """
+        self._inflight_tool_call_ids.clear()
+        if not flush:
+            self._pending_hook_injections.clear()
+            return
+        self._flush_pending_hook_injections_if_unblocked()
+        self._flush_pending_skill_items_if_unblocked()
+
+    def add_messages_atomic(self, messages: list[BaseMessage]) -> None:
+        """原子追加多条 messages（commit 段内禁止 await，保证不被 interleave）。"""
+        for message in messages:
+            self.add_message(message)
+
     def add_hook_hidden_user_message(
         self,
         content: str,

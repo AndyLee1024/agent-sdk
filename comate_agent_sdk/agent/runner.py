@@ -410,6 +410,7 @@ async def query(agent: "AgentRuntime", message: str) -> str:
     await _fire_user_prompt_submit(agent, message)
 
     iterations = 0
+    askuser_repair_attempted = False
 
     while True:
         if iterations >= agent.max_iterations:
@@ -427,15 +428,13 @@ async def query(agent: "AgentRuntime", message: str) -> str:
         # Invoke the LLM
         response = await invoke_llm(agent)
 
-        # Add assistant message to history
-        assistant_msg = AssistantMessage(
-            content=response.content,
-            tool_calls=response.tool_calls if response.tool_calls else None,
-        )
-        agent._context.add_message(assistant_msg)
-
         # If no tool calls, check if should finish
         if not response.has_tool_calls:
+            assistant_msg = AssistantMessage(
+                content=response.content,
+                tool_calls=None,
+            )
+            agent._context.add_message(assistant_msg)
             compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)
             if pre_compact_event:
                 logger.info(f"Pre-compact event: {pre_compact_event}")
@@ -444,8 +443,86 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                 continue
             return response.content or ""
 
+        tool_calls = list(response.tool_calls or [])
+
+        def _is_ask_user_question(call: ToolCall) -> bool:
+            return str(call.function.name or "").strip() == "AskUserQuestion"
+
+        def _policy_violation_message(
+            *,
+            call: ToolCall,
+            code: str,
+            message: str,
+            required_fix: str,
+        ) -> ToolMessage:
+            content = json.dumps(
+                {
+                    "error": {
+                        "code": code,
+                        "message": message,
+                        "required_fix": required_fix,
+                    }
+                },
+                ensure_ascii=False,
+            )
+            return ToolMessage(
+                tool_call_id=call.id,
+                tool_name=str(call.function.name or "").strip() or "Tool",
+                content=content,
+                is_error=True,
+            )
+
+        has_ask = any(_is_ask_user_question(call) for call in tool_calls)
+        has_other = any(not _is_ask_user_question(call) for call in tool_calls)
+        if has_ask and has_other:
+            if not askuser_repair_attempted:
+                askuser_repair_attempted = True
+
+                assistant_msg = AssistantMessage(
+                    content=response.content,
+                    tool_calls=tool_calls,
+                )
+                expected_ids = [call.id for call in tool_calls if str(call.id).strip()]
+                agent._context.begin_tool_barrier(expected_ids)
+
+                results_by_id: dict[str, ToolMessage] = {}
+                for call in tool_calls:
+                    if _is_ask_user_question(call):
+                        results_by_id[call.id] = _policy_violation_message(
+                            call=call,
+                            code="ASKUSER_EXCLUSIVE",
+                            message="AskUserQuestion must be called alone in a single assistant tool_calls response.",
+                            required_fix="Retry now with ONLY AskUserQuestion. Run other tools after the user answer in the next turn.",
+                        )
+                    else:
+                        results_by_id[call.id] = _policy_violation_message(
+                            call=call,
+                            code="ASKUSER_BLOCKED_BY_ASK",
+                            message="Blocked because AskUserQuestion was present in the same tool_calls response.",
+                            required_fix="Retry without mixing tools with AskUserQuestion.",
+                        )
+
+                agent._context.add_messages_atomic(
+                    [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                )
+                agent.drain_hidden_user_messages()
+                continue
+
+            ask_call = next((call for call in tool_calls if _is_ask_user_question(call)), None)
+            if ask_call is not None:
+                tool_calls = [ask_call]
+
+        assistant_msg = AssistantMessage(
+            content=response.content,
+            tool_calls=tool_calls,
+        )
+
+        expected_ids = [call.id for call in tool_calls if str(call.id).strip()]
+        agent._context.begin_tool_barrier(expected_ids)
+
+        results_by_id: dict[str, ToolMessage] = {}
+
         # Execute tool calls (Task calls can run in parallel when contiguous)
-        tool_calls = response.tool_calls
         idx = 0
         while idx < len(tool_calls):
             tool_call = tool_calls[idx]
@@ -484,29 +561,18 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                     for tc in group:
                         tasks_map[tc.id] = tg.create_task(_run(tc))
 
-                results_by_id = {tc_id: task.result()[1] for tc_id, task in tasks_map.items()}
+                group_results_by_id = {tc_id: task.result()[1] for tc_id, task in tasks_map.items()}
 
-                # Write results to context in original order for reproducibility
+                # Record results by id in original order for reproducibility
                 for tc in group:
-                    tool_result = results_by_id[tc.id]
-                    agent._context.add_message(tool_result)
-                    agent.drain_hidden_user_messages()
+                    tool_result = group_results_by_id[tc.id]
                     await _fire_subagent_hook(
                         agent,
                         event_name="SubagentStop",
                         tool_call=tc,
                         subagent_status="error" if tool_result.is_error else "completed",
                     )
-
-                    # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
-                    if agent._context.has_pending_skill_items:
-                        agent._context.flush_pending_skill_items()
-
-                # 新增:并行任务完成后预检查
-                compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
-                if pre_compact_event:
-                    logger.info(f"Pre-compact event: {pre_compact_event}")
-                _log_compaction_meta_events(compaction_meta_events)
+                    results_by_id[tc.id] = tool_result
                 continue
 
             # Default: serial execution
@@ -514,8 +580,7 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                 await _fire_subagent_hook(agent, event_name="SubagentStart", tool_call=tool_call)
 
             tool_result = await execute_tool_call(agent, tool_call)
-            agent._context.add_message(tool_result)
-            agent.drain_hidden_user_messages()
+            results_by_id[tool_call.id] = tool_result
             if tool_name == "Task":
                 await _fire_subagent_hook(
                     agent,
@@ -524,17 +589,19 @@ async def query(agent: "AgentRuntime", message: str) -> str:
                     subagent_status="error" if tool_result.is_error else "completed",
                 )
 
-            # 新增:预检查压缩
-            compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
-            if pre_compact_event:
-                logger.info(f"Pre-compact event: {pre_compact_event}")
-            _log_compaction_meta_events(compaction_meta_events)
-
-            # 检查是否有待注入的 Skill items（必须在 ToolMessage 之后注入）
-            if agent._context.has_pending_skill_items:
-                agent._context.flush_pending_skill_items()
-
             idx += 1
+
+        agent._context.add_messages_atomic(
+            [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+        )
+        agent.drain_hidden_user_messages()
+
+        if len(tool_calls) == 1 and _is_ask_user_question(tool_calls[0]):
+            tool_result = results_by_id.get(tool_calls[0].id)
+            if tool_result is not None and not tool_result.is_error:
+                if await _maybe_block_stop(agent, "waiting_for_input"):
+                    continue
+                return tool_result.text
 
         # Check for compaction after tool execution
         compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)

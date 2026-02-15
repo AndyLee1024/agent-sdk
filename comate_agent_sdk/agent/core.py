@@ -631,8 +631,7 @@ class AgentRuntime:
         text = content.strip()
         if not text:
             return
-        self._context.add_message(UserMessage(content=text, is_meta=True))
-        self._pending_hidden_user_messages.append(text)
+        self.add_hook_hidden_user_message(text, hook_name="runtime")
 
     def add_hook_hidden_user_message(
         self,

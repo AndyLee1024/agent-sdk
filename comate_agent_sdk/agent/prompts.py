@@ -44,6 +44,7 @@ SDK_DEFAULT_SYSTEM_PROMPT = """SYSTEM_ROLE_PLACEHOLDER
   * Default behavior: Each response must invoke only one tool; parallel function calls are strictly forbidden
   * Exception: Multiple Task TOOL instances may be invoked in parallel within a single response
   * Mixed parallel calls (Task TOOL combined with other tool types) are not permitted
+  * AskUserQuestion MUST be called alone (no other tool_calls in the same assistant response). Ask first, then run other tools after the user answers in the next turn.
 - NEVER mention specific tool names in user-facing messages or status descriptions. Use generic descriptions instead (e.g., 'command execution failed' rather than naming the tool).
 </tool_use>
 

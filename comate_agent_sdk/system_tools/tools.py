@@ -2008,7 +2008,7 @@ async def WebFetch(
 
 
 @tool(
-    "Use this tool ONLY during active task execution when you need structured input (requirements, choices, clarification). Never use for: greetings, casual chat, or when no task has been assigned. If uncertain, respond conversationally instead.",
+    "Use this tool ONLY during active task execution when you need structured input (requirements, choices, clarification). Never use for: greetings, casual chat, or when no task has been assigned. If uncertain, respond conversationally instead. Hard rule: AskUserQuestion must be called alone (no other tool calls in the same response). Tool result means waiting for user input; user answers come in the next user message.",
     name="AskUserQuestion",
     usage_rules=ASK_USER_QUESTION_USAGE_RULES,
 )

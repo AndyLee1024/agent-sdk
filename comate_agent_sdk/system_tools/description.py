@@ -147,5 +147,9 @@ Usage notes:
 - Set multiSelect: true to allow multiple selections
 - Put recommended options first and add "(Recommended)" to the label
 - In plan mode: Use this ONLY to clarify requirements or choose approaches BEFORE finalizing the plan. Use ExitPlanMode for plan approval, NOT this tool.
+
+Hard rule:
+- AskUserQuestion MUST be called alone. If you call AskUserQuestion in a response, DO NOT call any other tools in that same response.
+- The tool result means "questions have been asked / waiting for user input", NOT the user's answers. The user's answers will arrive as the next normal user message.
 """
  

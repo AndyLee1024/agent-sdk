@@ -440,6 +440,7 @@ async def query_stream(
             yield hidden_event
 
         iterations = 0
+        askuser_repair_attempted = False
 
         while True:
             if iterations >= agent.max_iterations:
@@ -500,15 +501,6 @@ async def query_stream(
             if response.thinking:
                 yield ThinkingEvent(content=response.thinking)
 
-            # Add assistant message to history
-            from comate_agent_sdk.llm.messages import AssistantMessage
-
-            assistant_msg = AssistantMessage(
-                content=response.content,
-                tool_calls=response.tool_calls if response.tool_calls else None,
-            )
-            agent._context.add_message(assistant_msg)
-
             if _is_interrupt_requested(agent):
                 async for event in _yield_interrupted_stop():
                     yield event
@@ -516,6 +508,13 @@ async def query_stream(
 
             # If no tool calls, finish
             if not response.has_tool_calls:
+                from comate_agent_sdk.llm.messages import AssistantMessage
+
+                assistant_msg = AssistantMessage(
+                    content=response.content,
+                    tool_calls=None,
+                )
+                agent._context.add_message(assistant_msg)
                 compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)
                 async for usage_event in _drain_usage_events():
                     yield usage_event
@@ -538,14 +537,212 @@ async def query_stream(
             if response.content:
                 yield TextEvent(content=response.content)
 
+            from comate_agent_sdk.llm.messages import AssistantMessage
+
+            tool_calls = list(response.tool_calls or [])
+
+            def _is_ask_user_question(call: ToolCall) -> bool:
+                return str(call.function.name or "").strip() == "AskUserQuestion"
+
+            def _policy_violation_message(
+                *,
+                call: ToolCall,
+                code: str,
+                message: str,
+                required_fix: str,
+            ) -> ToolMessage:
+                content = json.dumps(
+                    {
+                        "error": {
+                            "code": code,
+                            "message": message,
+                            "required_fix": required_fix,
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+                return ToolMessage(
+                    tool_call_id=call.id,
+                    tool_name=str(call.function.name or "").strip() or "Tool",
+                    content=content,
+                    is_error=True,
+                )
+
+            has_ask = any(_is_ask_user_question(call) for call in tool_calls)
+            has_other = any(not _is_ask_user_question(call) for call in tool_calls)
+
+            if has_ask and has_other:
+                if not askuser_repair_attempted:
+                    askuser_repair_attempted = True
+
+                    assistant_msg = AssistantMessage(
+                        content=response.content,
+                        tool_calls=tool_calls,
+                    )
+                    expected_ids = [call.id for call in tool_calls if str(call.id).strip()]
+                    agent._context.begin_tool_barrier(expected_ids)
+
+                    results_by_id: dict[str, ToolMessage] = {}
+                    for call in tool_calls:
+                        if _is_ask_user_question(call):
+                            results_by_id[call.id] = _policy_violation_message(
+                                call=call,
+                                code="ASKUSER_EXCLUSIVE",
+                                message="AskUserQuestion must be called alone in a single assistant tool_calls response.",
+                                required_fix="Retry now with ONLY AskUserQuestion. Run other tools after the user answer in the next turn.",
+                            )
+                        else:
+                            results_by_id[call.id] = _policy_violation_message(
+                                call=call,
+                                code="ASKUSER_BLOCKED_BY_ASK",
+                                message="Blocked because AskUserQuestion was present in the same tool_calls response.",
+                                required_fix="Retry without mixing tools with AskUserQuestion.",
+                            )
+
+                    step_number = 0
+                    for call in tool_calls:
+                        step_number += 1
+                        tool_name = str(call.function.name or "").strip()
+
+                        try:
+                            args = json.loads(call.function.arguments)
+                        except json.JSONDecodeError:
+                            args = {"_raw": call.function.arguments}
+                        args_dict = _normalize_tool_call_event_args(
+                            agent,
+                            tool_name=tool_name,
+                            raw_args=args,
+                        )
+
+                        is_task = tool_name == "Task"
+                        task_subagent_name = "Task"
+                        task_description = tool_name
+                        if is_task:
+                            task_subagent_name, task_description, _ = _resolve_task_metadata(
+                                tool_call_id=call.id,
+                                args=args_dict,
+                            )
+
+                        yield StepStartEvent(
+                            step_id=call.id,
+                            title=task_description if is_task else tool_name,
+                            step_number=step_number,
+                        )
+                        yield ToolCallEvent(
+                            tool=tool_name,
+                            args=args_dict,
+                            tool_call_id=call.id,
+                            display_name=task_description if is_task else tool_name,
+                        )
+
+                        if is_task:
+                            await agent.run_hook_event(
+                                "SubagentStart",
+                                tool_call_id=call.id,
+                                subagent_name=task_subagent_name,
+                                subagent_description=task_description,
+                                subagent_status="running",
+                            )
+                            yield SubagentStartEvent(
+                                tool_call_id=call.id,
+                                subagent_name=task_subagent_name,
+                                description=task_description,
+                            )
+                            yield SubagentProgressEvent(
+                                tool_call_id=call.id,
+                                subagent_name=task_subagent_name,
+                                description=task_description,
+                                status="running",
+                                elapsed_ms=0.0,
+                                tokens=0,
+                            )
+
+                        tool_result = results_by_id[call.id]
+                        if is_task:
+                            await agent.run_hook_event(
+                                "SubagentStop",
+                                tool_call_id=call.id,
+                                subagent_name=task_subagent_name,
+                                subagent_description=task_description,
+                                subagent_status="error",
+                            )
+                            yield SubagentProgressEvent(
+                                tool_call_id=call.id,
+                                subagent_name=task_subagent_name,
+                                description=task_description,
+                                status="error",
+                                elapsed_ms=0.0,
+                                tokens=0,
+                            )
+                            yield SubagentStopEvent(
+                                tool_call_id=call.id,
+                                subagent_name=task_subagent_name,
+                                status="error",
+                                duration_ms=0.0,
+                                error=tool_result.text,
+                            )
+
+                        yield ToolResultEvent(
+                            tool=tool_name,
+                            result=tool_result.text,
+                            tool_call_id=call.id,
+                            is_error=True,
+                            screenshot_base64=None,
+                        )
+                        yield StepCompleteEvent(
+                            step_id=call.id,
+                            status="error",
+                            duration_ms=0.0,
+                        )
+                        async for hidden_event in _drain_hidden_events(agent):
+                            yield hidden_event
+
+                    agent._context.add_messages_atomic(
+                        [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                    )
+                    async for hidden_event in _drain_hidden_events(agent):
+                        yield hidden_event
+
+                    continue
+
+                ask_call = next((call for call in tool_calls if _is_ask_user_question(call)), None)
+                if ask_call is not None:
+                    tool_calls = [ask_call]
+
+            assistant_msg = AssistantMessage(
+                content=response.content,
+                tool_calls=tool_calls,
+            )
+
+            expected_ids = [call.id for call in tool_calls if str(call.id).strip()]
+            agent._context.begin_tool_barrier(expected_ids)
+
+            results_by_id: dict[str, ToolMessage] = {}
+            txn_committed = False
+
             # Execute tool calls, yielding events for each.
             # Contiguous Task tool calls can run in parallel (streamed by completion order),
             # while ToolMessage writes remain in original order for reproducibility.
-            tool_calls = response.tool_calls
             step_number = 0
             idx = 0
             while idx < len(tool_calls):
                 if _is_interrupt_requested(agent):
+                    for call in tool_calls[idx:]:
+                        results_by_id[call.id] = ToolMessage(
+                            tool_call_id=call.id,
+                            tool_name=str(call.function.name or "").strip() or "Tool",
+                            content=json.dumps(
+                                {
+                                    "status": "cancelled",
+                                    "reason": "user_interrupt",
+                                },
+                                ensure_ascii=False,
+                            ),
+                            is_error=True,
+                        )
+                    agent._context.add_messages_atomic(
+                        [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                    )
                     async for event in _yield_interrupted_stop():
                         yield event
                     return
@@ -646,7 +843,7 @@ async def query_stream(
 
                     futures = [asyncio.create_task(_run(tc)) for tc in group]
                     pending = set(futures)
-                    results_by_id: dict[str, ToolMessage] = {}
+                    group_results_by_id: dict[str, ToolMessage] = {}
 
                     while pending:
                         async for usage_event in _drain_usage_events():
@@ -659,23 +856,39 @@ async def query_stream(
                                 fut.cancel()
                             await asyncio.gather(*pending, return_exceptions=True)
 
-                            # Persist results that were already completed before interruption.
-                            for tc in group:
-                                tool_result = results_by_id.get(tc.id)
-                                if tool_result is None:
-                                    continue
-                                agent._context.add_message(tool_result)
-                                if agent._context.has_pending_skill_items:
-                                    agent._context.flush_pending_skill_items()
-
                             # Mark unfinished task calls as cancelled.
-                            completed_ids = set(results_by_id.keys())
+                            completed_ids = set(group_results_by_id.keys())
                             for tc in group:
                                 if tc.id in completed_ids:
                                     continue
+                                cancelled = ToolMessage(
+                                    tool_call_id=tc.id,
+                                    tool_name="Task",
+                                    content=json.dumps(
+                                        {"status": "cancelled", "reason": "user_interrupt"},
+                                        ensure_ascii=False,
+                                    ),
+                                    is_error=True,
+                                )
+                                group_results_by_id[tc.id] = cancelled
                                 async for event in _emit_cancelled_task(tc.id):
                                     yield event
 
+                            for tc in group:
+                                results_by_id[tc.id] = group_results_by_id[tc.id]
+                            for call in tool_calls[idx:]:
+                                results_by_id[call.id] = ToolMessage(
+                                    tool_call_id=call.id,
+                                    tool_name=str(call.function.name or "").strip() or "Tool",
+                                    content=json.dumps(
+                                        {"status": "cancelled", "reason": "user_interrupt"},
+                                        ensure_ascii=False,
+                                    ),
+                                    is_error=True,
+                                )
+                            agent._context.add_messages_atomic(
+                                [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                            )
                             async for event in _yield_interrupted_stop():
                                 yield event
                             return
@@ -751,26 +964,10 @@ async def query_stream(
                             async for hidden_event in _drain_hidden_events(agent):
                                 yield hidden_event
 
-                            results_by_id[tc.id] = tool_result
+                            group_results_by_id[tc.id] = tool_result
 
-                    # Write ToolMessage(s) to context in original order
                     for tc in group:
-                        tool_result = results_by_id[tc.id]
-                        agent._context.add_message(tool_result)
-
-                        if agent._context.has_pending_skill_items:
-                            agent._context.flush_pending_skill_items()
-                        async for hidden_event in _drain_hidden_events(agent):
-                            yield hidden_event
-
-                    # 新增:预检查压缩
-                    compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
-                    async for usage_event in _drain_usage_events():
-                        yield usage_event
-                    if pre_compact_event:
-                        yield pre_compact_event
-                    for compaction_meta_event in compaction_meta_events:
-                        yield compaction_meta_event
+                        results_by_id[tc.id] = group_results_by_id[tc.id]
 
                     continue
 
@@ -987,6 +1184,16 @@ async def query_stream(
 
                             step_duration_ms = (time.time() - step_start_time) * 1000
                             if is_task:
+                                cancelled_result = ToolMessage(
+                                    tool_call_id=tool_call.id,
+                                    tool_name="Task",
+                                    content=json.dumps(
+                                        {"status": "cancelled", "reason": "user_interrupt"},
+                                        ensure_ascii=False,
+                                    ),
+                                    is_error=True,
+                                )
+                                results_by_id[tool_call.id] = cancelled_result
                                 async for event in _emit_cancelled_task(tool_call.id):
                                     yield event
                             else:
@@ -995,6 +1202,30 @@ async def query_stream(
                                     status="cancelled",
                                     duration_ms=step_duration_ms,
                                 )
+                                results_by_id[tool_call.id] = ToolMessage(
+                                    tool_call_id=tool_call.id,
+                                    tool_name=str(tool_name or "").strip() or "Tool",
+                                    content=json.dumps(
+                                        {"status": "cancelled", "reason": "user_interrupt"},
+                                        ensure_ascii=False,
+                                    ),
+                                    is_error=True,
+                                )
+
+                            for call in tool_calls[idx + 1 :]:
+                                results_by_id[call.id] = ToolMessage(
+                                    tool_call_id=call.id,
+                                    tool_name=str(call.function.name or "").strip() or "Tool",
+                                    content=json.dumps(
+                                        {"status": "cancelled", "reason": "user_interrupt"},
+                                        ensure_ascii=False,
+                                    ),
+                                    is_error=True,
+                                )
+
+                            agent._context.add_messages_atomic(
+                                [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                            )
 
                             async for event in _yield_interrupted_stop():
                                 yield event
@@ -1012,21 +1243,9 @@ async def query_stream(
 
                     tool_result = await tool_result_task
                 step_duration_ms = (time.time() - step_start_time) * 1000
-                agent._context.add_message(tool_result)
+                results_by_id[tool_call.id] = tool_result
                 async for hidden_event in _drain_hidden_events(agent):
                     yield hidden_event
-
-                # 新增:预检查压缩
-                compacted, pre_compact_event, compaction_meta_events = await precheck_and_compact(agent)
-                async for usage_event in _drain_usage_events():
-                    yield usage_event
-                if pre_compact_event:
-                    yield pre_compact_event
-                for compaction_meta_event in compaction_meta_events:
-                    yield compaction_meta_event
-
-                if agent._context.has_pending_skill_items:
-                    agent._context.flush_pending_skill_items()
 
                 if is_task:
                     state = running_tasks.pop(tool_call.id, None)
@@ -1137,6 +1356,13 @@ async def query_stream(
                             questions=questions,
                             tool_call_id=tool_call.id,
                         )
+                        if not txn_committed:
+                            agent._context.add_messages_atomic(
+                                [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                            )
+                            txn_committed = True
+                            async for hidden_event in _drain_hidden_events(agent):
+                                yield hidden_event
                         async for usage_event in _drain_usage_events():
                             yield usage_event
                         if await _run_stop_hook(agent, "waiting_for_input"):
@@ -1150,6 +1376,13 @@ async def query_stream(
                         return
 
                 idx += 1
+
+            if not txn_committed:
+                agent._context.add_messages_atomic(
+                    [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                )
+                async for hidden_event in _drain_hidden_events(agent):
+                    yield hidden_event
 
             # Check for compaction after tool execution
             compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)
