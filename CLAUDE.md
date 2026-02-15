@@ -1,55 +1,29 @@
-## 项目概述
+## 1) 工作方式（硬规则）
+- 先方案后编码：任何任务先给 2-3 个方案（Quick / Balanced / Long-term）+ 风险 + 你需要问我的关键问题；我明确批准前禁止改代码。
+- 不清楚就问：缺信息/不确定/有歧义，必须先问我，禁止猜。
+- 小步提交：一次只做一个小步骤（优先 ≤3 个文件、≤200 行净新增），超过就拆步。
 
-这是一个 agent sdk 项目， 用于以后各种agent开发的基础设施。
-这是一个非常重要的项目，必须有非常优秀的的 上下文工程 实践的沉淀。 请仔细思考每一个细节。
+## 2) Anti-God-Object（硬护栏）
+- 单文件上限：任何改动后，任何文件不得 >700 LOC。
+  - 如果目标文件已 >700：本次禁止净增行数；要么抽取拆分，要么先给拆分方案让我选。
+- self 状态耦合：当一个类已经“很多 self.*”时，禁止继续往里加状态/方法；必须先外置状态或拆分。
+- 触发以上任一条：立刻停止编码，输出拆分方案（不写代码），包含：新模块/文件清单、职责边界、State/Config 方案、分步迁移、回归风险。
 
-## global rule
-0. 设计应该尽可能简单，而不是更简单。 Keep It Simple, Stupid。
-1. "Simplicity is the ultimate sophistication." — Leonardo da Vinci
-2. 如果你遇到不清楚的问题或者缺少什么信息，MUST及时向我询问。  
-3. 先给出你的方案，MUST经我审阅后再编写代码。
-4. 给出几版方案选择，构建方案时使用问答的方式逐步确认我的需求。 this is MUST
-5. 不要为我生成任何总结文档, 除非我主动告诉你.
-6. 当用户让你排查或者修复问题时，我希望你站在全局角度工程化考虑问题,结合当前架构,分析问题原因,给出解决方案。而不是简单止血。需要确认修改这个会不会造成其他依赖这个的功能的连锁反应和冲突. this is MUST
-7. 涉及到 Prompt_toolkit 这个TUI框架, 你必须使用 context7 mcp里面的  query-docs和resolve-library-id 功能来查询相关文档, 以确保你对这个框架的理解是正确的. this is MUST
+## 3) 工程化修复要求（排查/修 bug 必须）
+- 先全局分析：根因 + 影响面 + 连锁反应 + 回滚/缓解（测试点/隔离/适配），再动手改。
 
-## python coding rule
-1. 代码必须使用 f-string 进行字符串格式化
-2. 代码必须使用 logging 模块进行日志记录，禁止使用 print 语句
-3. 运行 python必须使用 uv run python 脚本名.py 的方式运行
-4. 安装pip包必须使用 uv add 包名 的方式安装
-5. 禁止硬编码任何路径或者配置，必须使用环境变量或者配置文件的方式进行配置
-6. 代码必须遵循 PEP 8 风格指南，使用黑色（black）进行代码格式化
+## 4) Python 规则（硬规则）
+- 必须用 f-string；必须用 logging；禁止 print。
+- 运行用 `uv run python xxx.py`；装包用 `uv add 包名`。
+- 禁止硬编码路径/配置：用环境变量或配置文件集中到 Config。
+- 遵循 PEP8；用 black 格式化。
 
+## 5) Prompt_toolkit / TUI 铁律（硬规则）
+- 禁止 History TUI：聊天历史只写入终端 scrollback；UI layout 只允许底部输入/补全/状态栏；历史输出唯一通道是 `run_in_terminal(...)` 追加。
+- 禁止任何承载历史的 multiline read-only 组件（例如 TextArea(multiline=True, read_only=True) 或 messages/history/chat 命名的窗口/控件）。
+- 禁止回写已输出到 scrollback 的历史行（只追加不可变）。
+- 涉及 prompt_toolkit：必须使用 context7 mcp 的 resolve-library-id + query-docs 校验用法；查不到就停下问我。
 
-## KISS 原则
- KISS 的好处
-
-   1 易于理解 — 代码一看就懂
-   2 易于维护 — 修改时不会牵一发而动全身
-   3 易于测试 — 同步代码测试简单
-   4 性能更好 — 没有不必要的异步开销
-   5 减少 Bug — 简单代码出错概率低
-  
-  相关原则
-
-   原则   含义                                     场景
-   ────────────────────────────────────────────────────────────────────────────
-   KISS   保持简单                                 通用设计
-   YAGNI  You Ain't Gonna Need It（你不会需要它）  不要提前实现可能用不到的功能
-   DRY    Don't Repeat Yourself（不要重复自己）    代码复用
-   SOLID  单一职责、开闭原则等                     面向对象设计
-
-## TUI 编程铁律
- 
-不要做 History TUI。历史永远只写入终端 scrollback，UI 只负责底部输入、补全菜单和状态栏。任何“把聊天历史放进可滚动窗口/HSplit 顶部 TextArea”的实现，一律视为回归并拒绝合并。
-
-- Chat history 永远不进入 prompt_toolkit layout；历史唯一输出通道是 run_in_terminal(...) 追加到 scrollback。
-
-- layout 允许存在“底部交互带”，其内容仅包括：loading（可选）、输入相关（input/问答 UI/补全菜单等短暂交互组件）、status。
-
-- 禁止出现任何承载历史消息的 multiline read-only 组件（典型：TextArea(multiline=True, read_only=True)、或任何“messages/history/chat”命名的 Window/TextArea/FormattedTextControl）。
-
-- 禁止“回写/修改”已经写进 scrollback 的历史行（比如工具开始打一行，结束回去改成绿色）。scrollback 只允许追加不可变日志。
- 
- 
+## 6) 其他
+- 不要给我生成“总结文档/报告类新文件”，除非我明确要求。
+- 规则冲突或无法同时满足：停止并说明冲突点，向我提问。

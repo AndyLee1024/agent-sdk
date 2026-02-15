@@ -281,6 +281,88 @@ tool_args = {
 # 压缩时会特殊处理错误项（保留更长时间）
 ```
 
+### Task 并行执行
+
+SDK 支持 **Task 工具（Subagent）并行执行**，允许在单个 LLM 响应中并发运行多个独立的 Task 工具调用。
+
+#### 设计原则
+
+根据 system prompt 约束：
+- **并行范围**：仅限连续的 Task 工具调用可以并行
+- **禁止混排**：Task 不能与其他类型工具混合并行
+- **顺序保证**：ToolMessage 写入 context 时保持原始调用顺序，确保可复现性
+
+#### 配置选项
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `task_parallel_enabled` | `bool` | `True` | 是否启用 Task 并行执行 |
+| `task_parallel_max_concurrency` | `int` | `4` | 最大并发数（使用 Semaphore 限制） |
+| `use_streaming_task` | `bool` | `False` | 是否使用流式 Task（发射子事件用于实时 UI） |
+
+```python
+from comate_agent_sdk import Agent
+from comate_agent_sdk.agent import AgentConfig
+
+agent = Agent(
+    llm=ChatOpenAI(model="gpt-4o"),
+    config=AgentConfig(
+        tools=[...],
+        task_parallel_enabled=True,
+        task_parallel_max_concurrency=4,
+    ),
+)
+```
+
+#### 实现逻辑
+
+**1. 分组检测**：仅对连续的 Task 工具调用进行分组并行
+
+```python
+if agent.task_parallel_enabled and tool_name == "Task":
+    group: list[ToolCall] = []
+    while idx < len(tool_calls) and tool_calls[idx].function.name == "Task":
+        group.append(tool_calls[idx])
+        idx += 1
+```
+
+**2. 并发控制**：使用 Semaphore 限制最大并发数
+
+```python
+semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
+
+async def _run(tc: ToolCall):
+    async with semaphore:
+        tool_result = await execute_tool_call(agent, tc)
+```
+
+**3. 事件发射顺序**：完成顺序，而非调用顺序
+
+```
+调用顺序: Task A (0.25s) → Task B (0.05s) → Task C (0.15s)
+Start 事件: A → B → C (调用顺序)
+Stop 事件:  B → C → A (完成顺序)
+```
+
+**4. Context 写入顺序**：保持原始调用顺序
+
+```python
+# ToolMessage 按调用顺序写入，确保 LLM 后续调用时消息顺序一致
+tool_msg_ids == ["tc_a", "tc_b", "tc_c"]  # 原始调用顺序
+```
+
+#### 中断处理
+
+用户中断时，所有 pending Task 会被取消，未完成的 Task 标记为 cancelled：
+
+```python
+if _is_interrupt_requested(agent):
+    for fut in pending:
+        fut.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
+    # 未完成的 Task 标记为 {"status": "cancelled", "reason": "user_interrupt"}
+```
+
 ## 工具系统
 
 ### 创建工具

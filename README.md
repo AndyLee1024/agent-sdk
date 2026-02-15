@@ -674,7 +674,7 @@ SDK 会从以下路径发现 subagent 定义（`.md` 文件）：
 解决方式（三选一）：
 1) 将你的工具改名（不要叫 `Task`）  
 2) 显式禁用 subagent：`Agent(..., config=AgentConfig(agents=[]))`  
-3) 移除/调整自动发现的 subagent 定义（例如删除/修改 `.agent/subagents/*.md`）  
+3) 移除/调整自动发现的 subagent定义（例如删除/修改 `.agent/subagents/*.md`）  
 
 ## Skill：`.agent/skills/*/SKILL.md` + `Skill`
 
