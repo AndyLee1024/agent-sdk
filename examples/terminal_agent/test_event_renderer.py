@@ -291,14 +291,18 @@ class TestEventRenderer(unittest.TestCase):
         # Check that each span has the correct style
         spans = result._spans
         plain = result.plain
-        # Verify green style for added line
+        # Verify green background style for added line
         added_start = plain.index("+added")
-        green_spans = [s for s in spans if s.style == "green" and s.start <= added_start < s.end]
-        self.assertTrue(green_spans, "'+added' should be styled green")
-        # Verify red style for removed line
+        green_spans = [
+            s for s in spans if str(s.style) == "on #154018" and s.start <= added_start < s.end
+        ]
+        self.assertTrue(green_spans, "'+added' should be styled with green background")
+        # Verify red background style for removed line
         removed_start = plain.index("-removed")
-        red_spans = [s for s in spans if s.style == "red" and s.start <= removed_start < s.end]
-        self.assertTrue(red_spans, "'-removed' should be styled red")
+        red_spans = [
+            s for s in spans if str(s.style) == "on #3f1715" and s.start <= removed_start < s.end
+        ]
+        self.assertTrue(red_spans, "'-removed' should be styled with red background")
 
 
 if __name__ == "__main__":

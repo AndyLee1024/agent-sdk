@@ -138,6 +138,7 @@ class EventRenderer:
             "AGENT_SDK_TUI_DIFF_MAX_LINES",
             50,
         )
+        self._latest_diff_lines: list[str] | None = None
 
     def start_turn(self) -> None:
         self._flush_assistant_segment()
@@ -179,6 +180,10 @@ class EventRenderer:
 
     def history_entries(self) -> list[HistoryEntry]:
         return list(self._history)
+
+    @property
+    def latest_diff_lines(self) -> list[str] | None:
+        return self._latest_diff_lines
 
     def has_running_tools(self) -> bool:
         return bool(self._running_tools)
@@ -353,6 +358,7 @@ class EventRenderer:
             diff_lines: optional diff lines for Edit/MultiEdit
         """
         if not is_error and diff_lines and len(diff_lines) > 0:
+            self._latest_diff_lines = diff_lines
             text_obj = Text(signature)
             text_obj.append("\n")
             text_obj.append(self._render_diff_text(diff_lines, max_lines=self._diff_max_lines))
@@ -427,6 +433,7 @@ class EventRenderer:
         if not is_error and metadata:
             diff_lines = metadata.get("diff")
             if isinstance(diff_lines, list) and len(diff_lines) > 0:
+                self._latest_diff_lines = diff_lines
                 text_obj = Text(f"{base}{error_suffix}")
                 text_obj.append("\n")
                 text_obj.append(self._render_diff_text(diff_lines, max_lines=self._diff_max_lines))
@@ -441,10 +448,17 @@ class EventRenderer:
     def _render_diff_text(diff_lines: list[str], max_lines: int = 50) -> Text:
         """Render diff lines as colored Rich Text with line numbers."""
         import re
+        import shutil
 
         result = Text()
         total_lines = len(diff_lines)
         displayed_lines = diff_lines[:max_lines] if max_lines > 0 else diff_lines
+
+        # Get terminal width for padding
+        try:
+            terminal_width = shutil.get_terminal_size().columns
+        except Exception:
+            terminal_width = 120
 
         old_line = 0
         new_line = 0
@@ -465,13 +479,21 @@ class EventRenderer:
                 continue
 
             if line.startswith("-"):
-                result.append(f"{old_line:>4} ", style="dim")
-                result.append(line, style="red")
+                result.append(f"{old_line:>4} ", style="#ffffff on #4a0202")
+                result.append(line, style="#ffffff on #4a0202")
+                # Calculate padding to fill the entire line
+                content_width = 5 + len(line)  # line number (4) + space (1) + content
+                padding = max(0, terminal_width - content_width)
+                result.append(" " * padding, style="#ffffff on #4a0202")
                 result.append("\n")
                 old_line += 1
             elif line.startswith("+"):
-                result.append(f"{new_line:>4} ", style="dim")
-                result.append(line, style="green")
+                result.append(f"{new_line:>4} ", style="#c6c6c6 on #2e502e")
+                result.append(line, style="#ffffff on #2e502e")
+                # Calculate padding to fill the entire line
+                content_width = 5 + len(line)  # line number (4) + space (1) + content
+                padding = max(0, terminal_width - content_width)
+                result.append(" " * padding, style="#ffffff on #2e502e")
                 result.append("\n")
                 new_line += 1
             else:
@@ -482,7 +504,10 @@ class EventRenderer:
                 new_line += 1
 
         if max_lines > 0 and total_lines > max_lines:
-            result.append(f"... ({total_lines - max_lines} more lines)", style="dim italic")
+            result.append(
+                f"... ({total_lines - max_lines} more lines, Ctrl+O to expand)",
+                style="dim italic",
+            )
 
         return result
 

@@ -156,6 +156,8 @@ class TerminalAgentTUI:
         self._closing = False
         self._printed_history_index = 0
         self._render_dirty = True
+        self._diff_panel_visible = False
+        self._diff_panel_scroll = 0
         self._last_loading_line = ""
 
         self._app: Application[None] | None = None
@@ -252,6 +254,24 @@ class TerminalAgentTUI:
             dont_extend_height=True,
             style="class:loading",
         )
+
+        # Diff preview panel
+        self._diff_panel_control = FormattedTextControl(text=self._diff_panel_text)
+        self._diff_panel_window = Window(
+            content=self._diff_panel_control,
+            height=self._diff_panel_height,
+            dont_extend_height=True,
+            style="class:diff-panel",
+            wrap_lines=False,
+        )
+        self._diff_panel_container = ConditionalContainer(
+            content=self._diff_panel_window,
+            filter=Condition(
+                lambda: self._diff_panel_visible
+                and self._renderer.latest_diff_lines is not None
+            ),
+        )
+
         self._status_window = Window(
             content=self._status_control,
             height=1,
@@ -297,6 +317,7 @@ class TerminalAgentTUI:
             [
                 self._todo_container,
                 self._loading_window,
+                self._diff_panel_container,
                 Window(height=1, char=" ", style="class:input.pad"),
                 self._input_container,
                 self._question_container,
@@ -612,6 +633,32 @@ class TerminalAgentTUI:
         def _exit(event) -> None:
             del event
             self._exit_app()
+
+        @bindings.add("c-o", filter=normal_mode)
+        def _toggle_diff_panel(event) -> None:
+            del event
+            self._diff_panel_visible = not self._diff_panel_visible
+            self._diff_panel_scroll = 0
+            self._invalidate()
+
+        diff_panel_open = Condition(lambda: self._diff_panel_visible)
+
+        @bindings.add("up", filter=normal_mode & diff_panel_open)
+        def _diff_scroll_up(event) -> None:
+            del event
+            if self._diff_panel_scroll > 0:
+                self._diff_panel_scroll -= 1
+                self._invalidate()
+
+        @bindings.add("down", filter=normal_mode & diff_panel_open)
+        def _diff_scroll_down(event) -> None:
+            del event
+            diff_lines = self._renderer.latest_diff_lines
+            if diff_lines:
+                max_scroll = max(0, len(diff_lines) - (self._DIFF_PANEL_MAX_VISIBLE - 1))
+                if self._diff_panel_scroll < max_scroll:
+                    self._diff_panel_scroll += 1
+                    self._invalidate()
 
         return bindings
 
@@ -1645,6 +1692,103 @@ class TerminalAgentTUI:
         if self._renderer.loading_state().text.strip():
             return 1
         return 1
+
+    _DIFF_PANEL_MAX_VISIBLE = 20
+
+    def _diff_panel_text(self) -> list[tuple[str, str]]:
+        import re
+
+        diff_lines = self._renderer.latest_diff_lines
+        if not diff_lines:
+            return [("", " ")]
+
+        width = self._terminal_width()
+        total = len(diff_lines)
+        viewport = self._DIFF_PANEL_MAX_VISIBLE - 1  # reserve 1 for header
+        offset = self._diff_panel_scroll
+        max_scroll = max(0, total - viewport)
+        scroll_info = ""
+        if total > viewport:
+            scroll_info = f" [{offset + 1}-{min(offset + viewport, total)}/{total}] ↑↓"
+
+        title = f" Diff Preview (Ctrl+O to close, use arrow keys (↑↓) to scroll) {scroll_info} "
+        pad_len = max(width - len(title) - 2, 0)
+        left_pad = pad_len // 2
+        right_pad = pad_len - left_pad
+        header = f"{'─' * left_pad}{title}{'─' * right_pad}"
+
+        fragments: list[tuple[str, str]] = [("fg:#6B7280", header)]
+
+        hunk_pattern = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+        # To track line numbers correctly, we must parse from the beginning
+        old_line = 0
+        new_line = 0
+        visible_start = offset
+        visible_end = offset + viewport
+        shown = 0
+
+        for idx, line in enumerate(diff_lines):
+            # Always parse hunk headers and file headers to track line numbers
+            if line.startswith("---") or line.startswith("+++"):
+                if visible_start <= idx < visible_end:
+                    fragments.append(("", "\n"))
+                    fragments.append(("fg:#6B7280", line))
+                    shown += 1
+                continue
+
+            m = hunk_pattern.match(line)
+            if m:
+                old_line = int(m.group(1))
+                new_line = int(m.group(2))
+                if visible_start <= idx < visible_end:
+                    fragments.append(("", "\n"))
+                    fragments.append(("fg:#00BCD4", line))
+                    shown += 1
+                continue
+
+            if visible_start <= idx < visible_end:
+                fragments.append(("", "\n"))
+                if line.startswith("-"):
+                    prefix = f"{old_line:>4} "
+                    prefix_width = get_cwidth(prefix)
+                    content_width = max(0, width - prefix_width)
+                    fitted = fit_single_line(line, content_width)
+                    padding = " " * (content_width - get_cwidth(fitted))
+                    
+                    fragments.append(("fg:#ffffff bg:#4a0202", prefix))
+                    fragments.append(("fg:#ffffff bg:#4a0202", fitted + padding))
+                elif line.startswith("+"):
+                    prefix = f"{new_line:>4} "
+                    prefix_width = get_cwidth(prefix)
+                    content_width = max(0, width - prefix_width)
+                    fitted = fit_single_line(line, content_width)
+                    padding = " " * (content_width - get_cwidth(fitted))
+
+                    fragments.append(("fg:#c6c6c6 bg:#2e502e", prefix))
+                    fragments.append(("fg:#ffffff bg:#2e502e", fitted + padding))
+                else:
+                    fragments.append(("fg:#6B7280", f"{new_line:>4} "))
+                    fragments.append(("fg:#6B7280", line))
+                shown += 1
+
+            # Always update line counters
+            if line.startswith("-"):
+                old_line += 1
+            elif line.startswith("+"):
+                new_line += 1
+            else:
+                old_line += 1
+                new_line += 1
+
+        return fragments
+
+    def _diff_panel_height(self) -> int:
+        diff_lines = self._renderer.latest_diff_lines
+        if not diff_lines:
+            return 0
+        viewport = self._DIFF_PANEL_MAX_VISIBLE - 1
+        content_lines = min(len(diff_lines), viewport)
+        return content_lines + 1  # +1 for header
 
     def _todo_text(self) -> list[tuple[str, str]]:
         lines = self._renderer.todo_panel_lines(max_lines=self._todo_panel_max_lines)
