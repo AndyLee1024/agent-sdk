@@ -30,7 +30,14 @@ from httpx import Timeout
 from comate_agent_sdk.llm.anthropic.serializer import AnthropicMessageSerializer
 from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from comate_agent_sdk.llm.exceptions import ModelProviderError, ModelRateLimitError
-from comate_agent_sdk.llm.messages import BaseMessage, Function, ToolCall
+from comate_agent_sdk.llm.messages import (
+    BaseMessage,
+    ContentPartRedactedThinkingParam,
+    ContentPartTextParam,
+    ContentPartThinkingParam,
+    Function,
+    ToolCall,
+)
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 
 
@@ -46,6 +53,8 @@ class ChatAnthropic(BaseChatModel):
     temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None
+    thinking_budget_tokens: int | None = None
+    """Token budget for extended thinking. None = disabled."""
 
     # Client initialization parameters
     api_key: str | None = None
@@ -116,6 +125,14 @@ class ChatAnthropic(BaseChatModel):
 
         if self.seed is not None:
             client_params["seed"] = self.seed
+
+        # Extended thinking: enable and drop temperature (not allowed with thinking)
+        if self.thinking_budget_tokens is not None:
+            client_params["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget_tokens,
+            }
+            client_params.pop("temperature", None)
 
         return client_params
 
@@ -308,6 +325,54 @@ class ChatAnthropic(BaseChatModel):
 
         return thinking, redacted
 
+    @staticmethod
+    def _build_structured_content(
+        response: Message,
+    ) -> list[ContentPartTextParam | ContentPartThinkingParam | ContentPartRedactedThinkingParam] | None:
+        """Build structured content blocks from Anthropic Message, preserving thinking signatures."""
+        if not response.content:
+            return None
+
+        blocks: list[ContentPartTextParam | ContentPartThinkingParam | ContentPartRedactedThinkingParam] = []
+        for content_block in response.content:
+            if isinstance(content_block, TextBlock):
+                blocks.append(ContentPartTextParam(text=content_block.text))
+            elif isinstance(content_block, ThinkingBlock):
+                blocks.append(
+                    ContentPartThinkingParam(
+                        thinking=content_block.thinking,
+                        signature=content_block.signature,
+                    )
+                )
+            elif isinstance(content_block, RedactedThinkingBlock):
+                blocks.append(
+                    ContentPartRedactedThinkingParam(data=content_block.data)
+                )
+            # ToolUseBlock excluded — already extracted to tool_calls
+        return blocks if blocks else None
+
+    @staticmethod
+    def _strip_thinking_blocks(messages: list[dict]) -> list[dict]:
+        """Remove thinking/redacted_thinking blocks from serialized assistant messages.
+
+        Called when thinking is disabled to avoid sending stale thinking blocks
+        from previous turns (which the API would reject).
+        """
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            filtered = [
+                b for b in content
+                if not isinstance(b, dict) or b.get("type") not in ("thinking", "redacted_thinking")
+            ]
+            if not filtered:
+                filtered = [{"type": "text", "text": ""}]
+            msg["content"] = filtered
+        return messages
+
     async def ainvoke(
         self,
         messages: list[BaseMessage],
@@ -329,6 +394,10 @@ class ChatAnthropic(BaseChatModel):
         anthropic_messages, system_prompt = (
             AnthropicMessageSerializer.serialize_messages(messages)
         )
+
+        # Strip historical thinking blocks when thinking is disabled
+        if self.thinking_budget_tokens is None:
+            self._strip_thinking_blocks(anthropic_messages)
 
         try:
             invoke_params = self._get_client_params_for_invoke()
@@ -376,6 +445,7 @@ class ChatAnthropic(BaseChatModel):
                 tool_calls=tool_calls,
                 thinking=thinking,
                 redacted_thinking=redacted_thinking,
+                raw_content_blocks=self._build_structured_content(response),
                 usage=usage,
                 stop_reason=response.stop_reason,
             )
@@ -390,3 +460,12 @@ class ChatAnthropic(BaseChatModel):
             ) from e
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
+
+    def set_thinking_budget(self, budget: int | None) -> None:
+        """Set thinking token budget.
+
+        Args:
+            budget: Token budget for extended thinking, or None to disable.
+        """
+        logger.info(f"Anthropic thinking_budget_tokens set to {budget}")
+        self.thinking_budget_tokens = budget

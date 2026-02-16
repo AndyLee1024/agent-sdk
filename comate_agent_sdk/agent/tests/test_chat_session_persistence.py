@@ -7,13 +7,13 @@ from pathlib import Path
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig
-from comate_agent_sdk.agent.chat_session import (
-    ChatSession,
-    _ConversationState,
-    _build_conversation_event,
-    _events_jsonl_append,
-    _replay_conversation_events,
-    _replay_session_events,
+from comate_agent_sdk.agent.chat_session import ChatSession
+from comate_agent_sdk.agent.session_store import (
+    ConversationState as _ConversationState,
+    build_conversation_event as _build_conversation_event,
+    events_jsonl_append as _events_jsonl_append,
+    replay_conversation_events as _replay_conversation_events,
+    replay_session_events as _replay_session_events,
 )
 from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage, UserMessage

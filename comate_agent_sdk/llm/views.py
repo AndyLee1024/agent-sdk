@@ -1,6 +1,11 @@
 from pydantic import BaseModel
 
-from comate_agent_sdk.llm.messages import ToolCall
+from comate_agent_sdk.llm.messages import (
+    ContentPartRedactedThinkingParam,
+    ContentPartTextParam,
+    ContentPartThinkingParam,
+    ToolCall,
+)
 
 
 class ChatInvokeUsage(BaseModel):
@@ -55,6 +60,17 @@ class ChatInvokeCompletion(BaseModel):
 
     redacted_thinking: str | None = None
     """Redacted thinking content (Anthropic)."""
+
+    raw_content_blocks: (
+        list[
+            ContentPartTextParam
+            | ContentPartThinkingParam
+            | ContentPartRedactedThinkingParam
+        ]
+        | None
+    ) = None
+    """Structured content blocks from provider (preserves thinking signatures).
+    When present, used for AssistantMessage.content instead of flattened string."""
 
     usage: ChatInvokeUsage | None = None
     """Token usage information for this response."""

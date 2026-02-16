@@ -511,7 +511,7 @@ async def query_stream(
                 from comate_agent_sdk.llm.messages import AssistantMessage
 
                 assistant_msg = AssistantMessage(
-                    content=response.content,
+                    content=response.raw_content_blocks or response.content,
                     tool_calls=None,
                 )
                 agent._context.add_message(assistant_msg)
@@ -576,7 +576,7 @@ async def query_stream(
                     askuser_repair_attempted = True
 
                     assistant_msg = AssistantMessage(
-                        content=response.content,
+                        content=response.raw_content_blocks or response.content,
                         tool_calls=tool_calls,
                     )
                     expected_ids = [call.id for call in tool_calls if str(call.id).strip()]
@@ -710,7 +710,7 @@ async def query_stream(
                     tool_calls = [ask_call]
 
             assistant_msg = AssistantMessage(
-                content=response.content,
+                content=response.raw_content_blocks or response.content,
                 tool_calls=tool_calls,
             )
 

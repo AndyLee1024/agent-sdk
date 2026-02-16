@@ -646,3 +646,12 @@ class ChatGoogle(BaseChatModel):
             return obj
 
         return clean_schema(schema)
+
+    def set_thinking_budget(self, budget: int | None) -> None:
+        """Set thinking token budget.
+
+        Args:
+            budget: Token budget for thinking, or None to disable.
+        """
+        self.logger.info(f"Google thinking_budget set to {budget}")
+        self.thinking_budget = budget

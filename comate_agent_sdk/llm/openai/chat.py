@@ -428,3 +428,23 @@ class ChatOpenAI(BaseChatModel):
 
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
+
+    def set_thinking_budget(self, budget: int | None) -> None:
+        """Set thinking budget by converting to reasoning effort level.
+
+        Uses conservative mapping to avoid over-speculation:
+        - None: "low" (minimal reasoning, default)
+        - > 0: "medium" (enable reasoning)
+
+        Note: OpenAI's reasoning_effort is a qualitative level, not a precise
+        token budget. This mapping provides a simple on/off switch.
+
+        Args:
+            budget: Token budget (None to disable reasoning, >0 to enable).
+        """
+        if budget is None:
+            self.reasoning_effort = "low"
+            logger.info("OpenAI reasoning_effort set to 'low' (budget=None)")
+        else:
+            self.reasoning_effort = "medium"
+            logger.info(f"OpenAI reasoning_effort set to 'medium' (budget={budget})")
