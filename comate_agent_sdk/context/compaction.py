@@ -539,7 +539,12 @@ class SelectiveCompactionPolicy:
                     protected_ids.add(item.id)
 
         # 合并 thinking 保护 IDs（tool loop 中含 thinking blocks 的 assistant messages）
-        protected_ids.update(context._thinking_protected_assistant_ids)
+        thinking_protected = context._thinking_protected_assistant_ids
+        if thinking_protected:
+            logger.debug(
+                f"Thinking-protected assistant messages (in tool loop): {len(thinking_protected)} items"
+            )
+        protected_ids.update(thinking_protected)
 
         return protected_ids
 

@@ -605,6 +605,10 @@ class ContextIR:
             # 根据 Anthropic 约束：tool loop 中不能删除含 thinking signature 的 assistant message
             if self._contains_thinking_blocks(message):
                 self._thinking_protected_assistant_ids.add(item.id)
+                logger.debug(
+                    f"Thinking protection enabled for assistant item {item.id} "
+                    f"(tool_call_ids: {[tc.id for tc in message.tool_calls]})"
+                )
 
         elif isinstance(message, ToolMessage):
             if message.tool_call_id:
@@ -612,10 +616,23 @@ class ContextIR:
 
             # 当 tool barrier 完全释放时，清空 thinking 保护
             if not self._inflight_tool_call_ids:
+                if self._thinking_protected_assistant_ids:
+                    logger.debug(
+                        f"Tool barrier cleared, releasing thinking protection for "
+                        f"{len(self._thinking_protected_assistant_ids)} assistant messages"
+                    )
                 self._thinking_protected_assistant_ids.clear()
 
             self._flush_pending_hook_injections_if_unblocked()
             self._flush_pending_skill_items_if_unblocked()
+
+        # 防御性检查：保护集合不应超过合理大小
+        if len(self._thinking_protected_assistant_ids) > 100:
+            logger.warning(
+                f"Thinking protection set unusually large: "
+                f"{len(self._thinking_protected_assistant_ids)} items. Forcing cleanup."
+            )
+            self._thinking_protected_assistant_ids.clear()
 
         return item
 
