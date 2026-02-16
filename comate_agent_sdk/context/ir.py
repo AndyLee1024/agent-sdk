@@ -26,6 +26,7 @@ from comate_agent_sdk.context.items import (
     SegmentName,
 )
 from comate_agent_sdk.context.lower import LoweringPipeline
+from comate_agent_sdk.context.nudge import NudgeState, update_nudge_todo_count
 from comate_agent_sdk.context.observer import (
     ContextEvent,
     ContextEventBus,
@@ -112,8 +113,7 @@ class ContextIR:
     _pending_skill_items: list[ContextItem] = field(default_factory=list)
     _todo_state: dict[str, Any] = field(default_factory=dict)
     _turn_number: int = 0
-    _todo_turn_number_at_update: int = 0
-    _todo_empty_reminder_start_turn: int = 0  # 空 todo 提醒开始的轮次
+    _nudge: NudgeState = field(default_factory=NudgeState)
     _memory_item: ContextItem | None = field(default=None, repr=False)
     _inflight_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     _thinking_protected_assistant_ids: set[str] = field(default_factory=set, repr=False)
@@ -530,6 +530,8 @@ class ContextIR:
             and not bool(getattr(message, "is_meta", False))
         ):
             self._turn_number += 1
+            # 同步 turn number 到 NudgeState
+            self._nudge.turn = self._turn_number
 
         # 提取文本内容用于 token 估算
         content_text = message.text if hasattr(message, "text") else ""
@@ -777,6 +779,8 @@ class ContextIR:
             return
         if value > self._turn_number:
             self._turn_number = value
+            # 同步到 NudgeState
+            self._nudge.turn = self._turn_number
 
     def get_turn_number(self) -> int:
         """获取当前 turn_number（真实用户输入轮次）。"""
@@ -1122,13 +1126,12 @@ class ContextIR:
     # ===== TODO 状态管理 =====
 
     def set_todo_state(self, todos: list[dict]) -> None:
-        """设置 TODO 状态并注册 reminder
+        """设置 TODO 状态并更新 NudgeState
 
         Args:
             todos: TODO 列表（字典格式，来自 TodoWrite 工具）
         """
         import time
-        from comate_agent_sdk.context.reminder import ReminderPosition
 
         active_todos = [
             t for t in todos
@@ -1139,45 +1142,11 @@ class ContextIR:
             "todos": active_todos,
             "updated_at": time.time(),
         }
-        self._todo_turn_number_at_update = self._turn_number
 
-        # 移除旧的 todo reminders
-        self.remove_reminder("todo_list_empty")
-        self.remove_reminder("todo_list_update")
-        self.remove_reminder("todo_gentle_reminder")
-
-        # 根据状态注册新 reminder
-        if not active_todos:
-            # 如果 todo 为空，注册"空列表"提醒
-            # 每次进入空状态时，重置起始轮次（这样会在第一次立即提醒）
-            self._todo_empty_reminder_start_turn = self._turn_number
-            self.register_reminder(SystemReminder(
-                name="todo_list_empty",
-                content=(
-                    "This is a reminder that your todo list is currently empty. "
-                    "DO NOT mention this to the user explicitly because they are already aware. "
-                    "If you are working on tasks that would benefit from a todo list please use the TodoWrite tool to create one. "
-                    "If not, please feel free to ignore. "
-                    "Again do not mention this message to the user."
-                ),
-                position=ReminderPosition.END,
-                one_shot=False,
-                condition=self._should_remind_empty_todo,  # 每 8 轮提醒一次
-            ))
-        else:
-            # 如果 todo 非空，重置空提醒起始轮次（下次变空时重新计时）
-            self._todo_empty_reminder_start_turn = 0
-            # 注册"温和提醒"（不包含完整 JSON）
-            self.register_reminder(SystemReminder(
-                name="todo_gentle_reminder",
-                content=(
-                    "You have active TODO items. DO NOT mention this reminder to the user. "
-                    "Continue working on the next TODO item(s) and keep the TODO list up to date via the TodoWrite tool."
-                ),
-                position=ReminderPosition.END,
-                one_shot=False,  # 持续提醒直到下次更新
-                condition=self._should_remind_todo,
-            ))
+        # 更新 NudgeState（包含 turn-based 节流逻辑）
+        update_nudge_todo_count(self._nudge, len(active_todos), self._turn_number)
+        # 同时更新 last_todo_write_turn（TodoWrite 工具调用时的轮次）
+        self._nudge.last_todo_write_turn = self._turn_number
 
         # 触发事件
         self.event_bus.emit(ContextEvent(
@@ -1197,7 +1166,6 @@ class ContextIR:
         - 不用当前 turn_number 覆盖 turn_number_at_update，而是沿用持久化值
         """
         import time
-        from comate_agent_sdk.context.reminder import ReminderPosition
 
         active_todos = [
             t for t in todos
@@ -1208,59 +1176,19 @@ class ContextIR:
             "todos": active_todos,
             "updated_at": time.time(),
         }
+
+        # 恢复 NudgeState 的 last_todo_write_turn
         try:
-            self._todo_turn_number_at_update = int(turn_number_at_update)
+            self._nudge.last_todo_write_turn = int(turn_number_at_update)
         except Exception:
-            self._todo_turn_number_at_update = 0
+            self._nudge.last_todo_write_turn = 0
 
-        self.remove_reminder("todo_list_empty")
-        self.remove_reminder("todo_list_update")
-        self.remove_reminder("todo_gentle_reminder")
+        # 恢复 todo_active_count 和 todo_last_changed_turn（如果是空状态）
+        if not active_todos and self._nudge.todo_last_changed_turn == 0:
+            self._nudge.todo_last_changed_turn = self._turn_number
 
-        if not active_todos:
-            # 恢复时如果是空状态，设置起始轮次为当前轮次
-            if self._todo_empty_reminder_start_turn == 0:
-                self._todo_empty_reminder_start_turn = self._turn_number
-            self.register_reminder(SystemReminder(
-                name="todo_list_empty",
-                content=(
-                    "This is a reminder that your todo list is currently empty. "
-                    "DO NOT mention this to the user explicitly because they are already aware. "
-                    "If you are working on tasks that would benefit from a todo list please use the TodoWrite tool to create one. "
-                    "If not, please feel free to ignore. "
-                    "Again do not mention this message to the user."
-                ),
-                position=ReminderPosition.END,
-                one_shot=False,
-                condition=self._should_remind_empty_todo,  # 每 8 轮提醒一次
-            ))
-        else:
-            self.register_reminder(SystemReminder(
-                name="todo_gentle_reminder",
-                content=(
-                    "You have active TODO items. DO NOT mention this reminder to the user. "
-                    "Continue working on the next TODO item(s) and keep the TODO list up to date via the TodoWrite tool."
-                ),
-                position=ReminderPosition.END,
-                one_shot=False,
-                condition=self._should_remind_todo,
-            ))
+        self._nudge.todo_active_count = len(active_todos)
 
-    def _should_remind_todo(self) -> bool:
-        if not self.has_todos():
-            return False
-        gap = self._turn_number - self._todo_turn_number_at_update
-        return gap >= 3
-
-    def _should_remind_empty_todo(self) -> bool:
-        """判断是否应该提醒空 todo 列表
-
-        策略：第一次立即提醒（gap=0），之后每隔 8 轮提醒一次
-        """
-        if self.has_todos():
-            return False
-        gap = self._turn_number - self._todo_empty_reminder_start_turn
-        return gap % 8 == 0
 
     def get_todo_state(self) -> dict[str, Any]:
         """获取当前 TODO 状态"""
@@ -1272,34 +1200,4 @@ class ContextIR:
 
     def get_todo_persist_turn_number_at_update(self) -> int:
         """用于持久化的 todo 更新轮次。"""
-        return int(self._todo_turn_number_at_update)
-
-    def register_initial_todo_reminder_if_needed(self) -> None:
-        """在会话开始时注册初始 TODO 提醒（如果还没有 todo 状态）
-
-        应在第一个 UserMessage 后调用
-        """
-        from comate_agent_sdk.context.reminder import ReminderPosition
-
-        # 如果已经有 todo 状态，不需要初始提醒
-        if self._todo_state:
-            return
-
-        # 如果还没有注册过空列表提醒
-        if not any(r.name == "todo_list_empty" for r in self.reminders):
-            # 记录空提醒的起始轮次
-            if self._todo_empty_reminder_start_turn == 0:
-                self._todo_empty_reminder_start_turn = self._turn_number
-            self.register_reminder(SystemReminder(
-                name="todo_list_empty",
-                content=(
-                    "This is a reminder that your todo list is currently empty. "
-                    "DO NOT mention this to the user explicitly because they are already aware. "
-                    "If you are working on tasks that would benefit from a todo list please use the TodoWrite tool to create one. "
-                    "If not, please feel free to ignore. "
-                    "Again do not mention this message to the user."
-                ),
-                position=ReminderPosition.END,
-                one_shot=False,
-                condition=self._should_remind_empty_todo,  # 每 8 轮提醒一次
-            ))
+        return int(self._nudge.last_todo_write_turn)

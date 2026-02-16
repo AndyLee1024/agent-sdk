@@ -53,7 +53,7 @@ class ChatOpenAI(BaseChatModel):
     model: ChatModel | str
 
     # Model params
-    temperature: float | None = 0.2
+    temperature: float | None = 0.1
     frequency_penalty: float | None = (
         0.3  # this avoids infinite generation of \t for models like 4.1-mini
     )

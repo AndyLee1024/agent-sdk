@@ -433,8 +433,6 @@ async def query_stream(
         # Add the user message to context (supports both string and multi-modal content)
         agent._context.add_message(UserMessage(content=message))
 
-        # 注册初始 TODO 提醒（如果需要）
-        agent._context.register_initial_todo_reminder_if_needed()
         await _fire_user_prompt_submit(agent, message)
         async for hidden_event in _drain_hidden_events(agent):
             yield hidden_event

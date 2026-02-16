@@ -59,6 +59,7 @@ _LINE_TRUNCATE_CHARS = 2000
 _BASH_DEFAULT_TIMEOUT_MS = 120_000
 _BASH_MAX_TIMEOUT_MS = 600_000
 _BASH_OUTPUT_DEFAULT_MAX_CHARS = 30_000
+_READ_HARD_LINE_LIMIT = 50 * 1024
 
 _WEBFETCH_TIMEOUT_SECONDS = 20
 _WEBFETCH_LLM_TIMEOUT_SECONDS = 30
@@ -931,6 +932,37 @@ async def Read(
     start = params.offset_line
     end = min(total_lines, start + params.limit_lines)
     sliced = lines[start:end]
+
+    for i, line in enumerate(sliced, start=start + 1):
+        if len(line) > _READ_HARD_LINE_LIMIT:
+            kb_size = len(line) / 1024
+            limit_kb = _READ_HARD_LINE_LIMIT / 1024
+            msg = (
+                f"<system-reminder>[Line {i} is {kb_size:.1f}KB, exceeds {limit_kb:.1f}KB limit. "
+                f"Use bash: sed -n '{i}p' {params.file_path} | head -c {_READ_HARD_LINE_LIMIT}]</system-reminder>"
+            )
+            return ok(
+                data={
+                    "content": msg,
+                    "total_lines": total_lines,
+                    "lines_returned": 0,
+                    "has_more": False,
+                    "truncated": False,
+                    "meta": {
+                        "encoding": "utf-8",
+                        "file_bytes": file_bytes,
+                    },
+                },
+                meta={
+                    "file_path": params.file_path,
+                    "offset_line": params.offset_line,
+                    "limit_lines": params.limit_lines,
+                    "format": params.format,
+                    "max_line_chars": params.max_line_chars,
+                    "encoding": "utf-8",
+                    "file_bytes": file_bytes,
+                },
+            )
 
     line_truncated = False
     if params.format == "line_numbers":
@@ -1805,9 +1837,11 @@ async def TodoWrite(
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     reminder_text = (
+        "<system-reminder>"
         "Remember to keep using the TODO list to keep track of your work and "
         "to now follow the next task on the list. Mark tasks as in_progress "
         "when you start them and completed when done."
+        "</system-reminder>"
     )
 
     try:

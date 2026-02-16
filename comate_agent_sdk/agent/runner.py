@@ -405,8 +405,6 @@ async def query(agent: "AgentRuntime", message: str) -> str:
     # Add the user message to context
     agent._context.add_message(UserMessage(content=message))
 
-    # 注册初始 TODO 提醒（如果需要）
-    agent._context.register_initial_todo_reminder_if_needed()
     await _fire_user_prompt_submit(agent, message)
 
     iterations = 0

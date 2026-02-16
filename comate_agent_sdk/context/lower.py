@@ -15,6 +15,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from comate_agent_sdk.context.items import ItemType, SegmentName
+from comate_agent_sdk.context.nudge import render_reminders
 from comate_agent_sdk.context.reminder import ReminderPosition, SystemReminder
 from comate_agent_sdk.llm.messages import (
     SystemMessage,
@@ -74,6 +75,21 @@ class LoweringPipeline:
 
         # Step 3: 注入 system-reminders
         messages = LoweringPipeline._inject_reminders(messages, context.reminders)
+
+        # Step 4: 追加 turn-based nudge 到最后一条 UserMessage 尾部（不创建新消息）
+        nudge_text = render_reminders(context._nudge)
+        if nudge_text:
+            # 从后往前找最后一条 UserMessage，追加 nudge 文本
+            for i in range(len(messages) - 1, -1, -1):
+                if isinstance(messages[i], UserMessage):
+                    original = messages[i]
+                    messages[i] = UserMessage(
+                        content=f"{original.text}\n\n{nudge_text}",
+                        is_meta=original.is_meta,
+                        cache=original.cache,
+                    )
+                    logger.debug(f"Appended nudge to last UserMessage (length: {len(nudge_text)} chars)")
+                    break
 
         return messages
 

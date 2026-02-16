@@ -1,22 +1,21 @@
-"""TodoWrite 工具与 ContextIR 集成测试"""
+"""TodoWrite 工具与 ContextIR 集成测试（适配 NudgeState 系统）"""
 
 from comate_agent_sdk.context import ContextIR
 from comate_agent_sdk.llm.messages import UserMessage
 
 
 def test_set_todo_state_empty():
-    """测试设置空 TODO 列表"""
+    """测试设置空 TODO 列表（检查 NudgeState 更新）"""
     ctx = ContextIR()
     ctx.set_todo_state([])
 
-    # 应该注册 "empty" reminder
-    assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_list_empty"
-    assert "currently empty" in ctx.reminders[0].content
+    # 应该更新 NudgeState
+    assert ctx._nudge.todo_active_count == 0
+    assert ctx._nudge.todo_last_changed_turn == 0
 
 
 def test_set_todo_state_with_items():
-    """测试设置非空 TODO 列表（注册温和提醒，不注入完整 JSON）"""
+    """测试设置非空 TODO 列表（检查 NudgeState 更新）"""
     ctx = ContextIR()
     ctx.set_turn_number(1)
     todos = [
@@ -25,39 +24,46 @@ def test_set_todo_state_with_items():
     ]
     ctx.set_todo_state(todos)
 
-    # 应该注册 gentle reminder
-    assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_gentle_reminder"
-    assert "active TODO items" in ctx.reminders[0].content
-    assert '"id": "1"' not in ctx.reminders[0].content
+    # 应该更新 NudgeState
+    assert ctx._nudge.todo_active_count == 2
+    assert ctx._nudge.todo_last_changed_turn == 1
 
 
-def test_initial_todo_reminder():
-    """测试初始化提醒"""
+def test_initial_todo_empty_nudge():
+    """测试初始空 todo 提醒（通过 lower() 检查）"""
     ctx = ContextIR()
-    ctx.register_initial_todo_reminder_if_needed()
+    ctx.add_message(UserMessage(content="Hello"))
+    ctx.set_todo_state([])
 
-    # 应该注册一次
-    assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_list_empty"
+    # turn=1, todo_last_changed_turn=0, gap=1
+    # 不满足 gap % 8 == 0，不应提醒
+    msgs = ctx.lower()
+    last_user_msg = next((m for m in reversed(msgs) if isinstance(m, UserMessage)), None)
+    assert last_user_msg is not None
+    assert "currently empty" not in last_user_msg.text
 
-    # 再次调用不应重复注册
-    ctx.register_initial_todo_reminder_if_needed()
-    assert len(ctx.reminders) == 1
+    # turn=1, 设置 todo_last_changed_turn=1 后，gap=0，满足 gap % 8 == 0
+    # 同时重置 cooldown（确保不被 cooldown 阻挡）
+    ctx._nudge.todo_last_changed_turn = 1
+    ctx._nudge.last_nudge_todo_turn = -100  # 确保 cooldown 足够大
+    msgs = ctx.lower()
+    last_user_msg = next((m for m in reversed(msgs) if isinstance(m, UserMessage)), None)
+    assert last_user_msg is not None
+    assert "currently empty" in last_user_msg.text
 
 
 def test_initial_todo_reminder_with_existing_state():
-    """测试有 todo 状态时不注册初始提醒"""
+    """测试有 todo 状态时不提醒空列表"""
     ctx = ContextIR()
+    ctx.add_message(UserMessage(content="Hello"))
     todos = [{"id": "1", "content": "Task 1", "status": "pending", "priority": "medium"}]
     ctx.set_todo_state(todos)
 
-    # 清除现有 reminders
-    ctx.reminders.clear()
-
-    # 调用初始提醒不应注册（因为已有 todo_state）
-    ctx.register_initial_todo_reminder_if_needed()
-    assert len(ctx.reminders) == 0
+    # 有 active todo，不应有空提醒
+    msgs = ctx.lower()
+    last_user_msg = next((m for m in reversed(msgs) if isinstance(m, UserMessage)), None)
+    assert last_user_msg is not None
+    assert "currently empty" not in last_user_msg.text
 
 
 def test_get_todo_state():
@@ -86,23 +92,24 @@ def test_has_todos():
 
 
 def test_todo_reminder_replacement():
-    """测试 TODO reminder 的替换逻辑"""
+    """测试 TODO 状态变化时 NudgeState 更新"""
     ctx = ContextIR()
 
     # 初始为空
     ctx.set_todo_state([])
-    assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_list_empty"
+    assert ctx._nudge.todo_active_count == 0
 
-    # 添加 todos 后替换 reminder
+    # 添加 todos
+    ctx.set_turn_number(5)
     ctx.set_todo_state([{"id": "1", "content": "Task 1", "status": "pending", "priority": "high"}])
-    assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_gentle_reminder"
+    assert ctx._nudge.todo_active_count == 1
+    assert ctx._nudge.todo_last_changed_turn == 5
 
-    # 再次设为空，应替换回 empty reminder
+    # 再次设为空
+    ctx.set_turn_number(10)
     ctx.set_todo_state([])
-    assert len(ctx.reminders) == 1
-    assert ctx.reminders[0].name == "todo_list_empty"
+    assert ctx._nudge.todo_active_count == 0
+    assert ctx._nudge.todo_last_changed_turn == 10
 
 
 def test_todo_state_cleared_on_context_clear():
@@ -138,21 +145,25 @@ def test_todo_event_emission():
 def test_todo_gentle_reminder_condition_threshold():
     """测试温和提醒的触发阈值（gap >= 3 才注入到 lower()）"""
     ctx = ContextIR()
+    ctx.add_message(UserMessage(content="Hello"))
     ctx.set_turn_number(1)
     ctx.set_todo_state([{"id": "1", "content": "Task 1", "status": "pending", "priority": "high"}])
 
-    # gap=2，不应注入
-    ctx.set_turn_number(3)
-    msgs = ctx.lower()
-    assert not any(
-        isinstance(m, UserMessage) and "active TODO items" in m.text
-        for m in msgs
-    )
+    # 确保 cooldown 不干扰测试（设置足够久以前的 nudge）
+    ctx._nudge.last_nudge_todo_turn = -100
 
-    # gap=3，应注入
-    ctx.set_turn_number(4)
+    # gap=2（turn=3, last_todo_write_turn=1），不应注入
+    ctx.set_turn_number(3)
+    ctx._nudge.turn = 3
     msgs = ctx.lower()
-    assert any(
-        isinstance(m, UserMessage) and "active TODO items" in m.text
-        for m in msgs
-    )
+    last_user_msg = next((m for m in reversed(msgs) if isinstance(m, UserMessage)), None)
+    assert last_user_msg is not None
+    assert "active TODO items" not in last_user_msg.text
+
+    # gap=3（turn=4, last_todo_write_turn=1），应注入（cooldown 也满足）
+    ctx.set_turn_number(4)
+    ctx._nudge.turn = 4
+    msgs = ctx.lower()
+    last_user_msg = next((m for m in reversed(msgs) if isinstance(m, UserMessage)), None)
+    assert last_user_msg is not None
+    assert "active TODO items" in last_user_msg.text

@@ -503,6 +503,10 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
 
             await _fire_post_tool_hooks(tool_message)
 
+            # 更新 NudgeState（跟踪 Task/TodoWrite 工具使用）
+            from comate_agent_sdk.context.nudge import update_nudge_on_tool
+            update_nudge_on_tool(agent._context._nudge, tool_name, agent._context.get_turn_number())
+
             # Set span output
             if Laminar is not None:
                 if is_error:
