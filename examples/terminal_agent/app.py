@@ -117,6 +117,11 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
         await status_bar.refresh()
 
     renderer = EventRenderer(project_root=Path.cwd())
+
+    # 配置 TUI logging handler（将 SDK 日志输出到 TUI）
+    from terminal_agent.logging_adapter import setup_tui_logging
+    setup_tui_logging(renderer)
+
     tui = TerminalAgentTUI(session, status_bar, renderer)
     tui.add_resume_history(mode)
 

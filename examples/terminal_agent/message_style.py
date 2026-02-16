@@ -15,6 +15,9 @@ TOOL_RUNNING_PREFIX = "→"
 TOOL_SUCCESS_PREFIX = "✓"
 TOOL_ERROR_PREFIX = "✖"
 
+THINKING_PREFIX = "💭"
+THINKING_STYLE = "dim"  # 灰色
+
 
 def print_assistant_prefix_line(console: Console, content: str) -> None:
     """Print assistant prefix and content on the same visual line."""

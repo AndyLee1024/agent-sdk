@@ -92,6 +92,7 @@ class TerminalAgentTUI(
         self._waiting_for_input = False
         self._pending_questions: list[dict[str, Any]] | None = None
         self._ui_mode = UIMode.NORMAL
+        self._show_thinking = False  # Ctrl+T 开关，默认关闭
         self._input_read_only = Condition(lambda: self._busy)
 
         self._slash_completer = SlashCommandCompleter(SLASH_COMMAND_SPECS)
@@ -421,7 +422,16 @@ class TerminalAgentTUI(
             logger.debug("stream task cancelled")
         except Exception as exc:
             logger.exception("stream failed")
-            self._renderer.append_system_message(f"流式处理失败: {exc}", is_error=True)
+            from terminal_agent.error_display import format_error
+
+            error_msg, suggestion = format_error(exc)
+            self._renderer.append_system_message(error_msg, is_error=True)
+            if suggestion:
+                self._renderer.append_system_message(f"💡 {suggestion}")
+
+            # 清理 UI 状态
+            self._renderer.interrupt_turn()
+            await self._animation_controller.shutdown()
         finally:
             self._stream_task = None
             self._interrupt_requested_at = None

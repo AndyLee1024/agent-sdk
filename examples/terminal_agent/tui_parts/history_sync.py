@@ -192,4 +192,7 @@ class HistorySyncMixin:
             return []
         pending = entries[self._printed_history_index :]
         self._printed_history_index = len(entries)
+        # 根据 _show_thinking 开关过滤 thinking 条目
+        if not getattr(self, "_show_thinking", False):
+            pending = [e for e in pending if e.entry_type != "thinking"]
         return pending

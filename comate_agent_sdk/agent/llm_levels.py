@@ -20,6 +20,7 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "deepseek": "DEEPSEEK_API_KEY",
 }
 
 
@@ -101,9 +102,13 @@ def _build_model(
 
         http_options = {"base_url": base_url} if base_url else None
         return ChatGoogle(model=model, http_options=http_options, api_key=effective_api_key)
+    if provider == "deepseek":
+        from comate_agent_sdk.llm.deepseek.chat import ChatDeepSeek
+
+        return ChatDeepSeek(model=model, base_url=base_url, api_key=effective_api_key)
 
     raise ValueError(
-        f"不支持的 provider：{provider}（level={level}）。当前支持：openai/anthropic/google"
+        f"不支持的 provider：{provider}（level={level}）。当前支持：openai/anthropic/google/deepseek"
     )
 
 

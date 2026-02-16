@@ -14,12 +14,34 @@ Usage:
 import os
 from typing import TYPE_CHECKING
 
-from comate_agent_sdk.llm.azure.chat import ChatAzureOpenAI
-from comate_agent_sdk.llm.cerebras.chat import ChatCerebras
-from comate_agent_sdk.llm.google.chat import ChatGoogle
-from comate_agent_sdk.llm.comate_agent_sdk.chat import ChatBrowserUse
-from comate_agent_sdk.llm.mistral.chat import ChatMistral
+from comate_agent_sdk.llm.deepseek.chat import ChatDeepSeek
 from comate_agent_sdk.llm.openai.chat import ChatOpenAI
+
+# Optional imports for providers that may not exist
+try:
+    from comate_agent_sdk.llm.azure.chat import ChatAzureOpenAI
+except ImportError:
+    ChatAzureOpenAI = None  # type: ignore
+
+try:
+    from comate_agent_sdk.llm.cerebras.chat import ChatCerebras
+except ImportError:
+    ChatCerebras = None  # type: ignore
+
+try:
+    from comate_agent_sdk.llm.google.chat import ChatGoogle
+except ImportError:
+    ChatGoogle = None  # type: ignore
+
+try:
+    from comate_agent_sdk.llm.comate_agent_sdk.chat import ChatBrowserUse
+except ImportError:
+    ChatBrowserUse = None  # type: ignore
+
+try:
+    from comate_agent_sdk.llm.mistral.chat import ChatMistral
+except ImportError:
+    ChatMistral = None  # type: ignore
 
 # Optional OCI import
 try:
@@ -80,6 +102,9 @@ cerebras_qwen_3_32b: "BaseChatModel"
 cerebras_qwen_3_235b_a22b_instruct_2507: "BaseChatModel"
 cerebras_qwen_3_235b_a22b_thinking_2507: "BaseChatModel"
 cerebras_qwen_3_coder_480b: "BaseChatModel"
+
+deepseek_chat: "BaseChatModel"
+deepseek_reasoner: "BaseChatModel"
 
 bu_latest: "BaseChatModel"
 bu_1_0: "BaseChatModel"
@@ -181,6 +206,8 @@ def get_llm_by_name(model_name: str):
 
     # Azure OpenAI Models
     elif provider == "azure":
+        if ChatAzureOpenAI is None:
+            raise ValueError("Azure OpenAI provider not available. Install required dependencies.")
         api_key = os.getenv("AZURE_OPENAI_KEY") or os.getenv("AZURE_OPENAI_API_KEY")
         azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         return ChatAzureOpenAI(
@@ -189,11 +216,15 @@ def get_llm_by_name(model_name: str):
 
     # Google Models
     elif provider == "google":
+        if ChatGoogle is None:
+            raise ValueError("Google provider not available. Install required dependencies.")
         api_key = os.getenv("GOOGLE_API_KEY")
         return ChatGoogle(model=model, api_key=api_key)
 
     # Mistral Models
     elif provider == "mistral":
+        if ChatMistral is None:
+            raise ValueError("Mistral provider not available. Install required dependencies.")
         api_key = os.getenv("MISTRAL_API_KEY")
         base_url = os.getenv("MISTRAL_BASE_URL", "https://api.mistral.ai/v1")
         mistral_map = {
@@ -217,18 +248,31 @@ def get_llm_by_name(model_name: str):
 
     # Cerebras Models
     elif provider == "cerebras":
+        if ChatCerebras is None:
+            raise ValueError("Cerebras provider not available. Install required dependencies.")
         api_key = os.getenv("CEREBRAS_API_KEY")
         return ChatCerebras(model=model, api_key=api_key)
 
+    # DeepSeek Models
+    elif provider == "deepseek":
+        api_key = os.getenv("DEEPSEEK_API_KEY")
+        base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        # Prepend "deepseek-" if not already present
+        if not model.startswith("deepseek-"):
+            model = f"deepseek-{model}"
+        return ChatDeepSeek(model=model, api_key=api_key, base_url=base_url)
+
     # Browser Use Models
     elif provider == "bu":
+        if ChatBrowserUse is None:
+            raise ValueError("Browser Use provider not available. Install required dependencies.")
         # Handle bu_latest -> bu-latest conversion (need to prepend 'bu-' back)
         model = f"bu-{model_part.replace('_', '-')}"
         api_key = os.getenv("comate_agent_sdk_API_KEY")
         return ChatBrowserUse(model=model, api_key=api_key)
 
     else:
-        available_providers = ["openai", "azure", "google", "oci", "cerebras", "bu"]
+        available_providers = ["openai", "azure", "google", "oci", "cerebras", "deepseek", "bu"]
 
         raise ValueError(
             f"Unknown provider: '{provider}'. Available providers: {', '.join(available_providers)}"
@@ -257,6 +301,8 @@ def __getattr__(name: str) -> "BaseChatModel":
         return ChatOCIRaw  # type: ignore
     elif name == "ChatCerebras":
         return ChatCerebras  # type: ignore
+    elif name == "ChatDeepSeek":
+        return ChatDeepSeek  # type: ignore
     elif name == "ChatBrowserUse":
         return ChatBrowserUse  # type: ignore
 
@@ -274,6 +320,7 @@ __all__ = [
     "ChatGoogle",
     "ChatMistral",
     "ChatCerebras",
+    "ChatDeepSeek",
     "ChatBrowserUse",
 ]
 
@@ -330,6 +377,9 @@ __all__ += [
     "cerebras_qwen_3_235b_a22b_instruct_2507",
     "cerebras_qwen_3_235b_a22b_thinking_2507",
     "cerebras_qwen_3_coder_480b",
+    # DeepSeek instances - created on demand
+    "deepseek_chat",
+    "deepseek_reasoner",
     # Browser Use instances - created on demand
     "bu_latest",
     "bu_1_0",

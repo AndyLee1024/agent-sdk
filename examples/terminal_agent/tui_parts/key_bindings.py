@@ -261,6 +261,14 @@ class KeyBindingsMixin:
             self._diff_panel_scroll = 0
             self._invalidate()
 
+        @bindings.add("c-t", filter=normal_mode)
+        def _toggle_thinking(event) -> None:
+            del event
+            self._show_thinking = not self._show_thinking
+            status = "开启" if self._show_thinking else "关闭"
+            self._renderer.append_system_message(f"Thinking 显示已{status}")
+            self._invalidate()
+
         diff_panel_open = Condition(lambda: self._diff_panel_visible)
 
         @bindings.add("up", filter=normal_mode & diff_panel_open)

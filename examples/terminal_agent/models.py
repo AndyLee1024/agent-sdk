@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 ToolStatus = Literal["running", "success", "error"]
-HistoryEntryType = Literal["user", "assistant", "tool_call", "tool_result", "system"]
+HistoryEntryType = Literal["user", "assistant", "tool_call", "tool_result", "system", "thinking"]
 
 
 class LoadingStateType(Enum):

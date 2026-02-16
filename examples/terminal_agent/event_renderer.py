@@ -655,6 +655,7 @@ class EventRenderer:
                 pass
             case ThinkingEvent(content=thinking):
                 self._thinking_content = thinking
+                self._history.append(HistoryEntry(entry_type="thinking", text=thinking))
             case PreCompactEvent(current_tokens=_, threshold=_, trigger=_):
                 pass
             case ToolCallEvent(tool=tool_name, args=arguments, tool_call_id=tool_call_id):
