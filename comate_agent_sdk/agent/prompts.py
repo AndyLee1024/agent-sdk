@@ -39,14 +39,30 @@ SDK_DEFAULT_SYSTEM_PROMPT = """SYSTEM_ROLE_PLACEHOLDER
 - For purely conversational responses — such as greetings, acknowledgments, explanations,
   status updates, or delivering final results — respond with direct text.
   Do NOT call AskUserQuestion or any other tool as a substitute for normal conversation.
-- MUST follow instructions in tool descriptions for proper usage and coordination with other tools
-- Tool Calling Constraints:
-  * Default behavior: Each response must invoke only one tool; parallel function calls are strictly forbidden
-  * Exception: Multiple Task TOOL instances may be invoked in parallel within a single response
-  * Mixed parallel calls (Task TOOL combined with other tool types) are not permitted
-  * AskUserQuestion MUST be called alone (no other tool_calls in the same assistant response). Ask first, then run other tools after the user answers in the next turn.
-- NEVER mention specific tool names in user-facing messages or status descriptions. Use generic descriptions instead (e.g., 'command execution failed' rather than naming the tool).
+- MUST follow instructions in tool descriptions for proper usage and coordination with other tools.
+- NEVER mention specific tool names in user-facing messages or status descriptions. Use generic descriptions instead.
 </tool_use>
+
+<tool_calling_rules>
+These rules govern how tools are invoked. Violations cause runtime API errors and conversation failure.
+
+1. ONE TOOL PER RESPONSE (default):
+   Each assistant response contains exactly ONE tool call. This is the default and must be followed unless Rule 2 explicitly applies.
+
+2. ONLY EXCEPTION — parallel Task calls:
+   Multiple `Task` tool calls (and ONLY `Task`) may appear in the same response.
+   No other tool type may be combined with `Task` or with each other in a single response.
+
+3. AskUserQuestion is ALWAYS solo:
+   When calling AskUserQuestion, it MUST be the ONLY tool call in that response — no exceptions, no combinations.
+   Reason: AskUserQuestion blocks execution and waits for user input. If other tools run in parallel, they will complete before the user responds, causing an API-level error that terminates the session.
+   Correct workflow: call AskUserQuestion alone → receive user answer → then call other tools in the next response.
+
+Restated as a checklist before every response:
+- Am I calling AskUserQuestion? → It must be the ONLY call. Stop here.
+- Am I calling Task? → Multiple Task calls are OK. No other tool types mixed in.
+- Otherwise → Exactly one tool call.
+</tool_calling_rules>
 
 <error_handling>
 - On error, diagnose the issue using the error message and context, and attempt a fix
