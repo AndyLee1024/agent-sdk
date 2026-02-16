@@ -505,6 +505,12 @@ class SelectiveCompactionPolicy:
         }
 
     def _collect_recent_round_protected_ids(self, context: "ContextIR") -> set[str]:
+        """收集受保护的 item IDs（最近轮次 + thinking blocks in tool loop）。
+
+        保护两类 assistant messages：
+        1. 最近 N 轮对话（dialogue_rounds_keep_min）
+        2. 当前 tool loop 中含 thinking blocks 的 assistant messages（Anthropic 约束）
+        """
         from comate_agent_sdk.llm.messages import UserMessage
 
         items = context.conversation.items
@@ -521,8 +527,9 @@ class SelectiveCompactionPolicy:
         if round_start is not None:
             round_ranges.append((round_start, len(items) - 1))
 
+        # 即使没有轮次保护，也要保护 tool loop 中的 thinking blocks
         if not round_ranges:
-            return set()
+            return set(context._thinking_protected_assistant_ids)
 
         protected_ranges = round_ranges[-self.dialogue_rounds_keep_min:]
         protected_ids: set[str] = set()
@@ -530,6 +537,9 @@ class SelectiveCompactionPolicy:
             for item in items[start:end + 1]:
                 if item.item_type in (ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE):
                     protected_ids.add(item.id)
+
+        # 合并 thinking 保护 IDs（tool loop 中含 thinking blocks 的 assistant messages）
+        protected_ids.update(context._thinking_protected_assistant_ids)
 
         return protected_ids
 

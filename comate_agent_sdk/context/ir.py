@@ -116,6 +116,8 @@ class ContextIR:
     _todo_empty_reminder_start_turn: int = 0  # 空 todo 提醒开始的轮次
     _memory_item: ContextItem | None = field(default=None, repr=False)
     _inflight_tool_call_ids: set[str] = field(default_factory=set, repr=False)
+    _thinking_protected_assistant_ids: set[str] = field(default_factory=set, repr=False)
+    """Tool loop 中含 thinking blocks 的 assistant item IDs，compaction 时需要保护。"""
     _pending_hook_injections: list[PendingHookInjection] = field(default_factory=list, repr=False)
     _flushed_hook_injection_texts: list[str] = field(default_factory=list, repr=False)
 
@@ -598,9 +600,20 @@ class ContextIR:
             for tool_call in message.tool_calls:
                 if tool_call.id:
                     self._inflight_tool_call_ids.add(tool_call.id)
+
+            # Thinking protection: 如果包含 thinking blocks，保护这条 assistant message
+            # 根据 Anthropic 约束：tool loop 中不能删除含 thinking signature 的 assistant message
+            if self._contains_thinking_blocks(message):
+                self._thinking_protected_assistant_ids.add(item.id)
+
         elif isinstance(message, ToolMessage):
             if message.tool_call_id:
                 self._inflight_tool_call_ids.discard(message.tool_call_id)
+
+            # 当 tool barrier 完全释放时，清空 thinking 保护
+            if not self._inflight_tool_call_ids:
+                self._thinking_protected_assistant_ids.clear()
+
             self._flush_pending_hook_injections_if_unblocked()
             self._flush_pending_skill_items_if_unblocked()
 
@@ -638,11 +651,22 @@ class ContextIR:
                 False 表示丢弃 pending injections（仅清理未提交的注入，不影响已落库 messages）。
         """
         self._inflight_tool_call_ids.clear()
+        self._thinking_protected_assistant_ids.clear()
         if not flush:
             self._pending_hook_injections.clear()
             return
         self._flush_pending_hook_injections_if_unblocked()
         self._flush_pending_skill_items_if_unblocked()
+
+    @staticmethod
+    def _contains_thinking_blocks(message: AssistantMessage) -> bool:
+        """检查 AssistantMessage 是否包含 thinking blocks。"""
+        if not isinstance(message.content, list):
+            return False
+        return any(
+            getattr(part, "type", None) in ("thinking", "redacted_thinking")
+            for part in message.content
+        )
 
     def add_messages_atomic(self, messages: list[BaseMessage]) -> None:
         """原子追加多条 messages（commit 段内禁止 await，保证不被 interleave）。"""
@@ -1036,6 +1060,7 @@ class ContextIR:
         self._pending_skill_items.clear()
         self._pending_hook_injections.clear()
         self._inflight_tool_call_ids.clear()
+        self._thinking_protected_assistant_ids.clear()
         self._flushed_hook_injection_texts.clear()
         self.reminders.clear()
         self._todo_state.clear()
