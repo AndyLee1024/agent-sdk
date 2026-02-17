@@ -6,6 +6,7 @@ from comate_agent_sdk.llm.messages import (
     ContentPartTextParam,
     ContentPartThinkingParam,
 )
+from comate_agent_sdk.llm.views import ChatInvokeUsage
 
 
 @dataclass
@@ -36,6 +37,23 @@ class ChatMiniMax(ChatAnthropicLike):
         return (
             "\n".join(thinking_parts) or None,
             "\n".join(redacted_parts) or None,
+        )
+
+    def _get_usage(self, response) -> ChatInvokeUsage | None:
+        """MiniMax usage: true prompt = input + cache_read + cache_creation."""
+        u = response.usage
+        cache_read = getattr(u, "cache_read_input_tokens", None) or 0
+        cache_creation = getattr(u, "cache_creation_input_tokens", None) or 0
+        input_tokens = u.input_tokens
+        output_tokens = u.output_tokens
+        total_prompt = input_tokens + cache_read + cache_creation
+        return ChatInvokeUsage(
+            prompt_tokens=total_prompt,
+            completion_tokens=output_tokens,
+            total_tokens=total_prompt + output_tokens,
+            prompt_cached_tokens=cache_read or None,
+            prompt_cache_creation_tokens=cache_creation or None,
+            prompt_image_tokens=None,
         )
 
     @staticmethod

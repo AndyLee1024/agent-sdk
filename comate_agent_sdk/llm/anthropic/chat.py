@@ -65,7 +65,7 @@ class ChatAnthropic(BaseChatModel):
     default_query: Mapping[str, object] | None = None
     http_client: httpx.AsyncClient | None = None
     prompt_cache_beta: str | None = "prompt-caching-2024-07-31"
-    max_cached_tool_definitions: int = 3
+    max_cached_tool_definitions: int = 1
 
     # Internal client cache
     _client: AsyncAnthropic | None = field(default=None, repr=False, compare=False)
