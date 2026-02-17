@@ -325,6 +325,8 @@ class TerminalAgentTUI(
                 "input.line": "bg:default #f2f4f8",
                 "input-line": "bg:default #f2f4f8",
                 "status": "bg:#2d3138 #c3ccd8",
+                "git-diff.added": "#4ade80",
+                "git-diff.removed": "#f87171",
                 "question.tabs": "bg:#30353f #c7d2fe",
                 "question.tabs.nav": "bg:#30353f #93c5fd",
                 "question.tab": "bg:#374151 #cbd5e1",

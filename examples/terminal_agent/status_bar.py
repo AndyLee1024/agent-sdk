@@ -1,15 +1,26 @@
 from __future__ import annotations
 
+import logging
 import subprocess
+import time
+from typing import NamedTuple
 
 from prompt_toolkit.application.current import get_app_or_none
 
 from comate_agent_sdk.agent import ChatSession
 
+logger = logging.getLogger(__name__)
+
+
+class GitDiffStats(NamedTuple):
+    added: int
+    removed: int
+
 
 class StatusBar:
     _DEFAULT_TERMINAL_WIDTH: int = 100
     _MIN_TERMINAL_WIDTH: int = 40
+    _GIT_DIFF_CACHE_SECONDS: float = 5.0
 
     def __init__(self, session: ChatSession):
         self._session = session
@@ -17,6 +28,8 @@ class StatusBar:
         self._git_branch: str = self._resolve_git_branch()
         self._context_used_pct: float = 0.0
         self._context_left_pct: float = 100.0
+        self._git_diff_stats: GitDiffStats | None = None
+        self._git_diff_cache_time: float = 0.0
 
     @staticmethod
     def _resolve_model_name(session: ChatSession) -> str:
@@ -47,6 +60,54 @@ class StatusBar:
         branch = completed.stdout.strip()
         return branch or "N/A"
 
+    @staticmethod
+    def _resolve_git_diff_stats() -> GitDiffStats | None:
+        try:
+            completed = subprocess.run(
+                ["git", "diff", "--shortstat", "--no-color"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except Exception:
+            return None
+
+        if completed.returncode != 0:
+            return None
+
+        output = completed.stdout.strip()
+        if not output:
+            return None
+
+        # Parse output like "3 files changed, 12 insertions(+), 5 deletions(-)"
+        # or just "12 insertions(+), 5 deletions(-)"
+        added, removed = 0, 0
+        for part in output.split(","):
+            part = part.strip()
+            if "+" in part and "insertion" in part:
+                # e.g., "12 insertions(+)"
+                num_str = part.split()[0]
+                added = int(num_str)
+            elif "-" in part and "deletion" in part:
+                # e.g., "5 deletions(-)"
+                num_str = part.split()[0]
+                removed = int(num_str)
+
+        return GitDiffStats(added=added, removed=removed)
+
+    def _ensure_git_diff_stats(self) -> None:
+        now = time.monotonic()
+        if (
+            self._git_diff_stats is not None
+            and now - self._git_diff_cache_time < self._GIT_DIFF_CACHE_SECONDS
+        ):
+            return
+        self._git_diff_stats = self._resolve_git_diff_stats()
+        self._git_diff_cache_time = now
+        logger.debug(
+            f"Git diff stats refreshed: {self._git_diff_stats}"
+        )
+
     async def refresh(self) -> None:
         try:
             ctx_info = await self._session.get_context_info()
@@ -57,6 +118,9 @@ class StatusBar:
         normalized = max(0.0, min(utilization, 100.0))
         self._context_used_pct = normalized
         self._context_left_pct = max(0.0, 100.0 - normalized)
+
+        # Refresh git diff stats to keep them up-to-date
+        self._ensure_git_diff_stats()
 
     @classmethod
     def _resolve_terminal_width(cls) -> int:
@@ -111,16 +175,49 @@ class StatusBar:
         content_budget = max(16, width - 2)
         return self._status_text_for_width(content_budget)
 
+    def _git_diff_fragments(self) -> list[tuple[str, str]]:
+        self._ensure_git_diff_stats()
+        if self._git_diff_stats is None or (
+            self._git_diff_stats.added == 0 and self._git_diff_stats.removed == 0
+        ):
+            return []
+
+        parts: list[tuple[str, str]] = []
+        if self._git_diff_stats.added > 0:
+            parts.append(("class:git-diff.added", f"+{self._git_diff_stats.added}"))
+        if self._git_diff_stats.removed > 0:
+            parts.append(("class:git-diff.removed", f"-{self._git_diff_stats.removed}"))
+        return parts
+
+    def git_diff_fragments(self) -> list[tuple[str, str]]:
+        """Prompt-toolkit fragments for git diff stats.
+
+        Working tree only (unstaged): `git diff --shortstat`.
+        """
+        return self._git_diff_fragments()
+
     def footer_toolbar(self) -> list[tuple[str, str]]:
         width = self._resolve_terminal_width()
         status_text = self.footer_status_text()
-        left_padding = max(0, width - len(status_text) - 1)
-        return [
-        
+        git_fragments = self._git_diff_fragments()
+
+        # Calculate total length: status_text + git diff parts
+        git_len = sum(len(text) + 1 for _, text in git_fragments)  # +1 for space
+        left_padding = max(0, width - len(status_text) - git_len - 1)
+
+        fragments: list[tuple[str, str]] = [
             ("", " " * left_padding),
             ("", status_text),
-            ("", " "),
         ]
+
+        # Add git diff stats with colors
+        if git_fragments:
+            fragments.append(("", " "))  # Separator
+            for class_name, text in git_fragments:
+                fragments.append((class_name, text))
+
+        fragments.append(("", " "))
+        return fragments
 
     def helper_toolbar(self) -> list[tuple[str, str]]:
         return []

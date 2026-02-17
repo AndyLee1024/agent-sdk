@@ -6,6 +6,7 @@ from prompt_toolkit.utils import get_cwidth
 from rich.console import Console
 
 from terminal_agent.animations import PULSE_COLORS, PULSE_GLYPHS, _cyan_sweep_text
+from terminal_agent.fragment_utils import clip_fragments
 from terminal_agent.text_effects import fit_single_line
 
 console = Console()
@@ -28,8 +29,18 @@ class RenderPanelsMixin:
             mode = "running"
         elif self._waiting_for_input:
             mode = "waiting_input"
-        merged = f"[{mode}] {base}"
-        return [("class:status", fit_single_line(merged, width - 1))]
+
+        fragments: list[tuple[str, str]] = [
+            ("class:status", f"[{mode}] {base}"),
+        ]
+        git_fragments = self._status_bar.git_diff_fragments()
+        if git_fragments:
+            fragments.append(("class:status", " "))
+            fragments.extend(git_fragments)
+
+        full_text = "".join(text for _, text in fragments)
+        clipped_text = fit_single_line(full_text, width - 1)
+        return clip_fragments(fragments, len(clipped_text))
 
     def _loading_text(self) -> list[tuple[str, str]]:
         # Running tools: multi-line tool panel with breathing dot.
