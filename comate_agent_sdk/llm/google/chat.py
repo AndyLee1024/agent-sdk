@@ -18,6 +18,7 @@ from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from comate_agent_sdk.llm.exceptions import ModelProviderError
 from comate_agent_sdk.llm.google.serializer import GoogleMessageSerializer
 from comate_agent_sdk.llm.messages import BaseMessage, Function, ToolCall
+from comate_agent_sdk.llm.thinking_presets import get_thinking_preset
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 
 VerifiedGeminiModels = Literal[
@@ -72,9 +73,6 @@ class ChatGoogle(BaseChatModel):
     temperature: float | None = 0.5
     top_p: float | None = None
     seed: int | None = None
-    thinking_budget: int | None = (
-        None  # for gemini-2.5 flash and flash-lite models, default will be set to 0
-    )
     max_output_tokens: int | None = 16384
     config: types.GenerateContentConfigDict | None = None
     include_system_in_user: bool = False
@@ -407,15 +405,11 @@ class ChatGoogle(BaseChatModel):
         if self.seed is not None:
             config["seed"] = self.seed
 
-        # set default for flash, flash-lite, gemini-flash-lite-latest, and gemini-flash-latest models
-        if self.thinking_budget is None and (
-            "gemini-2.5-flash" in self.model or "gemini-flash" in self.model
-        ):
-            self.thinking_budget = 0
-
-        if self.thinking_budget is not None:
+        # Apply model-level thinking preset
+        preset = get_thinking_preset(str(self.model))
+        if preset.budget_tokens is not None:
             thinking_config_dict: types.ThinkingConfigDict = {
-                "thinking_budget": self.thinking_budget
+                "thinking_budget": preset.budget_tokens
             }
             config["thinking_config"] = thinking_config_dict
 
@@ -647,11 +641,3 @@ class ChatGoogle(BaseChatModel):
 
         return clean_schema(schema)
 
-    def set_thinking_budget(self, budget: int | None) -> None:
-        """Set thinking token budget.
-
-        Args:
-            budget: Token budget for thinking, or None to disable.
-        """
-        self.logger.info(f"Google thinking_budget set to {budget}")
-        self.thinking_budget = budget

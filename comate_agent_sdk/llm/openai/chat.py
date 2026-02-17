@@ -18,6 +18,7 @@ from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from comate_agent_sdk.llm.exceptions import ModelProviderError, ModelRateLimitError
 from comate_agent_sdk.llm.messages import BaseMessage, Function, ToolCall
 from comate_agent_sdk.llm.openai.serializer import OpenAIMessageSerializer
+from comate_agent_sdk.llm.thinking_presets import get_thinking_preset
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
 
 
@@ -365,11 +366,17 @@ class ChatOpenAI(BaseChatModel):
             if extra_body:
                 model_params["extra_body"] = extra_body
 
-            # Handle reasoning models (o1, o3, etc.)
-            if self.reasoning_models and any(
-                str(m).lower() in str(self.model).lower() for m in self.reasoning_models
-            ):
-                model_params["reasoning_effort"] = self.reasoning_effort
+            # Handle reasoning models via preset (o1, o3, o4-mini, etc.)
+            preset = get_thinking_preset(str(self.model))
+            _is_reasoning = preset.supports_thinking and preset.effort is not None
+            if not _is_reasoning and self.reasoning_models:
+                # Fallback: check legacy reasoning_models list
+                _is_reasoning = any(
+                    str(m).lower() in str(self.model).lower() for m in self.reasoning_models
+                )
+            if _is_reasoning:
+                effort = preset.effort if preset.effort is not None else self.reasoning_effort
+                model_params["reasoning_effort"] = effort
                 model_params.pop("temperature", None)
                 model_params.pop("frequency_penalty", None)
 
@@ -429,22 +436,3 @@ class ChatOpenAI(BaseChatModel):
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
 
-    def set_thinking_budget(self, budget: int | None) -> None:
-        """Set thinking budget by converting to reasoning effort level.
-
-        Uses conservative mapping to avoid over-speculation:
-        - None: "low" (minimal reasoning, default)
-        - > 0: "medium" (enable reasoning)
-
-        Note: OpenAI's reasoning_effort is a qualitative level, not a precise
-        token budget. This mapping provides a simple on/off switch.
-
-        Args:
-            budget: Token budget (None to disable reasoning, >0 to enable).
-        """
-        if budget is None:
-            self.reasoning_effort = "low"
-            logger.info("OpenAI reasoning_effort set to 'low' (budget=None)")
-        else:
-            self.reasoning_effort = "medium"
-            logger.info(f"OpenAI reasoning_effort set to 'medium' (budget={budget})")

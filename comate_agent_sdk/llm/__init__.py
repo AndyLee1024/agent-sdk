@@ -52,6 +52,7 @@ if TYPE_CHECKING:
     from comate_agent_sdk.llm.google.chat import ChatGoogle
     from comate_agent_sdk.llm.groq.chat import ChatGroq
     from comate_agent_sdk.llm.comate_agent_sdk.chat import ChatBrowserUse
+    from comate_agent_sdk.llm.minimax.chat import ChatMiniMax
     from comate_agent_sdk.llm.mistral.chat import ChatMistral
     from comate_agent_sdk.llm.oci_raw.chat import ChatOCIRaw
     from comate_agent_sdk.llm.ollama.chat import ChatOllama
@@ -108,6 +109,7 @@ _LAZY_IMPORTS = {
     "ChatDeepSeek": ("comate_agent_sdk.llm.deepseek.chat", "ChatDeepSeek"),
     "ChatGoogle": ("comate_agent_sdk.llm.google.chat", "ChatGoogle"),
     "ChatGroq": ("comate_agent_sdk.llm.groq.chat", "ChatGroq"),
+    "ChatMiniMax": ("comate_agent_sdk.llm.minimax.chat", "ChatMiniMax"),
     "ChatMistral": ("comate_agent_sdk.llm.mistral.chat", "ChatMistral"),
     "ChatOCIRaw": ("comate_agent_sdk.llm.oci_raw.chat", "ChatOCIRaw"),
     "ChatOllama": ("comate_agent_sdk.llm.ollama.chat", "ChatOllama"),
@@ -181,6 +183,7 @@ __all__ = [
     "ChatGoogle",
     "ChatAnthropic",
     "ChatAnthropicBedrock",
+    "ChatMiniMax",
     "ChatAWSBedrock",
     "ChatGroq",
     "ChatMistral",

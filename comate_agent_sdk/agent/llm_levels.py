@@ -21,6 +21,7 @@ _PROVIDER_ENV_VARS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GOOGLE_API_KEY",
     "deepseek": "DEEPSEEK_API_KEY",
+    "minimax": "MINIMAX_API_KEY",
 }
 
 
@@ -106,9 +107,14 @@ def _build_model(
         from comate_agent_sdk.llm.deepseek.chat import ChatDeepSeek
 
         return ChatDeepSeek(model=model, base_url=base_url, api_key=effective_api_key)
+    if provider == "minimax":
+        from comate_agent_sdk.llm.minimax.chat import ChatMiniMax
+
+        resolved_url = base_url or os.getenv("MINIMAX_BASE_URL", "https://api.minimaxi.com/anthropic")
+        return ChatMiniMax(model=model, base_url=resolved_url, api_key=effective_api_key)
 
     raise ValueError(
-        f"不支持的 provider：{provider}（level={level}）。当前支持：openai/anthropic/google/deepseek"
+        f"不支持的 provider：{provider}（level={level}）。当前支持：openai/anthropic/google/deepseek/minimax"
     )
 
 

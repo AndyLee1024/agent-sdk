@@ -30,6 +30,7 @@ from httpx import Timeout
 from comate_agent_sdk.llm.anthropic.serializer import AnthropicMessageSerializer
 from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from comate_agent_sdk.llm.exceptions import ModelProviderError, ModelRateLimitError
+from comate_agent_sdk.llm.thinking_presets import get_thinking_preset, resolve_api_model_name
 from comate_agent_sdk.llm.messages import (
     BaseMessage,
     ContentPartRedactedThinkingParam,
@@ -53,8 +54,6 @@ class ChatAnthropic(BaseChatModel):
     temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None
-    thinking_budget_tokens: int | None = None
-    """Token budget for extended thinking. None = disabled."""
 
     # Client initialization parameters
     api_key: str | None = None
@@ -127,10 +126,11 @@ class ChatAnthropic(BaseChatModel):
             client_params["seed"] = self.seed
 
         # Extended thinking: enable and drop temperature (not allowed with thinking)
-        if self.thinking_budget_tokens is not None:
+        preset = get_thinking_preset(str(self.model))
+        if preset.supports_thinking and preset.budget_tokens is not None:
             client_params["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": self.thinking_budget_tokens,
+                "budget_tokens": preset.budget_tokens,
             }
             client_params.pop("temperature", None)
 
@@ -183,11 +183,12 @@ class ChatAnthropic(BaseChatModel):
         if self._client is not None:
             return self._client
 
+        async_http_client = httpx.AsyncClient(verify=False)
         # Enable Langfuse instrumentation if configured
         self._ensure_langfuse_instrumentation()
 
         client_params = self._get_client_params()
-        self._client = AsyncAnthropic(**client_params)
+        self._client = AsyncAnthropic(**client_params, http_client=async_http_client)
         return self._client
 
     @property
@@ -395,8 +396,13 @@ class ChatAnthropic(BaseChatModel):
             AnthropicMessageSerializer.serialize_messages(messages)
         )
 
-        # Strip historical thinking blocks when thinking is disabled
-        if self.thinking_budget_tokens is None:
+        # Strip or preserve historical thinking blocks based on model preset
+        preset = get_thinking_preset(str(self.model))
+        should_strip = (
+            preset.history_policy == "strip"
+            or (preset.history_policy == "auto" and not preset.supports_thinking)
+        )
+        if should_strip:
             self._strip_thinking_blocks(anthropic_messages)
 
         try:
@@ -411,7 +417,7 @@ class ChatAnthropic(BaseChatModel):
                     invoke_params["tool_choice"] = anthropic_tool_choice
 
             response = await self.get_client().messages.create(
-                model=self.model,
+                model=resolve_api_model_name(str(self.model)),
                 messages=anthropic_messages,
                 system=system_prompt or omit,
                 **invoke_params,
@@ -461,11 +467,3 @@ class ChatAnthropic(BaseChatModel):
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
 
-    def set_thinking_budget(self, budget: int | None) -> None:
-        """Set thinking token budget.
-
-        Args:
-            budget: Token budget for extended thinking, or None to disable.
-        """
-        logger.info(f"Anthropic thinking_budget_tokens set to {budget}")
-        self.thinking_budget_tokens = budget

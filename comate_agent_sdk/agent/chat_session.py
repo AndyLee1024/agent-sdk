@@ -257,31 +257,6 @@ class ChatSession:
         logger.info(f"Session {self.session_id}: {event}")
         return event
 
-    def set_thinking_budget(self, budget_tokens: int | None) -> None:
-        """Enable or disable extended thinking on the current LLM.
-
-        Supports Anthropic, Google, and OpenAI providers. Each provider
-        interprets the budget parameter differently:
-        - Anthropic: Direct token budget for thinking
-        - Google: Direct token budget for thinking
-        - OpenAI: Converted to reasoning effort (None="low", >0="medium")
-
-        Args:
-            budget_tokens: Token budget for thinking, or None to disable.
-
-        Raises:
-            ChatSessionClosedError: If session is closed.
-            TypeError: If the current LLM does not support thinking.
-        """
-        if self._closed:
-            raise ChatSessionClosedError("Cannot set thinking on a closed session")
-
-        llm = self._agent.llm
-        if not hasattr(llm, "set_thinking_budget"):
-            raise TypeError(f"LLM {type(llm).__name__} does not support thinking")
-
-        llm.set_thinking_budget(budget_tokens)
-
     async def send(self, message: ChatMessage) -> None:
         if self._closed:
             raise ChatSessionClosedError("ChatSession is closed")
