@@ -76,13 +76,16 @@ def _resolve_session(agent: Agent, session_id: str | None) -> tuple[ChatSession,
 
 async def _preload_mcp(session: ChatSession, con: Console) -> None:
     """Pre-load MCP tools and print connection status under the logo."""
-    from terminal_agent.startup import print_error, print_success, print_warning
+    from terminal_agent.startup import mcp_connecting_animation, print_error, print_success, print_warning
 
-    try:
-        await session._agent.ensure_mcp_tools_loaded()
-    except Exception as e:
-        print_error(con, f"MCP initialization failed: {e}")
-        return
+    server_names = list(session._agent.mcp_servers.keys()) if session._agent.mcp_servers else []
+
+    async with mcp_connecting_animation(con, server_names):
+        try:
+            await session._agent.ensure_mcp_tools_loaded()
+        except Exception as e:
+            print_error(con, f"MCP initialization failed: {e}")
+            return
 
     mgr = session._agent._mcp_manager
     if mgr is None:
