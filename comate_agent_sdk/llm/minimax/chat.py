@@ -7,6 +7,9 @@ from comate_agent_sdk.llm.messages import (
     ContentPartThinkingParam,
 )
 from comate_agent_sdk.llm.views import ChatInvokeUsage
+from comate_agent_sdk.tokens.custom_pricing import (
+    resolve_max_input_tokens_from_custom_pricing,
+)
 
 
 @dataclass
@@ -23,6 +26,10 @@ class ChatMiniMax(ChatAnthropicLike):
     @property
     def provider(self) -> str:
         return "minimax"
+
+    def get_context_window(self) -> int | None:
+        """Resolve MiniMax context window from custom pricing data."""
+        return resolve_max_input_tokens_from_custom_pricing(str(self.model))
 
     def _extract_thinking(self, response):
         """MiniMax thinking blocks have no ``signature``, so isinstance(ThinkingBlock) fails.

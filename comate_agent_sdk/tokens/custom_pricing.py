@@ -100,3 +100,66 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
         "output_cost_per_token": 2e-06,
     }
 }
+
+
+def resolve_max_input_tokens_from_custom_pricing(model_name: str) -> int | None:
+    """Resolve max_input_tokens from custom pricing by model name.
+
+    Lookup strategy:
+    1. Exact key match
+    2. Case-insensitive exact match
+    3. Strip provider prefix and retry (e.g. "vendor/model" -> "model")
+    4. Add common provider prefixes and retry (e.g. "model" -> "anthropic/model")
+    """
+    model = (model_name or "").strip()
+    if not model:
+        return None
+
+    def _get_max_input_tokens(key: str) -> int | None:
+        pricing = CUSTOM_MODEL_PRICING.get(key)
+        if pricing is None:
+            return None
+        value = pricing.get("max_input_tokens")
+        if value is None:
+            return None
+        try:
+            tokens = int(value)
+        except (TypeError, ValueError):
+            return None
+        return tokens if tokens > 0 else None
+
+    direct = _get_max_input_tokens(model)
+    if direct is not None:
+        return direct
+
+    lower_lookup = {k.lower(): k for k in CUSTOM_MODEL_PRICING}
+    lower_key = lower_lookup.get(model.lower())
+    if lower_key is not None:
+        return _get_max_input_tokens(lower_key)
+
+    candidates: list[str] = []
+    if "/" in model:
+        _, bare = model.split("/", 1)
+        if bare:
+            candidates.append(bare)
+    else:
+        candidates.extend(
+            [
+                f"anthropic/{model}",
+                f"minimax/{model}",
+                f"MiniMaxAI/{model}",
+            ]
+        )
+
+    for candidate in candidates:
+        resolved = _get_max_input_tokens(candidate)
+        if resolved is not None:
+            return resolved
+
+        lower_candidate_key = lower_lookup.get(candidate.lower())
+        if lower_candidate_key is not None:
+            resolved = _get_max_input_tokens(lower_candidate_key)
+            if resolved is not None:
+                return resolved
+
+    return None

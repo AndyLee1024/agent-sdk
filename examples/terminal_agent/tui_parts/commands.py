@@ -64,8 +64,19 @@ class CommandsMixin:
     async def _slash_usage(self, _args: str) -> None:
         await self._append_usage_snapshot()
 
-    async def _slash_context(self, _args: str) -> None:
-        await self._append_context_snapshot()
+    async def _slash_context(self, args: str) -> None:
+        normalized = args.strip()
+        show_details = False
+        if normalized:
+            if normalized in {"--details", "-d"}:
+                show_details = True
+            else:
+                self._renderer.append_system_message(
+                    "Usage: /context [--details]",
+                    is_error=True,
+                )
+                return
+        await self._append_context_snapshot(show_details=show_details)
 
     def _slash_exit(self, _args: str) -> None:
         self._exit_app()
@@ -222,20 +233,84 @@ class CommandsMixin:
             )
         self._renderer.append_system_message("\n".join(lines))
 
-    async def _append_context_snapshot(self) -> None:
+    async def _append_context_snapshot(self, *, show_details: bool = False) -> None:
         info = await self._session.get_context_info()
-        utilization = float(getattr(info, "utilization_percent", 0.0))
-        context_limit = getattr(info, "context_limit_tokens", None)
-        used_tokens = getattr(info, "used_tokens", None)
+        context_limit = int(getattr(info, "context_limit", 0) or 0)
+        next_step_estimated_tokens = int(getattr(info, "next_step_estimated_tokens", 0) or 0)
+        last_step_reported_tokens = int(getattr(info, "last_step_reported_tokens", 0) or 0)
+        ir_used_tokens = int(getattr(info, "used_tokens", 0) or 0)
 
-        lines = [
-            "Context Usage",
-            f"- utilization: {utilization:.1f}%",
-            f"- left: {max(0.0, 100.0 - utilization):.1f}%",
-        ]
-        if used_tokens is not None:
-            lines.append(f"- used_tokens: {used_tokens}")
-        if context_limit is not None:
-            lines.append(f"- context_limit_tokens: {context_limit}")
+        headroom_left_percent = 0.0
+        next_step_used_percent = 0.0
+        actual_used_percent = 0.0
+        if context_limit > 0:
+            next_step_used_percent = max(
+                0.0,
+                min((next_step_estimated_tokens / context_limit) * 100.0, 100.0),
+            )
+            headroom_left_percent = max(0.0, 100.0 - next_step_used_percent)
+            if last_step_reported_tokens > 0:
+                actual_used_percent = max(
+                    0.0,
+                    min((last_step_reported_tokens / context_limit) * 100.0, 100.0),
+                )
+
+        lines = ["Context Usage"]
+        lines.append(
+            f"- Headroom (est): {headroom_left_percent:.1f}% left "
+            f"(est={next_step_estimated_tokens:,}, limit={context_limit:,}; includes buffer)"
+        )
+        if last_step_reported_tokens > 0:
+            lines.append(
+                f"- Last call (actual): {actual_used_percent:.1f}% used "
+                f"(actual={last_step_reported_tokens:,})"
+            )
+        else:
+            lines.append("- Last call (actual): unavailable")
+
+        if show_details:
+            lines.append("Context Details")
+            lines.append(f"- next_step_estimated_tokens: {next_step_estimated_tokens:,}")
+            lines.append(f"- last_step_reported_tokens: {last_step_reported_tokens:,}")
+            lines.append(f"- ir_used_tokens: {ir_used_tokens:,}")
+            lines.append(f"- delta_ir_vs_actual: {ir_used_tokens - last_step_reported_tokens:+,}")
+            lines.extend(self._build_last_usage_breakdown_lines())
 
         self._renderer.append_system_message("\n".join(lines))
+
+    def _build_last_usage_breakdown_lines(self) -> list[str]:
+        """Build I/R/W/O breakdown lines from the latest usage entry."""
+        token_cost = getattr(getattr(self._session, "_agent", None), "_token_cost", None)
+        usage_history = getattr(token_cost, "usage_history", None)
+        if not usage_history:
+            return ["- breakdown(last call): unavailable"]
+
+        latest = usage_history[-1]
+        usage = getattr(latest, "usage", None)
+        if usage is None:
+            return ["- breakdown(last call): unavailable"]
+
+        output_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+        cache_read_tokens = int(getattr(usage, "prompt_cached_tokens", 0) or 0)
+        cache_creation_tokens = int(getattr(usage, "prompt_cache_creation_tokens", 0) or 0)
+        prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+        input_tokens = max(prompt_tokens - cache_read_tokens - cache_creation_tokens, 0)
+
+        lines = [
+            (
+                "- breakdown(last call): "
+                f"I={input_tokens:,} (derived), "
+                f"R={cache_read_tokens:,}, "
+                f"W={cache_creation_tokens:,}, "
+                f"O={output_tokens:,}"
+            )
+        ]
+
+        prefix_total = cache_read_tokens + cache_creation_tokens
+        if prefix_total > 0:
+            cache_hit_ratio = (cache_read_tokens / prefix_total) * 100.0
+            lines.append(f"- cache_hit_prefix: {cache_hit_ratio:.1f}% (R / (R + W))")
+        else:
+            lines.append("- cache_hit_prefix: n/a")
+
+        return lines

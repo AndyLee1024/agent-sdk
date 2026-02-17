@@ -25,6 +25,9 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
     UserMessage,
 )
+from comate_agent_sdk.tokens.custom_pricing import (
+    resolve_max_input_tokens_from_custom_pricing,
+)
 
 if TYPE_CHECKING:
     from comate_agent_sdk.llm.base import BaseChatModel
@@ -75,15 +78,63 @@ class CompactionService:
         """
         self._last_usage = TokenUsage.from_usage(usage)
 
-    async def get_model_context_limit(self, model: str) -> int:
+    def _resolve_context_limit_from_provider(
+        self,
+        *,
+        model: str,
+        llm: BaseChatModel | None,
+    ) -> int | None:
+        if llm is None:
+            return None
+
+        getter = getattr(llm, "get_context_window", None)
+        if not callable(getter):
+            return None
+
+        try:
+            resolved = getter()
+        except Exception as e:
+            log.debug(f"Failed to get provider context window for {model}: {e}")
+            return None
+
+        if resolved is None:
+            return None
+
+        try:
+            context_limit = int(resolved)
+        except (TypeError, ValueError):
+            return None
+
+        return context_limit if context_limit > 0 else None
+
+    async def get_model_context_limit(
+        self,
+        model: str,
+        *,
+        llm: BaseChatModel | None = None,
+    ) -> int:
         """Get the context window limit for a model."""
         # Check cache first
         if model in self._context_limit_cache:
             return self._context_limit_cache[model]
 
         context_limit = DEFAULT_CONTEXT_WINDOW
+        provider_limit = self._resolve_context_limit_from_provider(model=model, llm=llm)
+        if provider_limit is None:
+            provider_limit = self._resolve_context_limit_from_provider(
+                model=model,
+                llm=self.llm,
+            )
+        if provider_limit is not None:
+            context_limit = provider_limit
 
-        if self.token_cost is not None:
+        custom_pricing_limit = None
+        if provider_limit is None:
+            custom_pricing_limit = resolve_max_input_tokens_from_custom_pricing(model)
+            if custom_pricing_limit is not None:
+                context_limit = custom_pricing_limit
+
+        if provider_limit is None and custom_pricing_limit is None and self.token_cost is not None:
             try:
                 pricing = await self.token_cost.get_model_pricing(model)
                 if pricing:
@@ -100,13 +151,18 @@ class CompactionService:
         log.debug(f"Model {model} context limit: {context_limit}")
         return context_limit
 
-    async def get_threshold_for_model(self, model: str) -> int:
+    async def get_threshold_for_model(
+        self,
+        model: str,
+        *,
+        llm: BaseChatModel | None = None,
+    ) -> int:
         """Get the compaction threshold for a specific model."""
         # Check cache first
         if model in self._threshold_cache:
             return self._threshold_cache[model]
 
-        context_limit = await self.get_model_context_limit(model)
+        context_limit = await self.get_model_context_limit(model, llm=llm)
         threshold = int(context_limit * self.config.threshold_ratio)
 
         # Cache the result
@@ -116,7 +172,12 @@ class CompactionService:
         )
         return threshold
 
-    async def should_compact(self, model: str) -> bool:
+    async def should_compact(
+        self,
+        model: str,
+        *,
+        llm: BaseChatModel | None = None,
+    ) -> bool:
         """Check if compaction should be triggered based on current token usage.
 
         Returns:
@@ -125,7 +186,7 @@ class CompactionService:
         if not self.config.enabled:
             return False
 
-        threshold = await self.get_threshold_for_model(model)
+        threshold = await self.get_threshold_for_model(model, llm=llm)
         should = self._last_usage.total_tokens >= threshold
 
         if should:
@@ -168,7 +229,7 @@ class CompactionService:
             )
 
         original_tokens = self._last_usage.total_tokens
-        threshold = await self.get_threshold_for_model(model.model)
+        threshold = await self.get_threshold_for_model(model.model, llm=model)
 
         log.info(
             f"Token usage {original_tokens} has exceeded the threshold of "
@@ -274,7 +335,7 @@ class CompactionService:
         if model is None:
             return messages, CompactionResult(compacted=False)
 
-        if not await self.should_compact(model.model):
+        if not await self.should_compact(model.model, llm=model):
             return messages, CompactionResult(compacted=False)
 
         result = await self.compact(messages, llm)

@@ -152,11 +152,25 @@ async def check_and_compact(
     agent._compaction_service.update_usage(response.usage)
 
     # 检查是否需要压缩
-    if not await agent._compaction_service.should_compact(agent.llm.model):
+    try:
+        should_compact = await agent._compaction_service.should_compact(
+            agent.llm.model,
+            llm=agent.llm,
+        )
+    except TypeError:
+        should_compact = await agent._compaction_service.should_compact(agent.llm.model)
+
+    if not should_compact:
         return False, None, []
 
     # 获取压缩阈值
-    threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
+    try:
+        threshold = await agent._compaction_service.get_threshold_for_model(
+            agent.llm.model,
+            llm=agent.llm,
+        )
+    except TypeError:
+        threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
 
     from comate_agent_sdk.agent.events import PreCompactEvent
 
@@ -260,7 +274,13 @@ async def precheck_and_compact(
         buffered_tokens = int(estimated_tokens * (1.0 + buffer_ratio))
 
     # 获取压缩阈值
-    threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
+    try:
+        threshold = await agent._compaction_service.get_threshold_for_model(
+            agent.llm.model,
+            llm=agent.llm,
+        )
+    except TypeError:
+        threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
 
     # 如果估算值（含缓冲）未超阈值,无需压缩
     if buffered_tokens < threshold:

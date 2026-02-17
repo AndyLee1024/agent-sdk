@@ -40,6 +40,9 @@ from comate_agent_sdk.llm.messages import (
     ToolCall,
 )
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
+from comate_agent_sdk.tokens.custom_pricing import (
+    resolve_max_input_tokens_from_custom_pricing,
+)
 
 
 @dataclass
@@ -195,19 +198,35 @@ class ChatAnthropic(BaseChatModel):
     def name(self) -> str:
         return str(self.model)
 
-    def _get_usage(self, response: Message) -> ChatInvokeUsage | None:
+    def get_context_window(self) -> int | None:
+        """Resolve context window from custom pricing data when available."""
+        return resolve_max_input_tokens_from_custom_pricing(str(self.model))
+
+    def get_usage(self, response: Message) -> ChatInvokeUsage | None:
+        """Map Anthropic usage into SDK usage fields.
+
+        Anthropic prompt usage is composed of:
+        - input_tokens (non-cached suffix)
+        - cache_read_input_tokens (cached prefix read)
+        - cache_creation_input_tokens (cached prefix write)
+        """
+        cache_read = response.usage.cache_read_input_tokens or 0
+        cache_creation = response.usage.cache_creation_input_tokens or 0
+        prompt_tokens = response.usage.input_tokens + cache_read + cache_creation
+        total_tokens = prompt_tokens + response.usage.output_tokens
         usage = ChatInvokeUsage(
-            prompt_tokens=response.usage.input_tokens
-            + (
-                response.usage.cache_read_input_tokens or 0
-            ),  # Total tokens in Anthropic are a bit fucked, you have to add cached tokens to the prompt tokens
+            prompt_tokens=prompt_tokens,
             completion_tokens=response.usage.output_tokens,
-            total_tokens=response.usage.input_tokens + response.usage.output_tokens,
+            total_tokens=total_tokens,
             prompt_cached_tokens=response.usage.cache_read_input_tokens,
             prompt_cache_creation_tokens=response.usage.cache_creation_input_tokens,
             prompt_image_tokens=None,
         )
         return usage
+
+    def _get_usage(self, response: Message) -> ChatInvokeUsage | None:
+        """Backward-compatible wrapper for existing call sites."""
+        return self.get_usage(response)
 
     def _serialize_tools(self, tools: list[ToolDefinition]) -> list[ToolParam]:
         """Convert ToolDefinitions to Anthropic's tool format.
@@ -466,4 +485,3 @@ class ChatAnthropic(BaseChatModel):
             ) from e
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
-
