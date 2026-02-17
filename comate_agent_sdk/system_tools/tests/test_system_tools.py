@@ -171,7 +171,11 @@ class TestSystemTools(unittest.TestCase):
                 )
                 self.assertTrue(out["ok"])
                 self.assertEqual(out["data"]["total_matches"], 1)
-                m = out["data"]["matches"][0]
+                # P1-3: Adapt to new grouped format
+                matches_by_file = out["data"]["matches_by_file"]
+                self.assertEqual(len(matches_by_file), 1)
+                file_data = list(matches_by_file.values())[0]
+                m = file_data["matches"][0]
                 self.assertIsNone(m["line_number"])
                 self.assertEqual(m["after_context"], ["b"])
 
@@ -352,7 +356,9 @@ class TestSystemTools(unittest.TestCase):
             idx_path = session_root / "read_index.json"
             self.assertTrue(idx_path.exists())
             payload = json.loads(idx_path.read_text(encoding="utf-8"))
-            self.assertEqual(payload.get("schema_version"), 1)
+            # P1-6: Upgraded to schema v2 (includes file_versions)
+            self.assertEqual(payload.get("schema_version"), 2)
+            self.assertIn("file_versions", payload)
             self.assertIn(str(p.resolve()), payload.get("files", []))
 
     def test_grep_content_marks_lower_bound_when_truncated(self) -> None:
@@ -581,6 +587,63 @@ class TestSystemTools(unittest.TestCase):
                             token_cost.usage_history[0].source,
                             "subagent:researcher:tc_42:webfetch",
                         )
+
+    def test_read_long_line_early_return_includes_file_bytes(self) -> None:
+        """P0-1: Verify that file_bytes is defined in early return path for super-long lines."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "huge_line.txt"
+            # Create a line that exceeds _READ_HARD_LINE_LIMIT (50KB)
+            p.write_text("x" * 60_000, encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root):
+                out = self._run(Read, file_path=str(p))
+                self.assertTrue(out["ok"])
+                # Verify file_bytes is present in both data.meta and top-level meta
+                self.assertIn("file_bytes", out["data"]["meta"])
+                self.assertIn("file_bytes", out["meta"])
+                self.assertGreater(out["data"]["meta"]["file_bytes"], 0)
+                # Verify early return triggered (lines_returned should be 0)
+                self.assertEqual(out["data"]["lines_returned"], 0)
+
+    def test_edit_detects_external_modification(self) -> None:
+        """P1-6: Verify that Edit detects external file modifications and returns CONFLICT."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            p = root / "foo.py"
+            p.write_text("original_content\n", encoding="utf-8")
+
+            with bind_system_tool_context(project_root=root, session_root=root / "sessions" / "s1"):
+                # Step 1: Read the file (records version)
+                out1 = self._run(Read, file_path=str(p))
+                self.assertTrue(out1["ok"])
+
+                # Step 2: External modification (simulating git pull / other editor)
+                p.write_text("externally_modified_content\n", encoding="utf-8")
+
+                # Step 3: Try to Edit (should detect conflict)
+                out2 = self._run(
+                    Edit,
+                    file_path=str(p),
+                    old_string="original_content",
+                    new_string="my_edit",
+                )
+                self.assertFalse(out2["ok"])
+                self.assertEqual(out2["error"]["code"], "CONFLICT")
+                self.assertIn("modified externally", out2["error"]["message"])
+
+                # Step 4: Re-read to accept external changes
+                out3 = self._run(Read, file_path=str(p))
+                self.assertTrue(out3["ok"])
+
+                # Step 5: Now Edit should succeed
+                out4 = self._run(
+                    Edit,
+                    file_path=str(p),
+                    old_string="externally_modified_content",
+                    new_string="my_edit_after_reread",
+                )
+                self.assertTrue(out4["ok"])
 
     @staticmethod
     def _run(tool_obj, /, **kwargs):

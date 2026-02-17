@@ -66,7 +66,7 @@ def test_render_reminders_todo_active_nudge():
 
 
 def test_render_reminders_todo_empty_nudge():
-    """测试空 todo 提醒触发条件（每 8 轮）"""
+    """测试空 todo 提醒触发条件（同一 empty 状态仅一次）"""
     s = NudgeState(
         turn=9,
         todo_last_changed_turn=1,
@@ -79,8 +79,20 @@ def test_render_reminders_todo_empty_nudge():
     assert "currently empty" in result
     assert s.last_nudge_todo_turn == 9
 
+    # 同一 empty 状态，即使再次命中 8 轮倍数，也不应重复提醒
+    s.turn = 17
+    result = render_reminders(s)
+    assert "currently empty" not in result
+
+    # 发生状态变化后（例如再次变空），可以重新提醒
+    s.todo_last_changed_turn = 17
+    s.turn = 17
+    result = render_reminders(s)
+    assert "currently empty" in result
+
     # gap=9, 9 % 8 == 1，不触发
     s.turn = 10
+    s.todo_last_changed_turn = 1
     s.last_nudge_todo_turn = -100
     result = render_reminders(s)
     assert "currently empty" not in result

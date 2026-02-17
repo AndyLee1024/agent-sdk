@@ -19,6 +19,7 @@ from typing import Annotated, Any, Callable, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from comate_agent_sdk.llm.messages import UserMessage
+from comate_agent_sdk.system_tools import _internal_utils as iu
 from comate_agent_sdk.system_tools.artifact_store import ArtifactStore
 from comate_agent_sdk.system_tools.description import (
     ASK_USER_QUESTION_USAGE_RULES,
@@ -76,42 +77,21 @@ _GREP_CONTENT_MATCH_EVENT_LIMIT = 5000
 
 _EXCLUDED_WALK_DIRS = {".git", "node_modules", ".venv", "__pycache__", ".agent"}
 
-_BASH_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
-_FILE_LOCKS_BY_LOOP: dict[int, dict[str, asyncio.Lock]] = defaultdict(dict)
-
 _WEBFETCH_CACHE: dict[str, dict[str, Any]] = {}
 # Backward-compatible alias for existing tests/introspection.
 _READ_REGISTRY_MEMORY = READ_REGISTRY_POLICY.memory
 
-
-def _truncate_text(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[:max_chars] + "\n...(truncated)"
+# P2-8: Cleanup counter for loop-local dicts (every 100 calls)
+_CLEANUP_CALL_COUNTER = 0
+_CLEANUP_FREQUENCY = 100
 
 
-def _truncate_line(line: str, max_chars: int) -> str:
-    if len(line) <= max_chars:
-        return line
-    return line[:max_chars] + "...(truncated)"
-
-
-def _sha256_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def _sha256_bytes(payload: bytes) -> str:
-    return hashlib.sha256(payload).hexdigest()
-
-
-def _cleanup_ttl_cache(cache: dict[str, dict[str, Any]], *, now: float, ttl: int) -> None:
-    expired: list[str] = []
-    for k, v in cache.items():
-        ts = float(v.get("ts", 0.0))
-        if now - ts > ttl:
-            expired.append(k)
-    for k in expired:
-        cache.pop(k, None)
+def _maybe_cleanup_loop_dicts() -> None:
+    """Low-frequency cleanup of loop-local dicts to prevent memory leaks."""
+    global _CLEANUP_CALL_COUNTER
+    _CLEANUP_CALL_COUNTER += 1
+    if _CLEANUP_CALL_COUNTER % _CLEANUP_FREQUENCY == 0:
+        iu.cleanup_loop_local_dicts()
 
 
 def _project_root(ctx: SystemToolContext) -> Path:
@@ -148,38 +128,22 @@ def _is_under(path: Path, root: Path) -> bool:
         return False
 
 
-def _loop_id() -> int:
-    return id(asyncio.get_running_loop())
-
-
-def _bash_semaphore() -> asyncio.Semaphore:
-    lid = _loop_id()
-    sem = _BASH_SEMAPHORES.get(lid)
-    if sem is None:
-        sem = asyncio.Semaphore(4)
-        _BASH_SEMAPHORES[lid] = sem
-    return sem
-
-
-def _file_lock(path: Path) -> asyncio.Lock:
-    lid = _loop_id()
-    key = str(path.resolve())
-    lock = _FILE_LOCKS_BY_LOOP[lid].get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _FILE_LOCKS_BY_LOOP[lid][key] = lock
-    return lock
-
-
-async def _io_call(func, /, *args, **kwargs):
-    return await asyncio.to_thread(func, *args, **kwargs)
-
-
 async def _mark_read(ctx: SystemToolContext, path: Path) -> None:
+    """Mark file as read (without version tracking, for backward compatibility)."""
     await READ_REGISTRY_POLICY.mark_read(
         session_root=_session_root_from_ctx(ctx),
         session_id=ctx.session_id,
         path=path,
+    )
+
+
+async def _mark_read_with_version(ctx: SystemToolContext, path: Path, sha256: str) -> None:
+    """Mark file as read with version tracking (for Edit conflict detection)."""
+    await READ_REGISTRY_POLICY.mark_read_with_version(
+        session_root=_session_root_from_ctx(ctx),
+        session_id=ctx.session_id,
+        path=path,
+        sha256=sha256,
     )
 
 
@@ -191,24 +155,42 @@ async def _require_read(ctx: SystemToolContext, path: Path) -> bool:
     )
 
 
+async def _check_version_conflict(ctx: SystemToolContext, path: Path, current_sha256: str) -> bool:
+    """Check if file has been modified externally since last Read.
+
+    Returns:
+        True if conflict detected (version mismatch), False otherwise
+    """
+    has_read, stored_sha256 = await READ_REGISTRY_POLICY.has_read_with_version(
+        session_root=_session_root_from_ctx(ctx),
+        session_id=ctx.session_id,
+        path=path,
+    )
+    if not has_read:
+        return False  # Not read yet, no conflict
+    if stored_sha256 is None:
+        return False  # Read without version tracking (old behavior), no conflict check
+    return stored_sha256 != current_sha256  # Conflict if versions differ
+
+
 async def _read_text(path: Path, *, encoding: str = "utf-8") -> str:
-    return await _io_call(path.read_text, encoding=encoding, errors="replace")
+    return await iu.io_call(path.read_text, encoding=encoding, errors="replace")
 
 
 async def _exists(path: Path) -> bool:
-    return await _io_call(path.exists)
+    return await iu.io_call(path.exists)
 
 
 async def _is_dir(path: Path) -> bool:
-    return await _io_call(path.is_dir)
+    return await iu.io_call(path.is_dir)
 
 
 async def _is_file(path: Path) -> bool:
-    return await _io_call(path.is_file)
+    return await iu.io_call(path.is_file)
 
 
 async def _stat(path: Path):
-    return await _io_call(path.stat)
+    return await iu.io_call(path.stat)
 
 
 async def _resolve_write_path(
@@ -284,7 +266,7 @@ def _atomic_write_bytes_sync(path: Path, payload: bytes) -> None:
 
 async def _atomic_write_text(path: Path, content: str, *, encoding: str = "utf-8") -> None:
     payload = content.encode(encoding)
-    await _io_call(_atomic_write_bytes_sync, path, payload)
+    await iu.io_call(_atomic_write_bytes_sync, path, payload)
 
 
 def _path_error_result(exc: PathGuardError) -> dict[str, Any]:
@@ -312,34 +294,6 @@ def _validate_bash_command(
     if violation is None:
         return None
     return err(violation.code, violation.message)
-
-
-async def _spill_text(
-    *,
-    ctx: SystemToolContext,
-    namespace: str,
-    text: str,
-    mime: str,
-) -> dict[str, Any]:
-    return await _artifact_store(ctx).put_text(
-        namespace=namespace,
-        text=text,
-        mime=mime,
-        ttl_seconds=_ARTIFACT_TTL_SECONDS,
-    )
-
-
-async def _spill_json(
-    *,
-    ctx: SystemToolContext,
-    namespace: str,
-    data: Any,
-) -> dict[str, Any]:
-    return await _artifact_store(ctx).put_json(
-        namespace=namespace,
-        data=data,
-        ttl_seconds=_ARTIFACT_TTL_SECONDS,
-    )
 
 
 class BashInput(BaseModel):
@@ -607,7 +561,7 @@ def _build_rg_base_args(params: GrepInput) -> list[str]:
 
 
 async def _run_subprocess(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return await _io_call(
+    return await iu.io_call(
         subprocess.run,
         args,
         capture_output=True,
@@ -789,6 +743,7 @@ async def Bash(
     params: BashInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
+    _maybe_cleanup_loop_dicts()  # P2-8: Periodic cleanup
     start = time.monotonic()
 
     try:
@@ -821,9 +776,9 @@ async def Bash(
     stderr = ""
     exit_code = -1
 
-    async with _bash_semaphore():
+    async with iu.bash_semaphore():
         try:
-            cp = await _io_call(
+            cp = await iu.io_call(
                 subprocess.run,
                 params.args,
                 capture_output=True,
@@ -846,10 +801,13 @@ async def Bash(
     combined = stdout + stderr
     should_spill = len(combined) > params.max_output_chars or len(combined.encode("utf-8")) > _BYTES_SPILL_LIMIT
 
+    # P2-7: truncated_reason
+    truncated_reason = "output_too_large" if should_spill else None
+
     artifact: dict[str, Any] | None = None
     if should_spill:
-        artifact = await _spill_json(
-            ctx=ctx,
+        artifact = await iu.spill_json(
+            artifact_store=_artifact_store(ctx),
             namespace="bash",
             data={
                 "args": params.args,
@@ -859,16 +817,18 @@ async def Bash(
                 "exit_code": exit_code,
                 "timed_out": timed_out,
             },
+            ttl_seconds=_ARTIFACT_TTL_SECONDS,
         )
 
     data = {
-        "stdout": _truncate_text(stdout, params.max_output_chars),
-        "stderr": _truncate_text(stderr, params.max_output_chars),
+        "stdout": iu.truncate_text(stdout, params.max_output_chars),
+        "stderr": iu.truncate_text(stderr, params.max_output_chars),
         "exit_code": exit_code,
         "timed_out": timed_out,
         "killed": timed_out,
         "duration_ms": duration_ms,
         "truncated": bool(should_spill),
+        "truncated_reason": truncated_reason,
     }
     if artifact is not None:
         data["artifact"] = artifact
@@ -908,6 +868,7 @@ async def Read(
     params: ReadInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
+    _maybe_cleanup_loop_dicts()  # P2-8: Periodic cleanup
     try:
         path = resolve_for_read(
             user_path=params.file_path,
@@ -925,7 +886,9 @@ async def Read(
         return err("PERMISSION_DENIED", f"Path is not a regular file: {params.file_path}")
 
     text = await _read_text(path)
-    await _mark_read(ctx, path)
+    file_sha256 = iu.sha256_text(text)
+    await _mark_read_with_version(ctx, path, file_sha256)  # P1-6: Track version for Edit conflict detection
+    file_bytes = int((await _stat(path)).st_size)
     lines = text.splitlines()
     total_lines = len(lines)
 
@@ -968,7 +931,7 @@ async def Read(
     if params.format == "line_numbers":
         rendered_lines: list[str] = []
         for i, line in enumerate(sliced, start=start):
-            clipped = _truncate_line(line, params.max_line_chars)
+            clipped = iu.truncate_line(line, params.max_line_chars)
             if clipped != line:
                 line_truncated = True
             rendered_lines.append(f"{i + 1:6d}\t{clipped}")
@@ -976,7 +939,7 @@ async def Read(
     else:
         clipped_lines = []
         for line in sliced:
-            clipped = _truncate_line(line, params.max_line_chars)
+            clipped = iu.truncate_line(line, params.max_line_chars)
             if clipped != line:
                 line_truncated = True
             clipped_lines.append(clipped)
@@ -984,31 +947,34 @@ async def Read(
 
     has_more = end < total_lines
     output_too_large = len(content) > _TEXT_SPILL_CHARS or len(content.encode("utf-8")) > _BYTES_SPILL_LIMIT
-    file_bytes = int((await _stat(path)).st_size)
+
+    # P1-5: Semantic summary
+    avg_line_length = int(file_bytes / max(total_lines, 1))
+
+    # P2-7: truncated_reason
+    truncated_reason = None
+    if line_truncated:
+        truncated_reason = "line_length_exceeded"
+    elif output_too_large:
+        truncated_reason = "output_too_large"
 
     data: dict[str, Any] = {
-        "content": _truncate_text(content, _TEXT_SPILL_CHARS),
+        "content": iu.truncate_text(content, _TEXT_SPILL_CHARS),
         "total_lines": total_lines,
         "lines_returned": len(sliced),
         "has_more": has_more,
         "truncated": bool(line_truncated or output_too_large),
+        "truncated_reason": truncated_reason,
+        "summary": {
+            "file_size_kb": round(file_bytes / 1024, 2),
+            "total_lines": total_lines,
+            "avg_line_length": avg_line_length,
+        },
         "meta": {
             "encoding": "utf-8",
             "file_bytes": file_bytes,
         },
     }
-
-    if line_truncated or output_too_large:
-        artifact = await _spill_text(
-            ctx=ctx,
-            namespace="read",
-            text=content,
-            mime="text/plain",
-        )
-        data["artifact"] = artifact
-        data["read_hint"] = (
-            f"Use Read with file_path='{artifact['relpath']}', format='raw', offset_line=0, limit_lines=500"
-        )
 
     if has_more:
         data["next_offset_line"] = end
@@ -1039,7 +1005,7 @@ async def Write(
 
     root_refs = _allowed_roots(ctx)
     before_content: str | None = None
-    async with _file_lock(path):
+    async with iu.file_lock(path):
         existed = await _exists(path)
         if existed and await _is_dir(path):
             return err("IS_DIRECTORY", f"Path is a directory: {params.file_path}")
@@ -1063,8 +1029,8 @@ async def Write(
     final_bytes = len(final_content.encode(params.encoding, errors="replace"))
     op_bytes = len(params.content.encode(params.encoding, errors="replace"))
     relpath = to_safe_relpath(path, roots=root_refs)
-    sha256_before = _sha256_text(before_content) if before_content is not None else None
-    sha256_after = _sha256_text(final_content)
+    sha256_before = iu.sha256_text(before_content) if before_content is not None else None
+    sha256_after = iu.sha256_text(final_content)
     operation = "create" if not existed else ("append" if params.mode == "append" else "overwrite")
     return ok(
         data={
@@ -1084,24 +1050,6 @@ async def Write(
         },
     )
 
-
-
-def _generate_unified_diff(
-    before: str,
-    after: str,
-    fromfile: str = "",
-    tofile: str = "",
-) -> list[str]:
-    """Generate unified diff lines between two strings."""
-    before_lines = before.splitlines(keepends=True)
-    after_lines = after.splitlines(keepends=True)
-    diff = difflib.unified_diff(
-        before_lines,
-        after_lines,
-        fromfile=fromfile,
-        tofile=tofile,
-    )
-    return [line.rstrip("\n") for line in diff]
 
 
 def _find_edit_line_range(content: str, old_string: str) -> tuple[int, int]:
@@ -1128,7 +1076,7 @@ async def Edit(
         return _path_error_result(exc)
 
     root_refs = _allowed_roots(ctx)
-    async with _file_lock(path):
+    async with iu.file_lock(path):
         if not await _exists(path):
             return err("NOT_FOUND", f"File not found: {params.file_path}")
         if await _is_dir(path):
@@ -1139,6 +1087,15 @@ async def Edit(
             return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
 
         before = await _read_text(path)
+
+        # P1-6: Check for external modifications (version conflict)
+        current_sha256 = iu.sha256_text(before)
+        if await _check_version_conflict(ctx, path, current_sha256):
+            return err(
+                "CONFLICT",
+                f"File has been modified externally since last Read. Re-read the file before editing: {params.file_path}",
+            )
+
         count = before.count(params.old_string)
         if count == 0:
             return err("CONFLICT", f"old_string not found in file: {params.file_path}")
@@ -1160,10 +1117,13 @@ async def Edit(
 
         await _atomic_write_text(path, after)
 
-    before_sha = _sha256_text(before)
-    after_sha = _sha256_text(after)
+    before_sha = current_sha256  # Already computed for conflict check
+    after_sha = iu.sha256_text(after)
+
+    # P1-6: Update version tracking after successful edit
+    await _mark_read_with_version(ctx, path, after_sha)
     relpath = to_safe_relpath(path, roots=root_refs)
-    diff_lines = _generate_unified_diff(
+    diff_lines = iu.generate_unified_diff(
         before, after, fromfile=params.file_path, tofile=params.file_path
     )
     return ok(
@@ -1202,7 +1162,7 @@ async def MultiEdit(
         return _path_error_result(exc)
 
     root_refs = _allowed_roots(ctx)
-    async with _file_lock(path):
+    async with iu.file_lock(path):
         exists = await _exists(path)
 
         if exists:
@@ -1213,8 +1173,17 @@ async def MultiEdit(
             if not await _require_read(ctx, path):
                 return err("PRECONDITION_FAILED", f"Must Read file before modifying it: {params.file_path}")
             content = await _read_text(path)
+
+            # P1-6: Check for external modifications (version conflict)
+            current_sha256 = iu.sha256_text(content)
+            if await _check_version_conflict(ctx, path, current_sha256):
+                return err(
+                    "CONFLICT",
+                    f"File has been modified externally since last Read. Re-read the file before editing: {params.file_path}",
+                )
+
             initial_content = content
-            before_hash = _sha256_text(content)
+            before_hash = current_sha256
             edits = params.edits
             created = False
         else:
@@ -1272,14 +1241,18 @@ async def MultiEdit(
 
         await _atomic_write_text(path, content)
 
-    after_hash = _sha256_text(content)
+    after_hash = iu.sha256_text(content)
+
+    # P1-6: Update version tracking after successful edit (only if file existed)
+    if not created:
+        await _mark_read_with_version(ctx, path, after_hash)
     relpath = to_safe_relpath(path, roots=root_refs)
     start_line = int(min_line) if min_line != float("inf") else 0
     end_line_val = max_line
     if created:
         diff_lines: list[str] = []
     else:
-        diff_lines = _generate_unified_diff(
+        diff_lines = iu.generate_unified_diff(
             initial_content, content, fromfile=params.file_path, tofile=params.file_path
         )
     return ok(
@@ -1323,7 +1296,7 @@ async def Glob(
     if not await _exists(search_dir):
         return err("NOT_FOUND", f"Search path not found: {params.path or str(search_dir)}")
 
-    candidates = await _io_call(
+    candidates = await iu.io_call(
         _walk_candidates,
         search_path=search_dir,
         include_dirs=params.include_dirs,
@@ -1343,18 +1316,30 @@ async def Glob(
     preview = matches[: params.head_limit]
     truncated = total > len(preview)
 
+    # P1-5: Semantic summary
+    file_extensions: dict[str, int] = {}
+    for m in matches:
+        ext = Path(m).suffix or "(no extension)"
+        file_extensions[ext] = file_extensions.get(ext, 0) + 1
+
     data: dict[str, Any] = {
         "matches": preview,
         "count": total,
         "search_path": to_safe_relpath(search_dir, roots=root_refs),
         "truncated": truncated,
+        "truncated_reason": "head_limit_reached" if truncated else None,
+        "summary": {
+            "total_files": total,
+            "file_extensions": dict(sorted(file_extensions.items(), key=lambda x: x[1], reverse=True)[:10]),
+        },
     }
 
     if truncated:
-        artifact = await _spill_json(
-            ctx=ctx,
+        artifact = await iu.spill_json(
+            artifact_store=_artifact_store(ctx),
             namespace="glob",
             data={"matches": matches, "count": total},
+            ttl_seconds=_ARTIFACT_TTL_SECONDS,
         )
         data["artifact"] = artifact
         data["read_hint"] = (
@@ -1475,24 +1460,63 @@ def _grep_fallback(
             item: dict[str, Any] = {
                 "file": rel_file,
                 "line_number": idx if params.n else None,
-                "line": _truncate_line(line, _LINE_TRUNCATE_CHARS),
+                "line": iu.truncate_line(line, _LINE_TRUNCATE_CHARS),
                 "before_context": None,
                 "after_context": None,
             }
             if before > 0:
                 b0 = max(0, idx - 1 - before)
-                item["before_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0 : idx - 1]]
+                item["before_context"] = [iu.truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0 : idx - 1]]
             if after > 0:
                 a1 = min(len(lines), idx + after)
-                item["after_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[idx:a1]]
+                item["after_context"] = [iu.truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[idx:a1]]
 
             matches.append(item)
 
+    # P1-3: Group matches by file to reduce token consumption
+    matches_by_file: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        file = match["file"]
+        if file not in matches_by_file:
+            matches_by_file[file] = {
+                "file": file,
+                "match_count": 0,
+                "matches": [],
+            }
+        # Remove 'file' from individual match (now redundant)
+        match_entry = {k: v for k, v in match.items() if k != "file"}
+        matches_by_file[file]["matches"].append(match_entry)
+        matches_by_file[file]["match_count"] += 1
+
+    truncated = total_matches > len(matches)
+    lower_bound = truncated  # Fallback path doesn't have parse limit, only head_limit
+
+    # P1-5: Semantic summary
+    avg_matches_per_file = total_matches / max(len(matches_by_file), 1)
+    top_files = sorted(
+        [(file, data["match_count"]) for file, data in matches_by_file.items()],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:5]
+
+    # P2-7: truncated_reason
+    truncated_reason = None
+    if truncated:
+        truncated_reason = "head_limit_reached"
+
     return ok(
         data={
-            "matches": matches,
+            "matches_by_file": matches_by_file,
             "total_matches": total_matches,
-            "truncated": total_matches > len(matches),
+            "file_count": len(matches_by_file),
+            "truncated": truncated,
+            "truncated_reason": truncated_reason,
+            "total_matches_is_lower_bound": lower_bound,
+            "summary": {
+                "files_with_matches": len(matches_by_file),
+                "avg_matches_per_file": round(avg_matches_per_file, 1),
+                "top_files": top_files,
+            },
         },
         meta=base_meta,
     )
@@ -1503,6 +1527,7 @@ async def Grep(
     params: GrepInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
+    _maybe_cleanup_loop_dicts()  # P2-8: Periodic cleanup
     try:
         search_path = resolve_for_search(
             user_path=params.path,
@@ -1567,10 +1592,11 @@ async def Grep(
             "truncated": total > len(preview),
         }
         if total > len(preview):
-            artifact = await _spill_json(
-                ctx=ctx,
+            artifact = await iu.spill_json(
+                artifact_store=_artifact_store(ctx),
                 namespace="grep_files",
                 data={"files": rel_files, "count": total},
+                ttl_seconds=_ARTIFACT_TTL_SECONDS,
             )
             data["artifact"] = artifact
             data["read_hint"] = (
@@ -1616,10 +1642,11 @@ async def Grep(
             "truncated": total > len(preview),
         }
         if total > len(preview):
-            artifact = await _spill_json(
-                ctx=ctx,
+            artifact = await iu.spill_json(
+                artifact_store=_artifact_store(ctx),
                 namespace="grep_count",
                 data={"counts": counts, "total_matches": total_matches},
+                ttl_seconds=_ARTIFACT_TTL_SECONDS,
             )
             data["artifact"] = artifact
             data["read_hint"] = (
@@ -1673,7 +1700,7 @@ async def Grep(
             {
                 "file": rel_file,
                 "line_number": ln if params.n and line_no is not None else None,
-                "line": _truncate_line(line_text, _LINE_TRUNCATE_CHARS),
+                "line": iu.truncate_line(line_text, _LINE_TRUNCATE_CHARS),
                 "before_context": None,
                 "after_context": None,
             }
@@ -1719,24 +1746,64 @@ async def Grep(
                 ln0 = line_no - 1
                 b0 = max(0, ln0 - before)
                 a1 = min(total_lines, ln0 + 1 + after)
-                matches[idx]["before_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0:ln0]]
-                matches[idx]["after_context"] = [_truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[ln0 + 1 : a1]]
+                matches[idx]["before_context"] = [iu.truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[b0:ln0]]
+                matches[idx]["after_context"] = [iu.truncate_line(s, _LINE_TRUNCATE_CHARS) for s in lines[ln0 + 1 : a1]]
+
+    # P1-3: Group matches by file to reduce token consumption
+    matches_by_file: dict[str, dict[str, Any]] = {}
+    for match in matches:
+        file = match["file"]
+        if file not in matches_by_file:
+            matches_by_file[file] = {
+                "file": file,
+                "match_count": 0,
+                "matches": [],
+            }
+        # Remove 'file' from individual match (now redundant)
+        match_entry = {k: v for k, v in match.items() if k != "file"}
+        matches_by_file[file]["matches"].append(match_entry)
+        matches_by_file[file]["match_count"] += 1
 
     truncated = total_matches > len(matches) or lower_bound
+
+    # P1-5: Semantic summary
+    avg_matches_per_file = total_matches / max(len(matches_by_file), 1)
+    top_files = sorted(
+        [(file, data["match_count"]) for file, data in matches_by_file.items()],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:5]
+
+    # P2-7: truncated_reason
+    truncated_reason = None
+    if truncated:
+        if lower_bound:
+            truncated_reason = "parse_limit_exceeded"
+        else:
+            truncated_reason = "head_limit_reached"
+
     data = {
-        "matches": matches,
+        "matches_by_file": matches_by_file,
         "total_matches": total_matches,
+        "file_count": len(matches_by_file),
         "truncated": truncated,
+        "truncated_reason": truncated_reason,
         "total_matches_is_lower_bound": lower_bound,
+        "summary": {
+            "files_with_matches": len(matches_by_file),
+            "avg_matches_per_file": round(avg_matches_per_file, 1),
+            "top_files": top_files,
+        },
     }
 
     raw_capture = stream.stdout_capture
     if truncated or stream.stdout_capture_truncated or len(raw_capture.encode("utf-8")) > _BYTES_SPILL_LIMIT:
-        artifact = await _spill_text(
-            ctx=ctx,
+        artifact = await iu.spill_text(
+            artifact_store=_artifact_store(ctx),
             namespace="grep_content",
             text=raw_capture,
             mime="text/plain",
+            ttl_seconds=_ARTIFACT_TTL_SECONDS,
         )
         data["artifact"] = artifact
         data["read_hint"] = (
@@ -1795,23 +1862,36 @@ async def LS(
             })
         return rows
 
-    entries = await _io_call(_collect_entries, p)
+    entries = await iu.io_call(_collect_entries, p)
     entries = _sort_ls(entries, params.sort_by)
 
     total = len(entries)
     preview = entries[: params.head_limit]
+
+    # P1-5: Semantic summary
+    dir_count = sum(1 for e in entries if e["type"] == "dir")
+    file_count = sum(1 for e in entries if e["type"] == "file")
+    total_size = sum(e["size"] for e in entries)
+
     data: dict[str, Any] = {
         "entries": preview,
         "count": total,
         "truncated": total > len(preview),
+        "truncated_reason": "head_limit_reached" if total > len(preview) else None,
         "path": to_safe_relpath(p, roots=_allowed_roots(ctx)),
+        "summary": {
+            "dir_count": dir_count,
+            "file_count": file_count,
+            "total_size": iu.format_file_size(total_size),
+        },
     }
 
     if total > len(preview):
-        artifact = await _spill_json(
-            ctx=ctx,
+        artifact = await iu.spill_json(
+            artifact_store=_artifact_store(ctx),
             namespace="ls",
             data={"entries": entries, "count": total},
+            ttl_seconds=_ARTIFACT_TTL_SECONDS,
         )
         data["artifact"] = artifact
         data["read_hint"] = (
@@ -1909,7 +1989,7 @@ async def TodoWrite(
         return err("INTERNAL", f"TodoWrite failed: {exc}")
 
 
-@tool("Fetch webpage → markdown → LLM summary. Returns summary + full markdown artifact. Cached 1hr. Prefer MCP-provided web fetch(or scrape) tools (named like \"mcp__*\") if available.", name="WebFetch", usage_rules=WEBFETCH_USAGE_RULES)
+@tool("Fetch webpage → markdown → LLM summary. Returns summary + full markdown artifact. Cached 15min. Prefer MCP-provided web fetch(or scrape) tools (named like \"mcp__*\") if available.", name="WebFetch", usage_rules=WEBFETCH_USAGE_RULES)
 async def WebFetch(
     params: WebFetchInput,
     ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
@@ -1923,7 +2003,7 @@ async def WebFetch(
         url = f"https://{url[7:]}"
 
     now = time.time()
-    _cleanup_ttl_cache(_WEBFETCH_CACHE, now=now, ttl=_WEBFETCH_CACHE_TTL_SECONDS)
+    iu.cleanup_ttl_cache(_WEBFETCH_CACHE, now=now, ttl=_WEBFETCH_CACHE_TTL_SECONDS)
 
     cached = _WEBFETCH_CACHE.get(url)
     if cached and (now - float(cached.get("ts", 0.0)) <= _WEBFETCH_CACHE_TTL_SECONDS):
@@ -1944,7 +2024,7 @@ async def WebFetch(
 
         # 1. 优先请求 Markdown (Cloudflare Markdown for Agents)
         try:
-            response = await _io_call(
+            response = await iu.io_call(
                 crequests.get,
                 url,
                 timeout=_WEBFETCH_TIMEOUT_SECONDS,
@@ -1972,7 +2052,7 @@ async def WebFetch(
         if status != 200:
             # Markdown 请求失败，尝试普通 HTML 请求
             try:
-                response = await _io_call(
+                response = await iu.io_call(
                     crequests.get,
                     url,
                     timeout=_WEBFETCH_TIMEOUT_SECONDS,
@@ -1988,7 +2068,7 @@ async def WebFetch(
             content_signal = None
 
             if status != 200:
-                preview = _truncate_text(html_text, 2000)
+                preview = iu.truncate_text(html_text, 2000)
                 code = "NOT_FOUND" if status == 404 else "INTERNAL"
                 return err(
                     code,
@@ -2001,10 +2081,13 @@ async def WebFetch(
             except Exception as exc:
                 return err("TOOL_NOT_AVAILABLE", f"WebFetch missing dependency markdownify: {exc}")
 
-            markdown = await _io_call(to_markdown, html_text)
+            markdown = await iu.io_call(to_markdown, html_text)
         else:
             # Markdown 请求成功
             markdown = str(getattr(response, "text", "") or "")
+
+        # P2-9: Cache fingerprint
+        content_sha256 = iu.sha256_text(markdown)
         _WEBFETCH_CACHE[url] = {
             "ts": now,
             "markdown": markdown,
@@ -2012,13 +2095,16 @@ async def WebFetch(
             "status": status,
             "markdown_tokens": markdown_tokens,
             "content_signal": content_signal,
+            "content_sha256": content_sha256,
+            "fetch_time": int(now),
         }
 
-    artifact = await _spill_text(
-        ctx=ctx,
+    artifact = await iu.spill_text(
+        artifact_store=_artifact_store(ctx),
         namespace="webfetch",
         text=markdown,
         mime="text/markdown",
+        ttl_seconds=_ARTIFACT_TTL_SECONDS,
     )
 
     if ctx.llm_levels is None or "LOW" not in ctx.llm_levels:
@@ -2070,11 +2156,17 @@ async def WebFetch(
             source=source,
         )
 
+    # P2-9: Expose cache fingerprint to agent
+    cache_sha256 = cached.get("content_sha256", "") if cached_hit else content_sha256
+    cache_fetch_time = cached.get("fetch_time") if cached_hit else int(now)
+
     return ok(
         data={
             "final_url": final_url,
             "status": status,
             "cached": cached_hit,
+            "cache_fingerprint": cache_sha256[:16] if cache_sha256 else "",
+            "fetch_time": cache_fetch_time,
             "artifact": artifact,
             "truncated_for_llm": truncated_for_llm,
             "summary_text": completion.text,

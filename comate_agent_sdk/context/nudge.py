@@ -21,7 +21,6 @@ SUBAGENT_NUDGE_COOLDOWN = 3  # 上次 nudge 后需等待 3 轮
 TODO_ACTIVE_NUDGE_GAP = 3  # todo 更新后超过 3 轮触发温和提醒
 TODO_ACTIVE_NUDGE_COOLDOWN = 3  # 上次 nudge 后需等待 3 轮
 TODO_EMPTY_NUDGE_GAP = 8  # 空 todo 每 8 轮提醒一次
-TODO_EMPTY_NUDGE_COOLDOWN = 3  # 上次 nudge 后需等待 3 轮（防止连续 turn 重复）
 
 
 @dataclass
@@ -55,7 +54,7 @@ def render_reminders(s: NudgeState) -> str:
         1. Plan mode：每轮强制追加（无 cooldown）
         2. Subagent nudge：gap >= 6 且 cooldown >= 3
         3. Todo active nudge：gap >= 3 且 cooldown >= 3
-        4. Todo empty nudge：gap % 8 == 0 且 cooldown >= 3
+        4. Todo empty nudge：gap % 8 == 0，且同一 empty 状态只提醒一次
     """
     reminders: list[str] = []
 
@@ -98,9 +97,14 @@ def render_reminders(s: NudgeState) -> str:
         s.last_nudge_todo_turn = s.turn
         logger.debug(f"Todo active nudge triggered at turn {s.turn} (gap={gap_todo}, cooldown={cooldown_todo})")
 
-    # Todo empty nudge: todo 为空且距离上次变空后经过 N 轮（N % 8 == 0），距离上次 nudge 超过 3 轮
+    # Todo empty nudge:
+    # - todo 为空且距离上次变空后经过 N 轮（N % 8 == 0）
+    # - 同一 empty 状态只提醒一次（通过 last_nudge_todo_turn 与 todo_last_changed_turn 比较）
+    # 说明：
+    # - 不复用 cooldown 条件，避免同轮先触发 active nudge 后，清空 todo 无法立即得到 empty nudge。
     gap_empty = s.turn - s.todo_last_changed_turn
-    if s.todo_active_count == 0 and gap_empty % TODO_EMPTY_NUDGE_GAP == 0 and cooldown_todo >= TODO_EMPTY_NUDGE_COOLDOWN:
+    empty_state_not_nudged = s.last_nudge_todo_turn <= s.todo_last_changed_turn
+    if s.turn > 0 and s.todo_active_count == 0 and gap_empty % TODO_EMPTY_NUDGE_GAP == 0 and empty_state_not_nudged:
         reminders.append(
             "<system-reminder>\n"
             "This is a reminder that your todo list is currently empty. "
@@ -111,7 +115,11 @@ def render_reminders(s: NudgeState) -> str:
             "</system-reminder>"
         )
         s.last_nudge_todo_turn = s.turn
-        logger.debug(f"Todo empty nudge triggered at turn {s.turn} (gap={gap_empty}, cooldown={cooldown_todo})")
+        logger.debug(
+            f"Todo empty nudge triggered at turn {s.turn} "
+            f"(gap={gap_empty}, last_nudge={s.last_nudge_todo_turn}, "
+            f"state_changed={s.todo_last_changed_turn})"
+        )
 
     return "\n\n".join(reminders)
 
