@@ -81,7 +81,13 @@ CUSTOM_MODEL_PRICING: dict[str, dict[str, Any]] = {
         "input_cost_per_token": 0.0,
         "output_cost_per_token": 0.0,
     },
-    "MiniMaxAI/MiniMax-M2.1": {
+    "MiniMax-M2.5": {
+        "max_input_tokens": 204800,
+        "max_output_tokens": 16384,
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+    },
+    "MiniMaxAI/MiniMax-M2.5": {
         "max_input_tokens": 204800,
         "max_output_tokens": 16384,
         "input_cost_per_token": 0.0,
