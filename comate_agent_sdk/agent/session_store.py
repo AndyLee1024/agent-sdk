@@ -316,21 +316,26 @@ def build_usage_event(
     session_id: str,
     turn_number: int,
     added_entries: list[TokenUsageEntry],
+    context_usage: int | None = None,
 ) -> dict | None:
     if not added_entries:
         return None
+
+    usage_data: dict = {
+        "adds": [
+            token_usage_entry_to_dict(entry=entry)
+            for entry in added_entries
+        ]
+    }
+    if context_usage is not None and context_usage > 0:
+        usage_data["context_usage"] = context_usage
 
     return {
         "schema_version": PERSISTENCE_SCHEMA_VERSION,
         "session_id": session_id,
         "turn_number": turn_number,
         "op": "usage_delta",
-        "usage": {
-            "adds": [
-                token_usage_entry_to_dict(entry=entry)
-                for entry in added_entries
-            ]
-        },
+        "usage": usage_data,
     }
 
 

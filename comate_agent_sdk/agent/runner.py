@@ -173,6 +173,9 @@ async def check_and_compact(
 ) -> tuple[bool, "PreCompactEvent | None", list["CompactionMetaEvent"]]:
     """检查 token 使用并在需要时压缩。
 
+    注意: tracker.observe_response() 已在 invoke_llm() 中调用，
+    这里直接读取 tracker 的状态判断是否需要压缩。
+
     Returns:
         tuple[bool, PreCompactEvent | None, list[CompactionMetaEvent]]:
             (是否执行了压缩, 压缩前事件或None, 调试压缩事件列表)
@@ -180,22 +183,14 @@ async def check_and_compact(
     if agent._compaction_service is None:
         return False, None, []
 
-    # Update token usage tracking
-    agent._compaction_service.update_usage(response.usage)
-
-    # 检查是否需要压缩
-    try:
-        should_compact = await agent._compaction_service.should_compact(
-            agent.llm.model,
-            llm=agent.llm,
-        )
-    except TypeError:
-        should_compact = await agent._compaction_service.should_compact(agent.llm.model)
-
-    if not should_compact:
+    tracker = getattr(agent, "_context_usage_tracker", None)
+    if tracker is None:
         return False, None, []
 
-    # 获取压缩阈值
+    if not tracker.should_compact_post_response():
+        return False, None, []
+
+    # 获取压缩阈值（用于 PreCompactEvent 展示和 policy 构建）
     try:
         threshold = await agent._compaction_service.get_threshold_for_model(
             agent.llm.model,
@@ -206,9 +201,8 @@ async def check_and_compact(
 
     from comate_agent_sdk.agent.events import PreCompactEvent
 
-    actual_tokens = int(response.usage.total_tokens) if response.usage else 0
+    actual_tokens = tracker.context_usage
 
-    # 创建 PreCompactEvent
     event = PreCompactEvent(
         current_tokens=actual_tokens,
         threshold=threshold,
@@ -232,9 +226,7 @@ async def check_and_compact(
     _record_compaction_outcome(agent, policy)
 
     if compacted:
-        token_accounting = getattr(agent, "_token_accounting", None)
-        if token_accounting is not None:
-            token_accounting.reset_baseline()
+        tracker.reset_after_compaction()
 
     return compacted, event, _build_compaction_meta_events(agent, policy)
 
@@ -242,10 +234,10 @@ async def check_and_compact(
 async def precheck_and_compact(
     agent: "AgentRuntime",
 ) -> tuple[bool, "PreCompactEvent | None", list["CompactionMetaEvent"]]:
-    """基于 provider-aware 估算值预检查并压缩。
+    """基于增量估算值预检查并压缩。
 
-    在工具结果添加后调用,防止下一次 invoke_llm 超限。
-    优先使用模型相关计数器估算当前上下文，并附加安全缓冲。
+    在工具结果添加后（下一次 invoke_llm 前）调用，防止 context window 超限。
+    使用 ContextUsageTracker 的 should_compact_precheck() / estimate_precheck()。
 
     Returns:
         tuple[bool, PreCompactEvent | None, list[CompactionMetaEvent]]:
@@ -257,20 +249,17 @@ async def precheck_and_compact(
     if not agent._compaction_service.config.enabled:
         return False, None, []
 
-    # Incremental estimation: last provider-reported total + IR delta since then.
-    # First turn (no report yet) falls back to raw IR total.
-    token_accounting = getattr(agent, "_token_accounting", None)
-    last_reported = token_accounting.last_reported_total_tokens if token_accounting else 0
-    if last_reported > 0:
-        ir_delta = max(0, agent._context.total_tokens - token_accounting.ir_total_at_last_report)
-        estimated_tokens = last_reported + ir_delta
-    else:
-        estimated_tokens = agent._context.total_tokens
+    tracker = getattr(agent, "_context_usage_tracker", None)
+    if tracker is None:
+        return False, None, []
 
-    buffer_ratio = max(0.0, float(agent.precheck_buffer_ratio))
-    buffered_tokens = int(estimated_tokens * (1.0 + buffer_ratio))
+    ir_total = agent._context.total_tokens
+    if not tracker.should_compact_precheck(ir_total):
+        return False, None, []
 
-    # 获取压缩阈值
+    estimated_tokens = tracker.estimate_precheck(ir_total)
+
+    # 获取压缩阈值（用于 PreCompactEvent 展示和 policy 构建）
     try:
         threshold = await agent._compaction_service.get_threshold_for_model(
             agent.llm.model,
@@ -279,20 +268,14 @@ async def precheck_and_compact(
     except TypeError:
         threshold = await agent._compaction_service.get_threshold_for_model(agent.llm.model)
 
-    # 如果估算值（含缓冲）未超阈值,无需压缩
-    if buffered_tokens < threshold:
-        return False, None, []
-
     logger.info(
-        f"预检查触发压缩: 估算 {estimated_tokens} tokens + {buffer_ratio:.1%} 缓冲"
-        f" = {buffered_tokens} >= 阈值 {threshold}"
+        f"预检查触发压缩: 估算 {estimated_tokens} tokens >= 阈值 {threshold}"
     )
 
-    # 创建 PreCompactEvent
     from comate_agent_sdk.agent.events import PreCompactEvent
 
     event = PreCompactEvent(
-        current_tokens=buffered_tokens,
+        current_tokens=estimated_tokens,
         threshold=threshold,
         trigger='precheck',
     )
@@ -309,12 +292,12 @@ async def precheck_and_compact(
 
     compacted = await agent._context.auto_compact(
         policy=policy,
-        current_total_tokens=buffered_tokens,
+        current_total_tokens=estimated_tokens,
     )
     _record_compaction_outcome(agent, policy)
 
-    if compacted and token_accounting is not None:
-        token_accounting.reset_baseline()
+    if compacted:
+        tracker.reset_after_compaction()
 
     return compacted, event, _build_compaction_meta_events(agent, policy)
 

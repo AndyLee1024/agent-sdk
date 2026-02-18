@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from comate_agent_sdk.agent.runner import precheck_and_compact
 from comate_agent_sdk.context.compaction import CompactionMetaRecord
+from comate_agent_sdk.context.usage_tracker import ContextUsageTracker
 from comate_agent_sdk.llm.messages import UserMessage
 
 
@@ -17,14 +18,8 @@ class _FakeCompactionService:
         return self._threshold
 
 
-class _FakeTokenCounter:
-    async def count_messages_for_model(self, messages, *, llm, timeout_ms: int = 300) -> int:
-        return 120
-
-
 class _FakeContext:
     def __init__(self) -> None:
-        self.token_counter = _FakeTokenCounter()
         self.total_tokens = 1000
 
     def lower(self):
@@ -58,11 +53,13 @@ class _FakeContext:
 
 class TestCompactionMetaEvents(unittest.TestCase):
     def _build_agent(self, *, emit_compaction_meta_events: bool):
+        # context_window=1000, threshold_ratio=0.85 → threshold=850
+        # estimate_precheck(1000) = 1000+500=1500 >= 850 → triggers compaction
+        tracker = ContextUsageTracker(context_window=1000, threshold_ratio=0.85)
         return SimpleNamespace(
             _compaction_service=_FakeCompactionService(threshold=100, enabled=True),
             _context=_FakeContext(),
-            token_count_timeout_ms=300,
-            precheck_buffer_ratio=0.12,
+            _context_usage_tracker=tracker,
             llm=SimpleNamespace(model="gpt-4o", provider="openai"),
             offload_enabled=False,
             _context_fs=None,

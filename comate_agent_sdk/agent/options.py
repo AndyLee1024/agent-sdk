@@ -59,8 +59,6 @@ class AgentConfig:
     llm_retryable_status_codes: frozenset[int] = field(
         default_factory=lambda: frozenset({429, 500, 502, 503, 504})
     )
-    precheck_buffer_ratio: float = 0.12
-    token_count_timeout_ms: int = 300
 
     # Subagent
     agents: tuple[Any, ...] | None = None  # tuple[AgentDefinition, ...]
@@ -136,8 +134,6 @@ class RuntimeAgentOptions:
     llm_retryable_status_codes: set[int] = field(
         default_factory=lambda: {429, 500, 502, 503, 504}
     )
-    precheck_buffer_ratio: float = 0.12
-    token_count_timeout_ms: int = 300
 
     # Subagent
     agents: list | None = None  # list[AgentDefinition]
@@ -209,8 +205,6 @@ def build_runtime_options(
         llm_retry_base_delay=config.llm_retry_base_delay,
         llm_retry_max_delay=config.llm_retry_max_delay,
         llm_retryable_status_codes=set(config.llm_retryable_status_codes),
-        precheck_buffer_ratio=config.precheck_buffer_ratio,
-        token_count_timeout_ms=config.token_count_timeout_ms,
         agents=list(resolved_agents) if resolved_agents is not None else None,
         tool_registry=None,
         project_root=config.project_root,

@@ -24,6 +24,7 @@ from comate_agent_sdk.agent.session_store import (
     slice_usage_delta,
 )
 from comate_agent_sdk.llm.messages import ContentPartImageParam, ContentPartTextParam
+from comate_agent_sdk.tokens.total_usage import TotalUsageSnapshot
 from comate_agent_sdk.tokens.views import UsageSummary
 
 logger = logging.getLogger("comate_agent_sdk.agent.chat_session")
@@ -201,6 +202,28 @@ class ChatSession:
         """获取当前会话的上下文使用情况。"""
         return await self._agent.get_context_info()
 
+    def _update_total_usage(self, new_entries: list) -> None:
+        """把本 turn 的 usage entries 追加写入 total_usage.json。"""
+        if not new_entries:
+            return
+        try:
+            total_usage_path = self._storage_root / "total_usage.json"
+            if total_usage_path.exists():
+                snapshot = TotalUsageSnapshot.load(total_usage_path)
+            else:
+                snapshot = TotalUsageSnapshot.new(session_id=self.session_id)
+            snapshot.add_turn_entries(new_entries)
+            snapshot.save(total_usage_path)
+        except Exception as e:
+            logger.warning(f"Failed to update total_usage.json: {e}", exc_info=True)
+
+    async def get_total_usage(self) -> TotalUsageSnapshot:
+        """获取会话累计 token 使用快照（total_usage.json）。"""
+        total_usage_path = self._storage_root / "total_usage.json"
+        if total_usage_path.exists():
+            return TotalUsageSnapshot.load(total_usage_path)
+        return TotalUsageSnapshot.new(session_id=self.session_id)
+
     def clear_history(self) -> None:
         """清空会话历史和 token 使用记录。"""
         if self._closed:
@@ -310,16 +333,21 @@ class ChatSession:
                 offload_root=self._offload_root,
             )
             events_jsonl_append(self._context_jsonl, evt)
+            new_entries = slice_usage_delta(
+                self._agent._token_cost.usage_history,
+                before_count=before_usage_count,
+            )
+            tracker = getattr(self._agent, "_context_usage_tracker", None)
+            context_usage = tracker.context_usage if tracker is not None else None
             usage_evt = build_usage_event(
                 session_id=self.session_id,
                 turn_number=self._turn_number,
-                added_entries=slice_usage_delta(
-                    self._agent._token_cost.usage_history,
-                    before_count=before_usage_count,
-                ),
+                added_entries=new_entries,
+                context_usage=context_usage,
             )
             if usage_evt is not None:
                 events_jsonl_append(self._context_jsonl, usage_evt)
+            self._update_total_usage(new_entries)
 
     async def events(self) -> AsyncIterator[AgentEvent]:
         if self._events_started:
@@ -353,16 +381,21 @@ class ChatSession:
                     offload_root=self._offload_root,
                 )
                 events_jsonl_append(self._context_jsonl, evt)
+                new_entries = slice_usage_delta(
+                    self._agent._token_cost.usage_history,
+                    before_count=before_usage_count,
+                )
+                tracker = getattr(self._agent, "_context_usage_tracker", None)
+                context_usage = tracker.context_usage if tracker is not None else None
                 usage_evt = build_usage_event(
                     session_id=self.session_id,
                     turn_number=self._turn_number,
-                    added_entries=slice_usage_delta(
-                        self._agent._token_cost.usage_history,
-                        before_count=before_usage_count,
-                    ),
+                    added_entries=new_entries,
+                    context_usage=context_usage,
                 )
                 if usage_evt is not None:
                     events_jsonl_append(self._context_jsonl, usage_evt)
+                self._update_total_usage(new_entries)
 
     async def _message_iter(self) -> AsyncIterator[ChatMessage]:
         if self._message_source is not None:

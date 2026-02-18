@@ -12,8 +12,8 @@ from comate_agent_sdk.agent.llm_levels import LLMLevel
 from comate_agent_sdk.agent.options import AgentConfig, RuntimeAgentOptions, build_runtime_options
 from comate_agent_sdk.agent.system_prompt import SystemPromptType, resolve_system_prompt
 from comate_agent_sdk.context import ContextIR
-from comate_agent_sdk.context.accounting import ContextTokenAccounting
 from comate_agent_sdk.context.fs import ContextFileSystem
+from comate_agent_sdk.context.usage_tracker import ContextUsageTracker
 from comate_agent_sdk.context.offload import OffloadPolicy
 from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from comate_agent_sdk.llm.messages import (
@@ -204,7 +204,7 @@ class AgentRuntime:
     _tool_map: dict[str, Tool] = field(default_factory=dict, repr=False, init=False)
     _compaction_service: CompactionService | None = field(default=None, repr=False, init=False)
     _token_cost: TokenCost = field(default=None, repr=False, init=False)  # type: ignore[assignment]
-    _token_accounting: ContextTokenAccounting = field(default=None, repr=False, init=False)  # type: ignore[assignment]
+    _context_usage_tracker: ContextUsageTracker = field(default=None, repr=False, init=False)  # type: ignore[assignment]
     _context_fs: ContextFileSystem | None = field(default=None, repr=False, init=False)
     _session_id: str = field(default="", repr=False, init=False)
     _run_controller: "SessionRunController | None" = field(default=None, repr=False, init=False)
@@ -385,22 +385,6 @@ class AgentRuntime:
     @llm_retryable_status_codes.setter
     def llm_retryable_status_codes(self, value: set[int]) -> None:
         self.options.llm_retryable_status_codes = value
-
-    @property
-    def precheck_buffer_ratio(self) -> float:
-        return self.options.precheck_buffer_ratio
-
-    @precheck_buffer_ratio.setter
-    def precheck_buffer_ratio(self, value: float) -> None:
-        self.options.precheck_buffer_ratio = value
-
-    @property
-    def token_count_timeout_ms(self) -> int:
-        return self.options.token_count_timeout_ms
-
-    @token_count_timeout_ms.setter
-    def token_count_timeout_ms(self, value: int) -> None:
-        self.options.token_count_timeout_ms = value
 
     @property
     def agents(self) -> list | None:
@@ -588,19 +572,14 @@ class AgentRuntime:
         used_tokens_message_only = budget.total_tokens
         used_tokens_with_tools = used_tokens_message_only + tool_defs_tokens
 
-        next_step_estimated_tokens = used_tokens_with_tools
-        last_step_reported_tokens = 0
-        if self._token_accounting is not None:
-            last_step_reported_tokens = self._token_accounting.last_reported_total_tokens
-            if last_step_reported_tokens > 0:
-                ir_delta = max(
-                    0,
-                    self._context.total_tokens - self._token_accounting.ir_total_at_last_report,
-                )
-                next_step_estimated_tokens = last_step_reported_tokens + ir_delta
-
-        if last_step_reported_tokens <= 0 and self._token_cost.usage_history:
-            last_step_reported_tokens = int(self._token_cost.usage_history[-1].usage.total_tokens)
+        tracker = self._context_usage_tracker
+        ir_total = self._context.total_tokens
+        last_step_reported_tokens = tracker.context_usage if tracker is not None else 0
+        next_step_estimated_tokens = (
+            tracker.estimate_precheck(ir_total)
+            if tracker is not None and tracker.context_usage > 0
+            else used_tokens_with_tools
+        )
 
         categories = _build_categories(budget.tokens_by_type, self._context)
 

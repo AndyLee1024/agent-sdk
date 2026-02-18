@@ -15,7 +15,7 @@
 """
 
 from comate_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
-from comate_agent_sdk.context.accounting import ContextTokenAccounting
+from comate_agent_sdk.context.usage_tracker import ContextUsageTracker
 from comate_agent_sdk.context.compaction import (
     CompactionStrategy,
     SelectiveCompactionPolicy,
@@ -60,7 +60,7 @@ __all__ = [
     "BudgetConfig",
     "BudgetStatus",
     "TokenCounter",
-    "ContextTokenAccounting",
+    "ContextUsageTracker",
     # Info
     "ContextInfo",
     "ContextCategoryInfo",

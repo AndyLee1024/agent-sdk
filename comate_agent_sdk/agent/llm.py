@@ -48,14 +48,15 @@ async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
                     level=agent._effective_level,
                     source=source,
                 )
-                if getattr(agent, "_token_accounting", None) is not None:
+                tracker = getattr(agent, "_context_usage_tracker", None)
+                if tracker is not None:
                     try:
-                        agent._token_accounting.observe_reported_usage(
-                            reported_total_tokens=int(response.usage.total_tokens),
+                        tracker.observe_response(
+                            total_tokens=int(response.usage.total_tokens),
                             ir_total=agent._context.total_tokens,
                         )
                     except Exception as e:
-                        logger.debug(f"更新 token 报告失败: {e}", exc_info=True)
+                        logger.debug(f"更新 context usage tracker 失败: {e}", exc_info=True)
 
             return response
 

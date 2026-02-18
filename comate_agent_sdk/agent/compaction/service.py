@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 from comate_agent_sdk.agent.compaction.models import (
     CompactionConfig,
     CompactionResult,
-    TokenUsage,
 )
 from comate_agent_sdk.llm.messages import (
     AssistantMessage,
@@ -31,7 +30,6 @@ from comate_agent_sdk.tokens.custom_pricing import (
 
 if TYPE_CHECKING:
     from comate_agent_sdk.llm.base import BaseChatModel
-    from comate_agent_sdk.llm.views import ChatInvokeUsage
     from comate_agent_sdk.tokens import TokenCost
 
 log = logging.getLogger(__name__)
@@ -66,17 +64,8 @@ class CompactionService:
     usage_source: str = "compaction"
 
     # Internal state
-    _last_usage: TokenUsage = field(default_factory=TokenUsage, repr=False)
     _context_limit_cache: dict[str, int] = field(default_factory=dict, repr=False)
     _threshold_cache: dict[str, int] = field(default_factory=dict, repr=False)
-
-    def update_usage(self, usage: ChatInvokeUsage | None) -> None:
-        """Update the tracked token usage from a response.
-
-        Args:
-                usage: The usage information from the last LLM response.
-        """
-        self._last_usage = TokenUsage.from_usage(usage)
 
     def _resolve_context_limit_from_provider(
         self,
@@ -176,22 +165,28 @@ class CompactionService:
         self,
         model: str,
         *,
+        context_usage: int,
         llm: BaseChatModel | None = None,
     ) -> bool:
         """Check if compaction should be triggered based on current token usage.
 
+        Args:
+                model: The model name to look up threshold for.
+                context_usage: Current context token count (from ContextUsageTracker).
+                llm: Optional LLM instance for provider context window resolution.
+
         Returns:
-                True if token usage exceeds the threshold and compaction is enabled.
+                True if context_usage exceeds the threshold and compaction is enabled.
         """
         if not self.config.enabled:
             return False
 
         threshold = await self.get_threshold_for_model(model, llm=llm)
-        should = self._last_usage.total_tokens >= threshold
+        should = context_usage >= threshold
 
         if should:
             log.info(
-                f"Compaction triggered: {self._last_usage.total_tokens} tokens >= {threshold} threshold "
+                f"Compaction triggered: {context_usage} tokens >= {threshold} threshold "
                 f"(model: {model}, ratio: {self.config.threshold_ratio})"
             )
 
@@ -203,6 +198,7 @@ class CompactionService:
         llm: BaseChatModel | None = None,
         *,
         level: str | None = None,
+        original_tokens: int = 0,
     ) -> CompactionResult:
         """Perform compaction on the message history.
 
@@ -228,7 +224,6 @@ class CompactionService:
                 "No LLM available for compaction. Provide an LLM or set self.llm."
             )
 
-        original_tokens = self._last_usage.total_tokens
         threshold = await self.get_threshold_for_model(model.model, llm=model)
 
         log.info(
@@ -316,6 +311,8 @@ class CompactionService:
         self,
         messages: list[BaseMessage],
         llm: BaseChatModel | None = None,
+        *,
+        context_usage: int = 0,
     ) -> tuple[list[BaseMessage], CompactionResult]:
         """Check token usage and compact if threshold exceeded.
 
@@ -325,6 +322,7 @@ class CompactionService:
         Args:
                 messages: The current message history.
                 llm: Optional LLM to use for summarization.
+                context_usage: Current context token count (from ContextUsageTracker).
 
         Returns:
                 A tuple of (new_messages, result) where new_messages is either
@@ -335,10 +333,10 @@ class CompactionService:
         if model is None:
             return messages, CompactionResult(compacted=False)
 
-        if not await self.should_compact(model.model, llm=model):
+        if not await self.should_compact(model.model, context_usage=context_usage, llm=model):
             return messages, CompactionResult(compacted=False)
 
-        result = await self.compact(messages, llm)
+        result = await self.compact(messages, llm, original_tokens=context_usage)
         if not result.compacted or not result.summary:
             return messages, result
 
@@ -439,8 +437,7 @@ class CompactionService:
     def reset(self) -> None:
         """Reset the service state.
 
-        Clears tracked token usage and cached thresholds.
+        Clears cached context limits and thresholds.
         """
-        self._last_usage = TokenUsage()
         self._context_limit_cache.clear()
         self._threshold_cache.clear()
