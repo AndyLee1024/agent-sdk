@@ -5,7 +5,7 @@
 
 ## global rule
 0. 设计应该尽可能简单，而不是更简单。 Keep It Simple, Stupid。
-1. "Simplicity is the ultimate sophistication." — Leonardo da Vinci
+1. 和你交流时，MUST使用中文。 
 2. 如果你遇到不清楚的问题或者缺少什么信息，MUST及时向我询问。  
 3. 先给出你的方案，MUST经我审阅后再编写代码。
 4. 给出几版方案选择，构建方案时使用问答的方式逐步确认我的需求。 this is MUST
