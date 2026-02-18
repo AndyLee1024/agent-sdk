@@ -22,6 +22,7 @@ from comate_agent_sdk.llm.messages import (
 )
 from comate_agent_sdk.llm.openai.like import ChatOpenAILike
 from comate_agent_sdk.llm.views import ChatInvokeCompletion
+from comate_agent_sdk.tokens.custom_pricing import resolve_max_input_tokens_from_custom_pricing
 
 logger = logging.getLogger("comate_agent_sdk.llm.deepseek")
 
@@ -87,6 +88,14 @@ class ChatDeepSeek(ChatOpenAILike):
     @property
     def provider(self) -> str:
         return "deepseek"
+
+    def get_context_window(self) -> int | None:
+        """Resolve context window from custom pricing data when available."""
+        return resolve_max_input_tokens_from_custom_pricing(str(self.model))
+
+    def get_usage(self, response: "Any") -> "ChatInvokeUsage | None":
+        """Return usage statistics from a DeepSeek API response."""
+        return self._get_usage(response)
 
     def _extract_reasoning_content(self, response: ChatCompletion) -> str | None:
         """Extract reasoning_content from DeepSeek API response.

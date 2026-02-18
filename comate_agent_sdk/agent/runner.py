@@ -23,6 +23,38 @@ _SUMMARY_FAILURE_COOLDOWN_SECONDS = 8.0
 _SUMMARY_FAILURE_STREAK_FOR_COOLDOWN = 2
 
 
+def _build_compaction_policy(
+    agent: "AgentRuntime",
+    threshold: int,
+) -> "SelectiveCompactionPolicy":
+    """Build a SelectiveCompactionPolicy from agent config (shared by check and precheck)."""
+    offload_policy = None
+    if agent.offload_enabled and agent._context_fs:
+        offload_policy = agent.offload_policy or OffloadPolicy(
+            enabled=True,
+            token_threshold=agent.offload_token_threshold,
+        )
+
+    compaction_llm = agent._compaction_service.llm or agent.llm
+    is_subagent = bool(getattr(agent, "_is_subagent", False))
+    agent_name = getattr(agent, "name", None)
+    source_prefix = (
+        f"subagent:{agent_name}"
+        if is_subagent and agent_name
+        else None
+    )
+    return SelectiveCompactionPolicy(
+        threshold=threshold,
+        llm=compaction_llm,
+        fallback_to_full_summary=True,
+        fs=agent._context_fs,
+        offload_policy=offload_policy,
+        token_cost=agent._token_cost,
+        level=agent._effective_level,
+        source_prefix=source_prefix,
+    )
+
+
 def _build_compaction_meta_events(
     agent: "AgentRuntime",
     policy: SelectiveCompactionPolicy,
@@ -191,39 +223,18 @@ async def check_and_compact(
         )
         return False, event, []
 
-    # 创建/复用 OffloadPolicy
-    offload_policy = None
-    if agent.offload_enabled and agent._context_fs:
-        offload_policy = agent.offload_policy or OffloadPolicy(
-            enabled=True,
-            token_threshold=agent.offload_token_threshold,
-        )
-
-    # 创建选择性压缩策略
-    compaction_llm = agent._compaction_service.llm or agent.llm
-    is_subagent = bool(getattr(agent, "_is_subagent", False))
-    agent_name = getattr(agent, "name", None)
-    source_prefix = (
-        f"subagent:{agent_name}"
-        if is_subagent and agent_name
-        else None
-    )
-    policy = SelectiveCompactionPolicy(
-        threshold=threshold,
-        llm=compaction_llm,
-        fallback_to_full_summary=True,
-        fs=agent._context_fs,
-        offload_policy=offload_policy,
-        token_cost=agent._token_cost,
-        level=agent._effective_level,
-        source_prefix=source_prefix,
-    )
+    policy = _build_compaction_policy(agent, threshold)
 
     compacted = await agent._context.auto_compact(
         policy=policy,
         current_total_tokens=actual_tokens,
     )
     _record_compaction_outcome(agent, policy)
+
+    if compacted:
+        token_accounting = getattr(agent, "_token_accounting", None)
+        if token_accounting is not None:
+            token_accounting.reset_baseline()
 
     return compacted, event, _build_compaction_meta_events(agent, policy)
 
@@ -246,32 +257,18 @@ async def precheck_and_compact(
     if not agent._compaction_service.config.enabled:
         return False, None, []
 
-    estimate = None
-    estimated_tokens = agent._context.total_tokens
+    # Incremental estimation: last provider-reported total + IR delta since then.
+    # First turn (no report yet) falls back to raw IR total.
+    token_accounting = getattr(agent, "_token_accounting", None)
+    last_reported = token_accounting.last_reported_total_tokens if token_accounting else 0
+    if last_reported > 0:
+        ir_delta = max(0, agent._context.total_tokens - token_accounting.ir_total_at_last_report)
+        estimated_tokens = last_reported + ir_delta
+    else:
+        estimated_tokens = agent._context.total_tokens
+
     buffer_ratio = max(0.0, float(agent.precheck_buffer_ratio))
     buffered_tokens = int(estimated_tokens * (1.0 + buffer_ratio))
-
-    token_accounting = getattr(agent, "_token_accounting", None)
-    if token_accounting is not None:
-        estimate = await token_accounting.estimate_next_step(
-            context=agent._context,
-            llm=agent.llm,
-            tool_definitions=agent.tool_definitions,
-            timeout_ms=agent.token_count_timeout_ms,
-        )
-        estimated_tokens = estimate.raw_total_tokens
-        buffered_tokens = estimate.buffered_tokens
-        buffer_ratio = estimate.safety_margin_ratio
-    else:
-        lowered_messages = agent._context.lower()
-        estimated_tokens = await agent._context.token_counter.count_messages_for_model(
-            lowered_messages,
-            llm=agent.llm,
-            timeout_ms=agent.token_count_timeout_ms,
-        )
-        if estimated_tokens <= 0:
-            estimated_tokens = agent._context.total_tokens
-        buffered_tokens = int(estimated_tokens * (1.0 + buffer_ratio))
 
     # 获取压缩阈值
     try:
@@ -286,16 +283,10 @@ async def precheck_and_compact(
     if buffered_tokens < threshold:
         return False, None, []
 
-    if estimate is not None:
-        logger.info(
-            f"预检查触发压缩: 估算 {estimated_tokens} tokens × ratio {estimate.calibration_ratio:.3f} "
-            f"+ {buffer_ratio:.1%} 缓冲 = {buffered_tokens} >= 阈值 {threshold}"
-        )
-    else:
-        logger.info(
-            f"预检查触发压缩: 估算 {estimated_tokens} tokens + {buffer_ratio:.1%} 缓冲"
-            f" = {buffered_tokens} >= 阈值 {threshold}"
-        )
+    logger.info(
+        f"预检查触发压缩: 估算 {estimated_tokens} tokens + {buffer_ratio:.1%} 缓冲"
+        f" = {buffered_tokens} >= 阈值 {threshold}"
+    )
 
     # 创建 PreCompactEvent
     from comate_agent_sdk.agent.events import PreCompactEvent
@@ -314,38 +305,16 @@ async def precheck_and_compact(
         )
         return False, event, []
 
-    # 复用现有的压缩策略创建逻辑
-    offload_policy = None
-    if agent.offload_enabled and agent._context_fs:
-        offload_policy = agent.offload_policy or OffloadPolicy(
-            enabled=True,
-            token_threshold=agent.offload_token_threshold,
-        )
-
-    compaction_llm = agent._compaction_service.llm or agent.llm
-    is_subagent = bool(getattr(agent, "_is_subagent", False))
-    agent_name = getattr(agent, "name", None)
-    source_prefix = (
-        f"subagent:{agent_name}"
-        if is_subagent and agent_name
-        else None
-    )
-    policy = SelectiveCompactionPolicy(
-        threshold=threshold,
-        llm=compaction_llm,
-        fallback_to_full_summary=True,
-        fs=agent._context_fs,
-        offload_policy=offload_policy,
-        token_cost=agent._token_cost,
-        level=agent._effective_level,
-        source_prefix=source_prefix,
-    )
+    policy = _build_compaction_policy(agent, threshold)
 
     compacted = await agent._context.auto_compact(
         policy=policy,
         current_total_tokens=buffered_tokens,
     )
     _record_compaction_outcome(agent, policy)
+
+    if compacted and token_accounting is not None:
+        token_accounting.reset_baseline()
 
     return compacted, event, _build_compaction_meta_events(agent, policy)
 
@@ -442,6 +411,12 @@ async def query(agent: "AgentRuntime", message: str) -> str:
 
         # Destroy ephemeral messages from previous iteration before LLM sees them again
         destroy_ephemeral_messages(agent)
+
+        # Pre-check compaction before invoking LLM to reduce context window overflow risk.
+        _, precheck_event, precheck_meta_events = await precheck_and_compact(agent)
+        if precheck_event:
+            logger.info(f"Pre-compact event: {precheck_event}")
+        _log_compaction_meta_events(precheck_meta_events)
 
         # Invoke the LLM
         response = await invoke_llm(agent)

@@ -432,14 +432,11 @@ async def query_stream(
 
         # Add the user message to context (supports both string and multi-modal content)
         agent._context.add_message(UserMessage(content=message))
-
         await _fire_user_prompt_submit(agent, message)
         async for hidden_event in _drain_hidden_events(agent):
             yield hidden_event
-
         iterations = 0
         askuser_repair_attempted = False
-
         while True:
             if iterations >= agent.max_iterations:
                 summary = await generate_max_iterations_summary(agent)
@@ -455,23 +452,26 @@ async def query_stream(
                     yield hidden_event
                 yield StopEvent(reason="max_iterations")
                 return
-
             if _is_interrupt_requested(agent):
                 async for event in _yield_interrupted_stop():
                     yield event
                 return
-
             iterations += 1
-
             # Destroy ephemeral messages from previous iteration before LLM sees them again
             destroy_ephemeral_messages(agent)
-
+            # Pre-check compaction before invoking LLM to reduce context overflow risk.
+            _, precheck_event, precheck_meta_events = await precheck_and_compact(agent)
+            async for usage_event in _drain_usage_events():
+                yield usage_event
+            if precheck_event:
+                yield precheck_event
+            for compaction_meta_event in precheck_meta_events:
+                yield compaction_meta_event
             # Invoke the LLM (polling to support cooperative interruption)
             llm_task = asyncio.create_task(invoke_llm(agent))
             while True:
                 async for usage_event in _drain_usage_events():
                     yield usage_event
-
                 if _is_interrupt_requested(agent):
                     llm_task.cancel()
                     with suppress(asyncio.CancelledError):
@@ -479,18 +479,15 @@ async def query_stream(
                     async for event in _yield_interrupted_stop():
                         yield event
                     return
-
                 done, _ = await asyncio.wait(
                     {llm_task},
                     timeout=usage_poll_interval_seconds,
                     return_when=asyncio.ALL_COMPLETED,
                 )
-
                 async for usage_event in _drain_usage_events():
                     yield usage_event
                 if done:
                     break
-
             response = await llm_task
             async for usage_event in _drain_usage_events():
                 yield usage_event

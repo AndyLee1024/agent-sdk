@@ -1,79 +1,55 @@
-本仓库的 agent 行为必须遵守以下规则。凡出现“必须/禁止”均不可协商。规则目标：KISS、避免 God Object/Blob、控制 self 状态耦合、保证小步可回滚。
+## 项目概述
 
-────────────────────────────────────────
-## 1) 工作方式（硬规则）
+这是一个 agent sdk 项目， 用于以后各种agent开发的基础设施。
+这是一个非常重要的项目，必须有非常优秀的的 上下文工程 实践的沉淀。 请仔细思考每一个细节。
 
-1. 先方案后编码：任何任务先输出 2–3 个方案（Quick / Balanced / Long-term）+ 风险 + 需要我回答的问题；我明确批准前，禁止写/改任何代码。
-2. 不清楚就问：遇到歧义/缺信息/不确定点，必须先问我，禁止猜。
-3. 小步变更：一次只做一个小步骤（优先 ≤3 个文件、≤200 行净新增，不含格式化）。超过就拆步，每步可运行/可回滚。
-4. 不生成总结文档：除非我明确要求，否则不要新增“总结/报告/说明类新文件”。
+## global rule
+0. 设计应该尽可能简单，而不是更简单。 Keep It Simple, Stupid。
+1. "Simplicity is the ultimate sophistication." — Leonardo da Vinci
+2. 如果你遇到不清楚的问题或者缺少什么信息，MUST及时向我询问。  
+3. 先给出你的方案，MUST经我审阅后再编写代码。
+4. 给出几版方案选择，构建方案时使用问答的方式逐步确认我的需求。 this is MUST
+5. 不要为我生成任何总结文档, 除非我主动告诉你.
+6. 当用户让你排查或者修复问题时，我希望你站在全局角度工程化考虑问题,结合当前架构,分析问题原因,给出解决方案。而不是简单止血。需要确认修改这个会不会造成其他依赖这个的功能的连锁反应和冲突. this is MUST
+7. 涉及到 Prompt_toolkit 这个TUI框架, 你必须使用 context7 mcp里面的  query-docs和resolve-library-id 功能来查询相关文档, 以确保你对这个框架的理解是正确的. this is MUST
 
-────────────────────────────────────────
-## 2) Anti-God-Object / Anti-Blob（硬护栏）
+## python coding rule
+1. 代码必须使用 f-string 进行字符串格式化
+2. 代码必须使用 logging 模块进行日志记录，禁止使用 print 语句
+3. 运行 python必须使用 uv run python 脚本名.py 的方式运行
+4. 安装pip包必须使用 uv add 包名 的方式安装
+5. 禁止硬编码任何路径或者配置，必须使用环境变量或者配置文件的方式进行配置
+6. 代码必须遵循 PEP 8 风格指南，使用黑色（black）进行代码格式化
 
-1. 单文件上限：任何改动后，任何文件不得 > 700 LOC。
-   - 若目标文件已 >700：本次禁止净增行数；只能抽取/拆分/重构使其下降或至少不增长。
-2. self 状态耦合上限：单个类的“可变 self.* 字段”不得 > 8；方法数不得 > 12。
-   - 若接近/已超：禁止继续往该类加字段/加方法，必须先拆分或外置状态。
-3. 显式状态模型：跨功能共享的运行态只允许进入 State；配置只允许进入 Config；禁止把临时状态塞进 self.*。
-4. 触发任一上限时（700 LOC / self>8 / methods>12）：立刻停止编码，输出《拆分方案》（不写代码），包含：
-   - 新文件/模块清单 + 各自职责边界
-   - State/Config 归属与数据流（显式入参/出参）
-   - 分步迁移计划（每步小、可运行、可回滚）
-   - 可能的连锁影响与回归风险 + 缓解点（测试/适配/隔离）
 
-────────────────────────────────────────
-## 3) 设计模式提点器（超极简 6 条）
+## KISS 原则
+ KISS 的好处
 
-规则：命中触发条件时，你必须在方案里“采用某模式”或“明确说明不采用的理由”，并给出最小落地形态（文件/接口/类）。一次变更优先只用 1 个主模式，避免叠模式。
+   1 易于理解 — 代码一看就懂
+   2 易于维护 — 修改时不会牵一发而动全身
+   3 易于测试 — 同步代码测试简单
+   4 性能更好 — 没有不必要的异步开销
+   5 减少 Bug — 简单代码出错概率低
+  
+  相关原则
 
-1) 分支爆炸（大量 if/elif 按 type/provider/mode 分派）→ Strategy  
-   最小形态：`Protocol` + `strategies/` + 单一选择点（registry/工厂函数）。
+   原则   含义                                     场景
+   ────────────────────────────────────────────────────────────────────────────
+   KISS   保持简单                                 通用设计
+   YAGNI  You Ain't Gonna Need It（你不会需要它）  不要提前实现可能用不到的功能
+   DRY    Don't Repeat Yourself（不要重复自己）    代码复用
+   SOLID  单一职责、开闭原则等                     面向对象设计
 
-2) 很多动作/命令（CLI/TUI 命令可扩展）→ Command  
-   最小形态：`commands/` + `Command.execute(ctx)` + dispatcher 映射。
+## TUI 编程铁律
+ 
+不要做 History TUI。历史永远只写入终端 scrollback，UI 只负责底部输入、补全菜单和状态栏。任何“把聊天历史放进可滚动窗口/HSplit 顶部 TextArea”的实现，一律视为回归并拒绝合并。
 
-3) 行为依赖状态（很多 flag/self 状态驱动流程）→ State  
-   最小形态：显式 State 枚举/数据结构 + transition/handler 映射，禁止隐式散落的 flags。
+- Chat history 永远不进入 prompt_toolkit layout；历史唯一输出通道是 run_in_terminal(...) 追加到 scrollback。
 
-4) 外部依赖污染（prompt_toolkit/HTTP/DB/FS 到处 import、难测）→ Adapter（Ports & Adapters）  
-   最小形态：`ports.py`（Protocols）+ `adapters/`（具体实现）+ core 仅依赖 ports。
+- layout 允许存在“底部交互带”，其内容仅包括：loading（可选）、输入相关（input/问答 UI/补全菜单等短暂交互组件）、status。
 
-5) 核心类越来越胖（编排+业务+IO 混一起）→ Facade（薄壳）+ Extract Services  
-   最小形态：保留薄 `App/Facade` 只做 wiring；业务逻辑搬到 `services/`（尽量无状态）+ 显式 State/Config。
+- 禁止出现任何承载历史消息的 multiline read-only 组件（典型：TextArea(multiline=True, read_only=True)、或任何“messages/history/chat”命名的 Window/TextArea/FormattedTextControl）。
 
-6) 长流程串联（一个函数很多步骤想插拔/重排）→ Pipeline  
-   最小形态：`stages: list[Stage]`（函数/对象）+ `run(ctx)->ctx`，每步单一职责。
-
-方案输出必须包含两行：
-- 命中触发：上述 6 条里命中了哪些（如无命中写“无”）
-- 模式决策：采用的主模式（或不采用原因）+ 最小落地形态（文件/接口草图）
-
-────────────────────────────────────────
-## 4) Python 工程规则（硬规则）
-
-1. 字符串：必须使用 f-string；禁止 format/% 拼接（除非库接口要求）。
-2. 日志：必须使用 logging；禁止 print。
-3. 运行：必须用 `uv run python xxx.py` 运行脚本。
-4. 依赖：必须用 `uv add 包名` 安装依赖。
-5. 配置：禁止硬编码路径/配置/token；必须使用环境变量或配置文件；读取配置必须集中在 Config 构建处，业务逻辑不得到处读 env。
-6. 风格：遵循 PEP 8；使用 black 格式化；新增复杂逻辑优先抽到可测试的纯函数/小模块。
-
-────────────────────────────────────────
-## 5) Prompt_toolkit / TUI 铁律（硬规则）
-
-1. 禁止 History TUI：聊天历史只写入终端 scrollback；UI layout 只允许底部输入/补全/状态栏；历史输出唯一通道是 `run_in_terminal(...)` 追加。
-2. 禁止承载历史的 multiline read-only 组件：
-   - 禁止 `TextArea(multiline=True, read_only=True)` 或任何 messages/history/chat 命名的 Window/TextArea/FormattedTextControl。
-3. 禁止回写已输出到 scrollback 的历史行：只能追加，不可修改。
-4. 涉及 prompt_toolkit：必须使用 context7 mcp 的 `resolve-library-id` + `query-docs` 校验用法；查不到关键文档就停下问我/说明不确定点。
-
-────────────────────────────────────────
-## 6) 排查/修复（必须工程化）
-
-当我要求“排查/修 bug/修复/重构”时，你必须先输出：
-- 根因（为什么会发生）
-- 影响面（哪些模块/调用方/行为会受影响）
-- 连锁风险（可能破坏什么）
-- 缓解与回滚（测试点/隔离/适配/渐进迁移）
-然后等我确认方案再编码。
+- 禁止“回写/修改”已经写进 scrollback 的历史行（比如工具开始打一行，结束回去改成绿色）。scrollback 只允许追加不可变日志。
+ 
+ 

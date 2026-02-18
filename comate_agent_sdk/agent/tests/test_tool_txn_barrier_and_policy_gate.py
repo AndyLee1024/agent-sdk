@@ -258,7 +258,8 @@ class _FakeAnthropicChatModel:
 
 
 class TestToolTxnBarrierTokenCount(unittest.IsolatedAsyncioTestCase):
-    async def test_anthropic_count_tokens_is_called_while_tool_is_running(self) -> None:
+    async def test_get_context_info_does_not_block_while_tool_is_running(self) -> None:
+        """get_context_info() must return promptly even when a tool is executing."""
         started = asyncio.Event()
 
         @tool("Slow tool")
@@ -302,8 +303,10 @@ class TestToolTxnBarrierTokenCount(unittest.IsolatedAsyncioTestCase):
         run_task = asyncio.create_task(_drive())
         await asyncio.wait_for(started.wait(), timeout=1.0)
 
-        await agent.get_context_info()
-        self.assertGreaterEqual(messages.count_calls, 1)
+        # get_context_info uses incremental IR delta now, no API calls needed —
+        # verify it completes promptly without blocking on the running tool.
+        ctx_info = await asyncio.wait_for(agent.get_context_info(), timeout=0.5)
+        self.assertIsNotNone(ctx_info)
 
         await asyncio.wait_for(run_task, timeout=2.0)
 

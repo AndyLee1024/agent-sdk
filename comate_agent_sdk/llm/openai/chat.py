@@ -20,6 +20,7 @@ from comate_agent_sdk.llm.messages import BaseMessage, Function, ToolCall
 from comate_agent_sdk.llm.openai.serializer import OpenAIMessageSerializer
 from comate_agent_sdk.llm.thinking_presets import get_thinking_preset
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
+from comate_agent_sdk.tokens.custom_pricing import resolve_max_input_tokens_from_custom_pricing
 
 
 
@@ -179,6 +180,14 @@ class ChatOpenAI(BaseChatModel):
     @property
     def name(self) -> str:
         return str(self.model)
+
+    def get_context_window(self) -> int | None:
+        """Resolve context window from custom pricing data when available."""
+        return resolve_max_input_tokens_from_custom_pricing(str(self.model))
+
+    def get_usage(self, response: ChatCompletion) -> ChatInvokeUsage | None:
+        """Return usage statistics from an OpenAI ChatCompletion response."""
+        return self._get_usage(response)
 
     def _get_usage(self, response: ChatCompletion) -> ChatInvokeUsage | None:
         if response.usage is not None:

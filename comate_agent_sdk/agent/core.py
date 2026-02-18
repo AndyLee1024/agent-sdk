@@ -591,17 +591,13 @@ class AgentRuntime:
         next_step_estimated_tokens = used_tokens_with_tools
         last_step_reported_tokens = 0
         if self._token_accounting is not None:
-            try:
-                estimate = await self._token_accounting.estimate_next_step(
-                    context=self._context,
-                    llm=self.llm,
-                    tool_definitions=tool_definitions,
-                    timeout_ms=self.token_count_timeout_ms,
+            last_step_reported_tokens = self._token_accounting.last_reported_total_tokens
+            if last_step_reported_tokens > 0:
+                ir_delta = max(
+                    0,
+                    self._context.total_tokens - self._token_accounting.ir_total_at_last_report,
                 )
-                next_step_estimated_tokens = estimate.buffered_tokens
-                last_step_reported_tokens = self._token_accounting.last_reported_total_tokens
-            except Exception as e:
-                logger.debug(f"get_context_info 估算 next-step 失败，回退 IR 口径: {e}", exc_info=True)
+                next_step_estimated_tokens = last_step_reported_tokens + ir_delta
 
         if last_step_reported_tokens <= 0 and self._token_cost.usage_history:
             last_step_reported_tokens = int(self._token_cost.usage_history[-1].usage.total_tokens)

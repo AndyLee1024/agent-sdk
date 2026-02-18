@@ -16,20 +16,9 @@ class _FakeCompactionService:
         return self._threshold
 
 
-class _FakeTokenCounter:
-    def __init__(self, estimated_tokens: int) -> None:
-        self.estimated_tokens = estimated_tokens
-        self.calls: list[int] = []
-
-    async def count_messages_for_model(self, messages, *, llm, timeout_ms: int = 300) -> int:
-        self.calls.append(timeout_ms)
-        return self.estimated_tokens
-
-
 class _FakeContext:
-    def __init__(self, token_counter: _FakeTokenCounter) -> None:
-        self.token_counter = token_counter
-        self.total_tokens = 999
+    def __init__(self, total_tokens: int) -> None:
+        self.total_tokens = total_tokens
         self.auto_compact_calls: list[int] = []
 
     def lower(self):
@@ -40,46 +29,52 @@ class _FakeContext:
         return True
 
 
-class _FakeEstimate:
-    def __init__(self, raw_total_tokens: int, buffered_tokens: int, safety_margin_ratio: float) -> None:
-        self.raw_total_tokens = raw_total_tokens
-        self.buffered_tokens = buffered_tokens
-        self.safety_margin_ratio = safety_margin_ratio
-        self.calibration_ratio = 1.0
-
-
 class _FakeTokenAccounting:
-    def __init__(self, estimate: _FakeEstimate) -> None:
-        self.estimate = estimate
-        self.calls = 0
+    """Minimal fake that exposes the baseline properties used by incremental estimation."""
 
-    async def estimate_next_step(self, *, context, llm, tool_definitions, timeout_ms: int):
-        self.calls += 1
-        return self.estimate
+    def __init__(self, last_reported: int = 0, ir_total_at_last_report: int = 0) -> None:
+        self.last_reported_total_tokens = last_reported
+        self.ir_total_at_last_report = ir_total_at_last_report
+        self.reset_calls = 0
+
+    def reset_baseline(self) -> None:
+        self.reset_calls += 1
+
+
+def _make_agent(
+    context: _FakeContext,
+    compaction_service: _FakeCompactionService,
+    token_accounting: _FakeTokenAccounting | None = None,
+    precheck_buffer_ratio: float = 0.12,
+) -> SimpleNamespace:
+    agent = SimpleNamespace(
+        _compaction_service=compaction_service,
+        _context=context,
+        _token_accounting=token_accounting,
+        precheck_buffer_ratio=precheck_buffer_ratio,
+        llm=SimpleNamespace(model="gpt-4o", provider="openai"),
+        offload_enabled=False,
+        _context_fs=None,
+        offload_policy=None,
+        offload_token_threshold=2000,
+        _token_cost=None,
+        _effective_level=None,
+    )
+    return agent
 
 
 class TestRunnerPrecheckBuffer(unittest.TestCase):
-    def test_precheck_triggers_with_buffered_tokens(self) -> None:
-        token_counter = _FakeTokenCounter(estimated_tokens=90)
-        context = _FakeContext(token_counter)
-        compaction_service = _FakeCompactionService(threshold=100, enabled=True)
+    # ── fallback path (no token_accounting / last_reported == 0) ─────────────
 
-        agent = SimpleNamespace(
-            _compaction_service=compaction_service,
-            _context=context,
-            token_count_timeout_ms=300,
-            precheck_buffer_ratio=0.12,
-            llm=SimpleNamespace(model="gpt-4o", provider="openai"),
-            offload_enabled=False,
-            _context_fs=None,
-            offload_policy=None,
-            offload_token_threshold=2000,
-            _token_cost=None,
-            _effective_level=None,
-        )
+    def test_precheck_triggers_with_buffered_tokens_ir_fallback(self) -> None:
+        """Without token_accounting, precheck uses context.total_tokens as base."""
+        context = _FakeContext(total_tokens=90)
+        compaction_service = _FakeCompactionService(threshold=100, enabled=True)
+        agent = _make_agent(context, compaction_service)
 
         compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
 
+        # 90 * 1.12 = 100.8 → int = 100 ≥ 100 → trigger
         self.assertTrue(compacted)
         self.assertIsNotNone(event)
         self.assertEqual(meta_events, [])
@@ -87,69 +82,108 @@ class TestRunnerPrecheckBuffer(unittest.TestCase):
         self.assertEqual(event.threshold, 100)
         self.assertEqual(event.trigger, "precheck")
         self.assertEqual(context.auto_compact_calls, [100])
-        self.assertEqual(token_counter.calls, [300])
 
     def test_precheck_skips_when_buffered_tokens_below_threshold(self) -> None:
-        token_counter = _FakeTokenCounter(estimated_tokens=80)
-        context = _FakeContext(token_counter)
+        """Without token_accounting, precheck skips when total_tokens * buffer < threshold."""
+        context = _FakeContext(total_tokens=80)
         compaction_service = _FakeCompactionService(threshold=100, enabled=True)
-
-        agent = SimpleNamespace(
-            _compaction_service=compaction_service,
-            _context=context,
-            token_count_timeout_ms=300,
-            precheck_buffer_ratio=0.12,
-            llm=SimpleNamespace(model="gpt-4o", provider="openai"),
-            offload_enabled=False,
-            _context_fs=None,
-            offload_policy=None,
-            offload_token_threshold=2000,
-            _token_cost=None,
-            _effective_level=None,
-        )
+        agent = _make_agent(context, compaction_service)
 
         compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
 
+        # 80 * 1.12 = 89.6 → int = 89 < 100 → skip
         self.assertFalse(compacted)
         self.assertIsNone(event)
         self.assertEqual(meta_events, [])
         self.assertEqual(context.auto_compact_calls, [])
 
-    def test_precheck_uses_token_accounting_estimate_when_available(self) -> None:
-        token_counter = _FakeTokenCounter(estimated_tokens=10)
-        context = _FakeContext(token_counter)
-        compaction_service = _FakeCompactionService(threshold=100, enabled=True)
-        token_accounting = _FakeTokenAccounting(
-            _FakeEstimate(raw_total_tokens=70, buffered_tokens=105, safety_margin_ratio=0.12)
-        )
+    # ── incremental path (token_accounting with last_reported > 0) ───────────
 
-        agent = SimpleNamespace(
-            _compaction_service=compaction_service,
-            _context=context,
-            _token_accounting=token_accounting,
-            token_count_timeout_ms=300,
-            precheck_buffer_ratio=0.12,
-            llm=SimpleNamespace(model="gpt-4o", provider="openai"),
-            tool_definitions=[],
-            offload_enabled=False,
-            _context_fs=None,
-            offload_policy=None,
-            offload_token_threshold=2000,
-            _token_cost=None,
-            _effective_level=None,
-        )
+    def test_precheck_uses_incremental_estimation_when_reported_available(self) -> None:
+        """With a known last_reported baseline, precheck uses last_reported + IR delta."""
+        # last_reported=900, ir_snapshot=850, current_ir=920 → delta=70 → est=970
+        # 970 * 1.12 = 1086.4 → 1086 ≥ threshold=1000 → trigger
+        context = _FakeContext(total_tokens=920)
+        compaction_service = _FakeCompactionService(threshold=1000, enabled=True)
+        token_accounting = _FakeTokenAccounting(last_reported=900, ir_total_at_last_report=850)
+        agent = _make_agent(context, compaction_service, token_accounting)
 
         compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
 
+        expected_estimated = 900 + (920 - 850)  # 970
+        expected_buffered = int(970 * 1.12)  # 1086
         self.assertTrue(compacted)
         self.assertIsNotNone(event)
-        self.assertEqual(meta_events, [])
-        self.assertEqual(event.current_tokens, 105)
-        self.assertEqual(event.threshold, 100)
-        self.assertEqual(event.trigger, "precheck")
-        self.assertEqual(context.auto_compact_calls, [105])
-        self.assertEqual(token_accounting.calls, 1)
-        self.assertEqual(token_counter.calls, [])
+        self.assertEqual(event.current_tokens, expected_buffered)
+        self.assertEqual(context.auto_compact_calls, [expected_buffered])
+
+    def test_precheck_skips_when_incremental_estimate_below_threshold(self) -> None:
+        """Incremental estimate below threshold: no compaction."""
+        # last_reported=500, ir_snapshot=480, current_ir=490 → delta=10 → est=510
+        # 510 * 1.12 = 571.2 → 571 < 1000 → skip
+        context = _FakeContext(total_tokens=490)
+        compaction_service = _FakeCompactionService(threshold=1000, enabled=True)
+        token_accounting = _FakeTokenAccounting(last_reported=500, ir_total_at_last_report=480)
+        agent = _make_agent(context, compaction_service, token_accounting)
+
+        compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
+
+        self.assertFalse(compacted)
+        self.assertIsNone(event)
+        self.assertEqual(context.auto_compact_calls, [])
+
+    def test_precheck_falls_back_to_ir_when_last_reported_is_zero(self) -> None:
+        """When token_accounting exists but last_reported=0, use context.total_tokens."""
+        # total_tokens=920, last_reported=0 → fallback → 920 * 1.12 = 1030 ≥ 1000
+        context = _FakeContext(total_tokens=920)
+        compaction_service = _FakeCompactionService(threshold=1000, enabled=True)
+        token_accounting = _FakeTokenAccounting(last_reported=0, ir_total_at_last_report=0)
+        agent = _make_agent(context, compaction_service, token_accounting)
+
+        compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
+
+        expected_buffered = int(920 * 1.12)  # 1030
+        self.assertTrue(compacted)
+        self.assertEqual(event.current_tokens, expected_buffered)
+
+    def test_precheck_clamps_negative_ir_delta(self) -> None:
+        """When IR shrinks (e.g. messages removed), delta is clamped to 0."""
+        # current_ir=800, ir_snapshot=900 → delta=max(0,-100)=0 → est=last_reported=1000
+        # 1000 * 1.12 = 1120 ≥ 1000 → trigger
+        context = _FakeContext(total_tokens=800)
+        compaction_service = _FakeCompactionService(threshold=1000, enabled=True)
+        token_accounting = _FakeTokenAccounting(last_reported=1000, ir_total_at_last_report=900)
+        agent = _make_agent(context, compaction_service, token_accounting)
+
+        compacted, event, meta_events = asyncio.run(precheck_and_compact(agent))
+
+        expected_buffered = int(1000 * 1.12)  # 1120
+        self.assertTrue(compacted)
+        self.assertEqual(event.current_tokens, expected_buffered)
+
+    def test_reset_baseline_called_after_compaction(self) -> None:
+        """reset_baseline() is called on token_accounting after compaction fires."""
+        context = _FakeContext(total_tokens=90)
+        compaction_service = _FakeCompactionService(threshold=100, enabled=True)
+        token_accounting = _FakeTokenAccounting(last_reported=0, ir_total_at_last_report=0)
+        agent = _make_agent(context, compaction_service, token_accounting)
+
+        compacted, _, _ = asyncio.run(precheck_and_compact(agent))
+
+        self.assertTrue(compacted)
+        self.assertEqual(token_accounting.reset_calls, 1)
+
+    def test_no_reset_when_no_compaction(self) -> None:
+        """reset_baseline() is NOT called when compaction is skipped."""
+        context = _FakeContext(total_tokens=50)
+        compaction_service = _FakeCompactionService(threshold=1000, enabled=True)
+        token_accounting = _FakeTokenAccounting(last_reported=0, ir_total_at_last_report=0)
+        agent = _make_agent(context, compaction_service, token_accounting)
+
+        compacted, _, _ = asyncio.run(precheck_and_compact(agent))
+
+        self.assertFalse(compacted)
+        self.assertEqual(token_accounting.reset_calls, 0)
 
 
 if __name__ == "__main__":
