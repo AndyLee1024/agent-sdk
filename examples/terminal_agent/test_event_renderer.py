@@ -193,6 +193,32 @@ class TestEventRenderer(unittest.TestCase):
         self.assertTrue(system_entries)
         self.assertIn("中断", system_entries[-1].text)
 
+    def test_reset_history_view_clears_runtime_state(self) -> None:
+        renderer = EventRenderer()
+        renderer.start_turn()
+        renderer.seed_user_message("hello")
+        renderer.handle_event(
+            ToolCallEvent(
+                tool="Read",
+                args={"file_path": "a.py"},
+                tool_call_id="tc_reset_1",
+            )
+        )
+        renderer.handle_event(
+            TodoUpdatedEvent(
+                todos=[{"content": "a", "status": "pending", "priority": "medium"}]
+            )
+        )
+        self.assertTrue(renderer.history_entries())
+        self.assertTrue(renderer.has_running_tools())
+        self.assertTrue(renderer.has_active_todos())
+
+        renderer.reset_history_view()
+
+        self.assertEqual(renderer.history_entries(), [])
+        self.assertFalse(renderer.has_running_tools())
+        self.assertFalse(renderer.has_active_todos())
+
     def test_edit_tool_result_with_diff_renders_rich_text(self) -> None:
         renderer = EventRenderer()
         renderer.start_turn()

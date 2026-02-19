@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 from rich.console import Console
@@ -146,10 +147,12 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
     tui.add_resume_history(mode)
 
     usage_line: str | None = None
+    active_session = session
     try:
         await tui.run()
+        active_session = tui.session
         try:
-            usage = await session.get_usage()
+            usage = await active_session.get_usage()
             usage_line = _format_exit_usage_line(usage)
         except Exception as exc:
             logger.warning(
@@ -157,14 +160,17 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
                 exc_info=True,
             )
     finally:
-        await session.close()
+        if active_session is not session:
+            with suppress(Exception):
+                await session.close()
+        await active_session.close()
 
     if usage_line:
         console.print(f"[dim]{usage_line}[/]")
 
     console.print(
         f"[dim]Goodbye. Resume with: [bold cyan]comate resume "
-        f"{session.session_id}[/][/]"
+        f"{active_session.session_id}[/][/]"
     )
 
 

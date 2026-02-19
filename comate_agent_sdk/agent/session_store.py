@@ -10,6 +10,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.llm.messages import (
@@ -339,6 +340,21 @@ def build_usage_event(
     }
 
 
+def build_header_snapshot_event(
+    *,
+    session_id: str,
+    snapshot: dict[str, Any],
+    turn_number: int = 0,
+) -> dict:
+    return {
+        "schema_version": PERSISTENCE_SCHEMA_VERSION,
+        "session_id": session_id,
+        "turn_number": max(0, int(turn_number)),
+        "op": "header_snapshot",
+        "header": snapshot,
+    }
+
+
 def slice_usage_delta(
     usage_history: list[TokenUsageEntry],
     *,
@@ -353,6 +369,7 @@ def replay_session_events(
     *,
     path: Path,
     offload_root: Path,
+    max_turn: int | None = None,
 ) -> tuple[int, list[ContextItem], list[TokenUsageEntry]]:
     if not path.exists():
         return 0, [], []
@@ -376,6 +393,8 @@ def replay_session_events(
                 continue
 
             turn_number = int(data.get("turn_number", 0))
+            if max_turn is not None and turn_number > max_turn:
+                continue
             if turn_number > last_turn:
                 last_turn = turn_number
 
@@ -461,9 +480,59 @@ def replay_session_events(
     return last_turn, items, usage_entries
 
 
+def replay_header_snapshot(
+    *,
+    path: Path,
+    max_turn: int | None = None,
+) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+
+    snapshot: dict[str, Any] | None = None
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                data = json.loads(raw)
+            except Exception:
+                continue
+            if data.get("schema_version") != PERSISTENCE_SCHEMA_VERSION:
+                continue
+
+            turn_number = int(data.get("turn_number", 0))
+            if max_turn is not None and turn_number > max_turn:
+                continue
+            if data.get("op") != "header_snapshot":
+                continue
+            if snapshot is not None:
+                # 固定首版 header：后续快照不覆盖。
+                continue
+
+            header = data.get("header")
+            if isinstance(header, dict):
+                snapshot = header
+
+    return snapshot
+
+
 def replay_conversation_events(*, path: Path, offload_root: Path) -> tuple[int, list[ContextItem]]:
     turn_number, items, _ = replay_session_events(path=path, offload_root=offload_root)
     return turn_number, items
+
+
+def replay_session_events_until_turn(
+    *,
+    path: Path,
+    offload_root: Path,
+    max_turn: int,
+) -> tuple[int, list[ContextItem], list[TokenUsageEntry]]:
+    return replay_session_events(
+        path=path,
+        offload_root=offload_root,
+        max_turn=max_turn,
+    )
 
 
 def events_jsonl_append(path: Path, event: dict) -> None:

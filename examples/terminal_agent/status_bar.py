@@ -43,6 +43,10 @@ class StatusBar:
         normalized = str(model_name).strip()
         self._model_name = normalized or "unknown-model"
 
+    def set_session(self, session: ChatSession) -> None:
+        self._session = session
+        self._model_name = self._resolve_model_name(session)
+
     @staticmethod
     def _resolve_git_branch() -> str:
         try:

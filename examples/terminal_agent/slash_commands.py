@@ -63,6 +63,7 @@ SLASH_COMMAND_SPECS: tuple[SlashCommandSpec, ...] = (
     SlashCommandSpec(name="session", description="Show current session ID"),
     SlashCommandSpec(name="usage", description="Show token usage summary"),
     SlashCommandSpec(name="context", description="Show context usage summary"),
+    SlashCommandSpec(name="rewind", description="Rewind to a checkpoint"),
     SlashCommandSpec(name="exit", description="Exit terminal agent", aliases=("quit",)),
 )
 SLASH_COMMANDS: tuple[str, ...] = tuple(f"/{cmd.name}" for cmd in SLASH_COMMAND_SPECS)

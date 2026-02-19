@@ -35,6 +35,7 @@ from comate_agent_sdk.context.observer import (
 from comate_agent_sdk.context.reminder_engine import (
     ReminderEngine,
     ReminderOrigin,
+    ReminderState,
 )
 from comate_agent_sdk.llm.messages import (
     AssistantMessage,
@@ -846,6 +847,78 @@ class ContextIR:
             metadata=metadata,
         )
 
+    def rehydrate_reminder_state_from_conversation(
+        self,
+        *,
+        suppress_task_nudge_on_next_turn: bool = False,
+    ) -> None:
+        """根据当前 conversation 重建 reminder 运行态。
+
+        主要用于 session resume / rewind 后，避免因为状态丢失导致首轮误触发 reminder。
+        """
+        current = self._reminder_engine.state
+        rebuilt = ReminderState(
+            turn=self._turn_number,
+            mode_plan=bool(current.mode_plan),
+            last_task_turn=0,
+            last_task_nudge_turn=0,
+            last_todowrite_turn=max(0, int(current.last_todowrite_turn)),
+            todo_active_count=max(0, int(current.todo_active_count)),
+            todo_last_changed_turn=max(0, int(current.todo_last_changed_turn)),
+            last_todo_nudge_turn=max(0, int(current.last_todo_nudge_turn)),
+        )
+
+        for item in self.conversation.items:
+            if item.destroyed:
+                continue
+
+            item_turn = max(0, int(getattr(item, "created_turn", 0) or 0))
+            if item.item_type == ItemType.TOOL_RESULT and not bool(item.is_tool_error):
+                tool_name = str(item.tool_name or "").strip()
+                if not tool_name and isinstance(item.message, ToolMessage):
+                    tool_name = str(item.message.tool_name or "").strip()
+
+                if tool_name == "Task":
+                    rebuilt.last_task_turn = max(rebuilt.last_task_turn, item_turn)
+                elif tool_name == "TodoWrite":
+                    rebuilt.last_todowrite_turn = max(rebuilt.last_todowrite_turn, item_turn)
+                    envelope = (item.metadata or {}).get("tool_raw_envelope")
+                    if isinstance(envelope, dict):
+                        data = envelope.get("data", {})
+                        if isinstance(data, dict):
+                            active_count = data.get("active_count")
+                            if isinstance(active_count, int):
+                                normalized_active = max(0, int(active_count))
+                                if (rebuilt.todo_active_count == 0) != (normalized_active == 0):
+                                    rebuilt.todo_last_changed_turn = max(
+                                        rebuilt.todo_last_changed_turn,
+                                        item_turn,
+                                    )
+                                rebuilt.todo_active_count = normalized_active
+
+            if not self._is_system_reminder_item(item):
+                continue
+            metadata = item.metadata or {}
+            raw_rule_ids = metadata.get("reminder_rule_ids", [])
+            if isinstance(raw_rule_ids, list):
+                rule_ids = {str(rule_id) for rule_id in raw_rule_ids}
+            else:
+                rule_ids = set()
+
+            reminder_turn = max(
+                0,
+                int(metadata.get("reminder_turn", item_turn) or item_turn),
+            )
+            if "task_gap_reminder" in rule_ids:
+                rebuilt.last_task_nudge_turn = max(rebuilt.last_task_nudge_turn, reminder_turn)
+            if "todo_active_reminder" in rule_ids or "todo_empty_reminder" in rule_ids:
+                rebuilt.last_todo_nudge_turn = max(rebuilt.last_todo_nudge_turn, reminder_turn)
+
+        if suppress_task_nudge_on_next_turn:
+            rebuilt.last_task_nudge_turn = max(rebuilt.last_task_nudge_turn, self._turn_number)
+
+        self._reminder_engine.state = rebuilt
+
     def _is_system_reminder_item(self, item: ContextItem) -> bool:
         if item.item_type == ItemType.SYSTEM_REMINDER:
             return True
@@ -972,6 +1045,133 @@ class ContextIR:
         return result
 
     # ===== 序列化 =====
+
+    @staticmethod
+    def _snapshot_item_to_dict(item: ContextItem) -> dict[str, Any]:
+        message_data = item.message.model_dump(mode="json") if item.message is not None else None
+        return {
+            "id": item.id,
+            "item_type": item.item_type.value,
+            "message": message_data,
+            "content_text": item.content_text,
+            "token_count": item.token_count,
+            "priority": item.priority,
+            "ephemeral": item.ephemeral,
+            "destroyed": item.destroyed,
+            "tool_name": item.tool_name,
+            "created_at": item.created_at,
+            "metadata": item.metadata,
+            "cache_hint": item.cache_hint,
+            "offload_path": item.offload_path,
+            "offloaded": item.offloaded,
+            "is_tool_error": item.is_tool_error,
+            "created_turn": item.created_turn,
+        }
+
+    @staticmethod
+    def _snapshot_message_from_dict(data: dict[str, Any] | None) -> BaseMessage | None:
+        if data is None:
+            return None
+        role = data.get("role")
+        if role == "user":
+            return UserMessage.model_validate(data)
+        if role == "assistant":
+            return AssistantMessage.model_validate(data)
+        if role == "tool":
+            return ToolMessage.model_validate(data)
+        if role == "system":
+            return SystemMessage.model_validate(data)
+        if role == "developer":
+            return DeveloperMessage.model_validate(data)
+        raise ValueError(f"Unsupported message role in header snapshot: {role}")
+
+    @classmethod
+    def _snapshot_item_from_dict(cls, data: dict[str, Any]) -> ContextItem:
+        message_data = data.get("message")
+        message = cls._snapshot_message_from_dict(message_data if isinstance(message_data, dict) else None)
+        kwargs: dict[str, Any] = {}
+        item_id = data.get("id")
+        if isinstance(item_id, str) and item_id.strip():
+            kwargs["id"] = item_id
+        return ContextItem(
+            item_type=ItemType(data["item_type"]),
+            message=message,
+            content_text=data.get("content_text", ""),
+            token_count=int(data.get("token_count", 0)),
+            priority=int(data.get("priority", 50)),
+            ephemeral=bool(data.get("ephemeral", False)),
+            destroyed=bool(data.get("destroyed", False)),
+            tool_name=data.get("tool_name"),
+            created_at=float(data.get("created_at", 0.0)),
+            metadata=data.get("metadata", {}) or {},
+            cache_hint=bool(data.get("cache_hint", False)),
+            offload_path=data.get("offload_path"),
+            offloaded=bool(data.get("offloaded", False)),
+            is_tool_error=bool(data.get("is_tool_error", False)),
+            created_turn=int(data.get("created_turn", 0)),
+            **kwargs,
+        )
+
+    def export_header_snapshot(self) -> dict[str, Any]:
+        """导出 header + memory 快照（用于会话级持久化）。"""
+        header_items = [
+            self._snapshot_item_to_dict(item)
+            for item in self.header.items
+            if item.item_type in _HEADER_ITEM_ORDER
+        ]
+        memory_item = self._snapshot_item_to_dict(self._memory_item) if self._memory_item else None
+        return {
+            "schema_version": 1,
+            "header_items": header_items,
+            "memory_item": memory_item,
+        }
+
+    def import_header_snapshot(self, snapshot: dict[str, Any]) -> None:
+        """导入 header + memory 快照。"""
+        if not isinstance(snapshot, dict):
+            raise ValueError("header snapshot must be a dict")
+        raw_items = snapshot.get("header_items")
+        if not isinstance(raw_items, list):
+            raise ValueError("header snapshot missing header_items list")
+
+        allowed_header_types = set(_HEADER_ITEM_ORDER.keys())
+        restored_header: list[ContextItem] = []
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise ValueError("header snapshot contains invalid header item")
+            item = self._snapshot_item_from_dict(raw_item)
+            if item.item_type not in allowed_header_types:
+                raise ValueError(f"unsupported header item_type in snapshot: {item.item_type.value}")
+            item.message = None
+            item.ephemeral = False
+            item.tool_name = None
+            item.token_count = self.token_counter.count(item.content_text or "")
+            restored_header.append(item)
+
+        restored_header.sort(key=lambda it: _HEADER_ITEM_ORDER.get(it.item_type, 999))
+        self.header.items = restored_header
+
+        raw_memory = snapshot.get("memory_item")
+        if raw_memory is None:
+            self._memory_item = None
+            return
+        if not isinstance(raw_memory, dict):
+            raise ValueError("header snapshot memory_item must be a dict or null")
+
+        memory_item = self._snapshot_item_from_dict(raw_memory)
+        if memory_item.item_type != ItemType.MEMORY:
+            raise ValueError("header snapshot memory_item type must be memory")
+        if memory_item.message is None:
+            raise ValueError("header snapshot memory_item.message is required")
+        if not isinstance(memory_item.message, UserMessage):
+            raise ValueError("header snapshot memory_item.message must be UserMessage")
+        if not bool(getattr(memory_item.message, "is_meta", False)):
+            raise ValueError("header snapshot memory_item.message must be meta user message")
+
+        if not memory_item.content_text:
+            memory_item.content_text = memory_item.message.text
+        memory_item.token_count = self.token_counter.count(memory_item.content_text)
+        self._memory_item = memory_item
 
     def clear(self) -> None:
         """清空所有上下文"""

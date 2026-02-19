@@ -7,14 +7,17 @@ from pathlib import Path
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig
-from comate_agent_sdk.agent.chat_session import ChatSession
+from comate_agent_sdk.agent.chat_session import ChatSession, ChatSessionError
 from comate_agent_sdk.agent.session_store import (
     ConversationState as _ConversationState,
     build_conversation_event as _build_conversation_event,
+    build_header_snapshot_event as _build_header_snapshot_event,
     events_jsonl_append as _events_jsonl_append,
+    replay_header_snapshot as _replay_header_snapshot,
     replay_conversation_events as _replay_conversation_events,
     replay_session_events as _replay_session_events,
 )
+from comate_agent_sdk.context.ir import ContextIR
 from comate_agent_sdk.context.items import ContextItem, ItemType
 from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage, UserMessage
 from comate_agent_sdk.llm.views import ChatInvokeUsage
@@ -38,6 +41,22 @@ class _FakeChatModel:
 
 
 class TestChatSessionPersistence(unittest.TestCase):
+    @staticmethod
+    def _append_header_snapshot(path: Path, *, session_id: str = "s1", snapshot: dict | None = None) -> None:
+        payload = snapshot or {
+            "schema_version": 1,
+            "header_items": [],
+            "memory_item": None,
+        }
+        _events_jsonl_append(
+            path,
+            _build_header_snapshot_event(
+                session_id=session_id,
+                snapshot=payload,
+                turn_number=0,
+            ),
+        )
+
     @staticmethod
     def _make_usage_entry(
         *,
@@ -406,11 +425,129 @@ class TestChatSessionPersistence(unittest.TestCase):
             self.assertEqual(replayed_usage[0].model, "m3")
             self.assertEqual(replayed_usage[0].usage.total_tokens, 5)
 
+    def test_replay_session_events_with_max_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            offload_root = root / "offload"
+            path = root / "context.jsonl"
+
+            a = ContextItem(
+                id="u1",
+                item_type=ItemType.USER_MESSAGE,
+                message=UserMessage(content="t1"),
+                content_text="t1",
+                token_count=1,
+            )
+            b = ContextItem(
+                id="u2",
+                item_type=ItemType.USER_MESSAGE,
+                message=UserMessage(content="t2"),
+                content_text="t2",
+                token_count=1,
+            )
+
+            evt1 = _build_conversation_event(
+                session_id="s1",
+                turn_number=1,
+                before=_ConversationState.capture([]),
+                after_items=[a],
+                offload_root=offload_root,
+            )
+            evt2 = _build_conversation_event(
+                session_id="s1",
+                turn_number=2,
+                before=_ConversationState.capture([a]),
+                after_items=[a, b],
+                offload_root=offload_root,
+            )
+            _events_jsonl_append(path, evt1)
+            _events_jsonl_append(path, evt2)
+
+            turn, replayed_items, _ = _replay_session_events(
+                path=path,
+                offload_root=offload_root,
+                max_turn=1,
+            )
+            self.assertEqual(turn, 1)
+            self.assertEqual([item.id for item in replayed_items], ["u1"])
+
+    def test_replay_header_snapshot_keeps_first_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            path = root / "context.jsonl"
+            first_snapshot = {
+                "schema_version": 1,
+                "header_items": [
+                    {
+                        "item_type": "system_prompt",
+                        "message": None,
+                        "content_text": "FIRST",
+                        "token_count": 1,
+                        "priority": 100,
+                        "ephemeral": False,
+                        "destroyed": False,
+                        "tool_name": None,
+                        "created_at": 0.0,
+                        "metadata": {},
+                        "cache_hint": False,
+                        "offload_path": None,
+                        "offloaded": False,
+                        "is_tool_error": False,
+                        "created_turn": 0,
+                    }
+                ],
+                "memory_item": None,
+            }
+            second_snapshot = {
+                "schema_version": 1,
+                "header_items": [
+                    {
+                        "item_type": "system_prompt",
+                        "message": None,
+                        "content_text": "SECOND",
+                        "token_count": 1,
+                        "priority": 100,
+                        "ephemeral": False,
+                        "destroyed": False,
+                        "tool_name": None,
+                        "created_at": 0.0,
+                        "metadata": {},
+                        "cache_hint": False,
+                        "offload_path": None,
+                        "offloaded": False,
+                        "is_tool_error": False,
+                        "created_turn": 0,
+                    }
+                ],
+                "memory_item": None,
+            }
+            _events_jsonl_append(
+                path,
+                _build_header_snapshot_event(
+                    session_id="s1",
+                    snapshot=first_snapshot,
+                    turn_number=0,
+                ),
+            )
+            _events_jsonl_append(
+                path,
+                _build_header_snapshot_event(
+                    session_id="s1",
+                    snapshot=second_snapshot,
+                    turn_number=2,
+                ),
+            )
+            replayed = _replay_header_snapshot(path=path)
+            self.assertIsNotNone(replayed)
+            header_items = replayed.get("header_items", [])
+            self.assertEqual(header_items[0]["content_text"], "FIRST")
+
     def test_chat_session_resume_restores_usage_summary(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             session_root = root / "session"
             path = session_root / "context.jsonl"
+            self._append_header_snapshot(path, session_id="s1")
             usage_entry = self._make_usage_entry(
                 model="m1",
                 prompt_tokens=11,
@@ -476,10 +613,222 @@ class TestChatSessionPersistence(unittest.TestCase):
                 for line in (session_root / "context.jsonl").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            self.assertEqual([line["op"] for line in lines], ["conversation_reset", "usage_reset"])
-            self.assertEqual(lines[0]["turn_number"], 1)
+            self.assertEqual([line["op"] for line in lines], ["header_snapshot", "conversation_reset", "usage_reset"])
+            self.assertEqual(lines[0]["turn_number"], 0)
             self.assertEqual(lines[1]["turn_number"], 1)
+            self.assertEqual(lines[2]["turn_number"], 1)
 
+    def test_restore_conversation_to_turn_keeps_usage_history(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            offload_root = session_root / "offload"
+            context_path = session_root / "context.jsonl"
+            self._append_header_snapshot(context_path, session_id="s1")
+
+            u1 = ContextItem(
+                id="u1",
+                item_type=ItemType.USER_MESSAGE,
+                message=UserMessage(content="turn1"),
+                content_text="turn1",
+                token_count=1,
+            )
+            a1 = ContextItem(
+                id="a1",
+                item_type=ItemType.ASSISTANT_MESSAGE,
+                message=AssistantMessage(content="resp1"),
+                content_text="resp1",
+                token_count=1,
+            )
+            turn1_evt = _build_conversation_event(
+                session_id="s1",
+                turn_number=1,
+                before=_ConversationState.capture([]),
+                after_items=[u1, a1],
+                offload_root=offload_root,
+            )
+            _events_jsonl_append(context_path, turn1_evt)
+
+            u2 = ContextItem(
+                id="u2",
+                item_type=ItemType.USER_MESSAGE,
+                message=UserMessage(content="turn2"),
+                content_text="turn2",
+                token_count=1,
+            )
+            a2 = ContextItem(
+                id="a2",
+                item_type=ItemType.ASSISTANT_MESSAGE,
+                message=AssistantMessage(content="resp2"),
+                content_text="resp2",
+                token_count=1,
+            )
+            turn2_evt = _build_conversation_event(
+                session_id="s1",
+                turn_number=2,
+                before=_ConversationState.capture([u1, a1]),
+                after_items=[u1, a1, u2, a2],
+                offload_root=offload_root,
+            )
+            _events_jsonl_append(context_path, turn2_evt)
+
+            entry_1 = self._make_usage_entry(model="m1", prompt_tokens=10, completion_tokens=2)
+            entry_2 = self._make_usage_entry(model="m1", prompt_tokens=8, completion_tokens=1)
+            _events_jsonl_append(
+                context_path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 1,
+                    "op": "usage_delta",
+                    "usage": {"adds": [entry_1.model_dump(mode="json")]},
+                },
+            )
+            _events_jsonl_append(
+                context_path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 2,
+                    "op": "usage_delta",
+                    "usage": {"adds": [entry_2.model_dump(mode="json")]},
+                },
+            )
+
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+            session = ChatSession.resume(agent, session_id="s1", storage_root=session_root)
+            session.restore_conversation_to_turn(target_turn=1)
+
+            replay_turn, replay_items, replay_usage = _replay_session_events(
+                path=context_path,
+                offload_root=offload_root,
+            )
+            self.assertEqual(replay_turn, 3)
+            self.assertEqual([item.id for item in replay_items], ["u1", "a1"])
+            self.assertEqual(len(replay_usage), 2)
+
+            usage_summary = asyncio.run(session.get_usage())
+            self.assertEqual(usage_summary.entry_count, 2)
+            self.assertEqual(usage_summary.total_prompt_tokens, 18)
+            self.assertEqual(usage_summary.total_completion_tokens, 3)
+
+    def test_resume_rehydrate_reminder_avoids_immediate_task_nudge(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            offload_root = session_root / "offload"
+            path = session_root / "context.jsonl"
+            self._append_header_snapshot(path, session_id="s1")
+
+            u1 = ContextItem(
+                id="u1",
+                item_type=ItemType.USER_MESSAGE,
+                message=UserMessage(content="turn1"),
+                content_text="turn1",
+                token_count=1,
+            )
+            evt = _build_conversation_event(
+                session_id="s1",
+                turn_number=10,
+                before=_ConversationState.capture([]),
+                after_items=[u1],
+                offload_root=offload_root,
+            )
+            _events_jsonl_append(path, evt)
+
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+            session = ChatSession.resume(
+                agent,
+                session_id="s1",
+                storage_root=session_root,
+            )
+            reminder_item = session._agent._context.inject_due_reminders()
+            self.assertIsNone(reminder_item)
+
+    def test_resume_requires_header_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            path = session_root / "context.jsonl"
+            _events_jsonl_append(
+                path,
+                {
+                    "schema_version": "2.0",
+                    "session_id": "s1",
+                    "turn_number": 1,
+                    "op": "usage_delta",
+                    "usage": {"adds": []},
+                },
+            )
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+            with self.assertRaisesRegex(ChatSessionError, "header_snapshot"):
+                ChatSession.resume(
+                    agent,
+                    session_id="s1",
+                    storage_root=session_root,
+                )
+
+    def test_resume_restores_header_snapshot_over_runtime_initialization(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            path = session_root / "context.jsonl"
+            snapshot_ctx = ContextIR()
+            snapshot_ctx.set_system_prompt("SNAPSHOT_SYSTEM_PROMPT", cache=False)
+            snapshot_ctx.set_system_env("<system_env>SNAPSHOT_ENV</system_env>")
+            snapshot_ctx.set_memory("SNAPSHOT_MEMORY", cache=False)
+            self._append_header_snapshot(
+                path,
+                session_id="s1",
+                snapshot=snapshot_ctx.export_header_snapshot(),
+            )
+
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                ),
+            )
+            session = ChatSession.resume(
+                agent,
+                session_id="s1",
+                storage_root=session_root,
+            )
+            prompt_item = session._agent._context.header.find_one_by_type(ItemType.SYSTEM_PROMPT)
+            env_item = session._agent._context.header.find_one_by_type(ItemType.SYSTEM_ENV)
+            self.assertIsNotNone(prompt_item)
+            self.assertIsNotNone(env_item)
+            self.assertEqual(prompt_item.content_text, "SNAPSHOT_SYSTEM_PROMPT")
+            self.assertEqual(env_item.content_text, "<system_env>SNAPSHOT_ENV</system_env>")
+            self.assertIsNotNone(session._agent._context.memory_item)
+            self.assertIn("SNAPSHOT_MEMORY", session._agent._context.memory_item.content_text)
 
 if __name__ == "__main__":
     unittest.main()

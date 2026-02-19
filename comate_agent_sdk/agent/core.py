@@ -221,6 +221,7 @@ class AgentRuntime:
     _mcp_dirty: bool = field(default=False, repr=False, init=False)
     _mcp_pending_tool_names: list[str] = field(default_factory=list, repr=False, init=False)
     _mcp_load_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, init=False)
+    _lock_header_from_snapshot: bool = field(default=False, repr=False, init=False)
     _tools_allowlist_mode: bool = field(default=False, repr=False, init=False)
     _requested_tool_names: list[str] = field(default_factory=list, repr=False, init=False)
 
@@ -838,7 +839,10 @@ class AgentRuntime:
 
             self._apply_mcp_tools_to_agent(mcp_tools)
 
-            if mcp_tools:
+            lock_header = bool(getattr(self, "_lock_header_from_snapshot", False))
+            if lock_header:
+                logger.info("MCP header auto-refresh disabled by snapshot lock")
+            elif mcp_tools:
                 overview = manager.build_overview_text()
                 meta = manager.build_metadata()
                 try:

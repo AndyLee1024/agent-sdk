@@ -3,9 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from pathlib import Path
+
+from prompt_toolkit.document import Document
 
 from comate_agent_sdk.agent.llm_levels import ALL_LEVELS
+from comate_agent_sdk.context.items import ItemType
+from comate_agent_sdk.llm.messages import UserMessage
 
+from terminal_agent.rewind_store import RewindCheckpoint, RewindRestorePlan, RewindStore
 from terminal_agent.selection_menu import SelectionResult, build_model_level_options
 from terminal_agent.slash_commands import SLASH_COMMAND_SPECS, parse_slash_command_call
 from terminal_agent.tui_parts.ui_mode import UIMode
@@ -77,6 +83,28 @@ class CommandsMixin:
                 )
                 return
         await self._append_context_snapshot(show_details=show_details)
+
+    async def _slash_rewind(self, args: str) -> None:
+        if args.strip():
+            self._renderer.append_system_message(
+                "Usage: /rewind",
+                is_error=True,
+            )
+            return
+        if self._busy:
+            self._renderer.append_system_message(
+                "当前已有任务在运行，请稍后再执行 /rewind。",
+                is_error=True,
+            )
+            return
+
+        checkpoints = self._rewind_store.list_checkpoints()
+        if not checkpoints:
+            self._renderer.append_system_message(
+                "No checkpoints yet. 先发起至少一轮用户消息再执行 /rewind。"
+            )
+            return
+        self._show_rewind_checkpoint_menu(checkpoints)
 
     def _slash_exit(self, _args: str) -> None:
         self._exit_app()
@@ -184,6 +212,341 @@ class CommandsMixin:
         self._ui_mode = UIMode.SELECTION
         self._sync_focus_for_mode()
         self._invalidate()
+
+    def _show_rewind_checkpoint_menu(self, checkpoints: list[RewindCheckpoint]) -> None:
+        options: list[dict[str, str]] = []
+        for cp in checkpoints:
+            preview = cp.user_preview or "(empty)"
+            label = f"#{cp.checkpoint_id} turn={cp.turn_number}: {preview}"
+            desc = cp.created_at
+            options.append(
+                {
+                    "value": str(cp.checkpoint_id),
+                    "label": label,
+                    "description": desc,
+                }
+            )
+
+        def on_confirm(value: str) -> None:
+            checkpoint = next(
+                (cp for cp in checkpoints if str(cp.checkpoint_id) == value),
+                None,
+            )
+            if checkpoint is None:
+                self._renderer.append_system_message(
+                    f"Checkpoint not found: {value}",
+                    is_error=True,
+                )
+                return
+            self._schedule_background(self._open_rewind_mode_menu_async(checkpoint))
+
+        def on_cancel() -> None:
+            self._renderer.append_system_message("Rewind cancelled.")
+
+        ok = self._selection_ui.set_options(
+            title="Select checkpoint",
+            options=options,
+            on_confirm=on_confirm,
+            on_cancel=on_cancel,
+        )
+        if not ok:
+            self._renderer.append_system_message(
+                "No checkpoint options available.",
+                is_error=True,
+            )
+            return
+        self._selection_ui.refresh()
+        self._ui_mode = UIMode.SELECTION
+        self._sync_focus_for_mode()
+        self._invalidate()
+
+    async def _open_rewind_mode_menu_async(self, checkpoint: RewindCheckpoint) -> None:
+        await asyncio.sleep(0)
+        try:
+            plan = self._rewind_store.build_restore_plan(
+                checkpoint_id=checkpoint.checkpoint_id,
+            )
+        except Exception as exc:
+            self._renderer.append_system_message(
+                f"Failed to prepare rewind preview: {exc}",
+                is_error=True,
+            )
+            self._refresh_layers()
+            return
+
+        summary = self._format_restore_plan_summary(plan)
+        mode_options = [
+            {
+                "value": "restore_both",
+                "label": "Restore code and conversation",
+                "description": (
+                    "The conversation will be forked. "
+                    f"The code will be restored {summary}."
+                ),
+            },
+            {
+                "value": "restore_conversation",
+                "label": "Restore conversation",
+                "description": (
+                    "The conversation will be forked. "
+                    "The code will be unchanged."
+                ),
+            },
+            {
+                "value": "restore_code",
+                "label": "Restore code",
+                "description": (
+                    "The conversation will be unchanged. "
+                    f"The code will be restored {summary}."
+                ),
+            },
+            {
+                "value": "never_mind",
+                "label": "Never mind",
+                "description": "The conversation and code will be unchanged.",
+            },
+        ]
+
+        def on_confirm(mode_value: str) -> None:
+            self._schedule_background(
+                self._execute_rewind_mode(
+                    checkpoint=checkpoint,
+                    mode=mode_value,
+                    preview_plan=plan,
+                )
+            )
+
+        def on_cancel() -> None:
+            self._renderer.append_system_message("Rewind cancelled.")
+
+        ok = self._selection_ui.set_options(
+            title=f"Checkpoint #{checkpoint.checkpoint_id} (turn={checkpoint.turn_number})",
+            options=mode_options,
+            on_confirm=on_confirm,
+            on_cancel=on_cancel,
+        )
+        if not ok:
+            self._renderer.append_system_message(
+                "No rewind mode options available.",
+                is_error=True,
+            )
+            self._refresh_layers()
+            return
+        self._selection_ui.refresh()
+        self._ui_mode = UIMode.SELECTION
+        self._sync_focus_for_mode()
+        self._invalidate()
+
+    async def _execute_rewind_mode(
+        self,
+        *,
+        checkpoint: RewindCheckpoint,
+        mode: str,
+        preview_plan: RewindRestorePlan,
+    ) -> None:
+        prefill_text: str | None = None
+        if mode == "never_mind":
+            self._renderer.append_system_message("Rewind cancelled.")
+            self._refresh_layers()
+            return
+        if self._busy:
+            self._renderer.append_system_message(
+                "当前已有任务在运行，请稍后再执行 /rewind。",
+                is_error=True,
+            )
+            self._refresh_layers()
+            return
+
+        self._set_busy(True)
+        try:
+            if mode == "restore_code":
+                applied = self._rewind_store.restore_code_to_checkpoint(
+                    checkpoint_id=checkpoint.checkpoint_id
+                )
+                dropped_count = self._rewind_store.prune_after_checkpoint(
+                    checkpoint_id=checkpoint.checkpoint_id
+                )
+                self._renderer.append_system_message(
+                    self._render_rewind_done_message(
+                        mode=mode,
+                        checkpoint=checkpoint,
+                        plan=applied,
+                        new_session_id=None,
+                        dropped_checkpoints=dropped_count,
+                    )
+                )
+                prefill_text = self._resolve_checkpoint_user_text(
+                    checkpoint=checkpoint,
+                    fallback=checkpoint.user_message,
+                )
+                await self._status_bar.refresh()
+                return
+
+            if mode == "restore_conversation":
+                new_session = self._session.fork_session()
+                fork_store = RewindStore(
+                    session=new_session,
+                    project_root=Path.cwd(),
+                )
+                try:
+                    rewind_turn = self._rewind_turn_before_checkpoint(checkpoint.turn_number)
+                    new_session.restore_conversation_to_turn(
+                        target_turn=rewind_turn
+                    )
+                    dropped_count = fork_store.prune_after_checkpoint(
+                        checkpoint_id=checkpoint.checkpoint_id
+                    )
+                    await self._replace_session(new_session, close_old=True)
+                except Exception:
+                    await new_session.close()
+                    raise
+
+                self._renderer.append_system_message(
+                    self._render_rewind_done_message(
+                        mode=mode,
+                        checkpoint=checkpoint,
+                        plan=preview_plan,
+                        new_session_id=new_session.session_id,
+                        dropped_checkpoints=dropped_count,
+                    )
+                )
+                prefill_text = self._resolve_checkpoint_user_text(
+                    checkpoint=checkpoint,
+                    fallback=checkpoint.user_message,
+                )
+                return
+
+            if mode == "restore_both":
+                new_session = self._session.fork_session()
+                fork_store = RewindStore(
+                    session=new_session,
+                    project_root=Path.cwd(),
+                )
+                try:
+                    rewind_turn = self._rewind_turn_before_checkpoint(checkpoint.turn_number)
+                    new_session.restore_conversation_to_turn(
+                        target_turn=rewind_turn
+                    )
+                    applied = fork_store.restore_code_to_checkpoint(
+                        checkpoint_id=checkpoint.checkpoint_id
+                    )
+                    dropped_count = fork_store.prune_after_checkpoint(
+                        checkpoint_id=checkpoint.checkpoint_id
+                    )
+                    await self._replace_session(new_session, close_old=True)
+                except Exception:
+                    await new_session.close()
+                    raise
+                self._renderer.append_system_message(
+                    self._render_rewind_done_message(
+                        mode=mode,
+                        checkpoint=checkpoint,
+                        plan=applied,
+                        new_session_id=new_session.session_id,
+                        dropped_checkpoints=dropped_count,
+                    )
+                )
+                prefill_text = self._resolve_checkpoint_user_text(
+                    checkpoint=checkpoint,
+                    fallback=checkpoint.user_message,
+                )
+                return
+
+            self._renderer.append_system_message(
+                f"Unknown rewind mode: {mode}",
+                is_error=True,
+            )
+        except Exception as exc:
+            logger.exception("rewind failed")
+            self._renderer.append_system_message(
+                f"Rewind failed: {exc}",
+                is_error=True,
+            )
+        finally:
+            self._set_busy(False)
+            if prefill_text:
+                self._prefill_user_input(prefill_text)
+            self._refresh_layers()
+
+    def _resolve_checkpoint_user_text(
+        self,
+        *,
+        checkpoint: RewindCheckpoint,
+        fallback: str,
+    ) -> str:
+        items = getattr(self._session._agent._context.conversation, "items", [])
+        for item in reversed(items):
+            if item.item_type != ItemType.USER_MESSAGE:
+                continue
+            if int(getattr(item, "created_turn", 0) or 0) != checkpoint.turn_number:
+                continue
+            message = getattr(item, "message", None)
+            if isinstance(message, UserMessage) and not bool(getattr(message, "is_meta", False)):
+                text = str(message.text or "").strip()
+                if text:
+                    return text
+            content_text = str(getattr(item, "content_text", "")).strip()
+            if content_text:
+                return content_text
+        return fallback.strip()
+
+    def _prefill_user_input(self, text: str) -> None:
+        normalized = str(text).strip()
+        if not normalized:
+            return
+        self._clear_paste_state()
+        self._last_input_len = len(normalized)
+        self._last_input_text = normalized
+        buffer = self._input_area.buffer
+        buffer.cancel_completion()
+        self._suppress_input_change_hook = True
+        try:
+            buffer.set_document(
+                Document(normalized, cursor_position=len(normalized)),
+                bypass_readonly=True,
+            )
+        finally:
+            self._suppress_input_change_hook = False
+
+    @staticmethod
+    def _rewind_turn_before_checkpoint(turn_number: int) -> int:
+        return max(0, int(turn_number) - 1)
+
+    @staticmethod
+    def _format_restore_plan_summary(plan: RewindRestorePlan) -> str:
+        return (
+            f"+{plan.total_added_lines} -{plan.total_removed_lines} "
+            f"in {plan.writable_files_count} file(s)"
+        )
+
+    def _render_rewind_done_message(
+        self,
+        *,
+        mode: str,
+        checkpoint: RewindCheckpoint,
+        plan: RewindRestorePlan,
+        new_session_id: str | None,
+        dropped_checkpoints: int,
+    ) -> str:
+        lines = [
+            f"Rewind done: checkpoint #{checkpoint.checkpoint_id} (turn={checkpoint.turn_number})",
+        ]
+        if mode == "restore_both":
+            lines.append(f"- conversation: forked to session {new_session_id}")
+            lines.append(f"- code: restored {self._format_restore_plan_summary(plan)}")
+        elif mode == "restore_conversation":
+            lines.append(f"- conversation: forked to session {new_session_id}")
+            lines.append("- code: unchanged")
+        elif mode == "restore_code":
+            lines.append("- conversation: unchanged")
+            lines.append(f"- code: restored {self._format_restore_plan_summary(plan)}")
+
+        if plan.skipped_binary_count > 0:
+            lines.append(f"- skipped(binary): {plan.skipped_binary_count}")
+        if plan.skipped_unknown_count > 0:
+            lines.append(f"- skipped(unknown): {plan.skipped_unknown_count}")
+        lines.append(f"- dropped_checkpoints_after_target: {dropped_checkpoints}")
+        return "\n".join(lines)
 
     def _exit_selection_mode(self) -> None:
         """Exit selection menu mode."""

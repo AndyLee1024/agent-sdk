@@ -181,6 +181,17 @@ class EventRenderer:
     def history_entries(self) -> list[HistoryEntry]:
         return list(self._history)
 
+    def reset_history_view(self) -> None:
+        """重置 history 视图状态（用于会话切换后的重新加载）。"""
+        self._history = []
+        self._running_tools.clear()
+        self._thinking_content = ""
+        self._assistant_buffer = ""
+        self._loading_state = LoadingState.idle()
+        self._current_todos = []
+        self._todo_started_at_monotonic = None
+        self._latest_diff_lines = None
+
     @property
     def latest_diff_lines(self) -> list[str] | None:
         return self._latest_diff_lines

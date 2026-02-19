@@ -68,3 +68,14 @@ def test_context_ir_inject_deduplicates_same_turn_same_rules() -> None:
     second = ctx.inject_due_reminders()
     assert first is not None
     assert second is None
+
+
+def test_rehydrate_suppresses_immediate_task_gap_reminder() -> None:
+    ctx = ContextIR()
+    ctx.set_turn_number(12)
+    ctx.rehydrate_reminder_state_from_conversation(
+        suppress_task_nudge_on_next_turn=True
+    )
+
+    item = ctx.inject_due_reminders()
+    assert item is None

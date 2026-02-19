@@ -16,9 +16,11 @@ from comate_agent_sdk.agent.session_store import (
     PERSISTENCE_SCHEMA_VERSION,
     ConversationState,
     build_conversation_event,
+    build_header_snapshot_event,
     build_usage_event,
     default_session_root,
     events_jsonl_append,
+    replay_header_snapshot,
     replay_session_events,
     rewrite_session_id_in_jsonl,
     slice_usage_delta,
@@ -91,6 +93,26 @@ class ChatSession:
         self._message_source = message_source
         self.run_controller = SessionRunController()
 
+        if runtime is None:
+            self._persist_initial_header_snapshot_if_needed()
+
+    def _persist_initial_header_snapshot_if_needed(self) -> None:
+        if self._context_jsonl.exists():
+            try:
+                existing = self._context_jsonl.read_text(encoding="utf-8").strip()
+            except Exception:
+                existing = ""
+            if existing:
+                return
+
+        snapshot = self._agent._context.export_header_snapshot()
+        evt = build_header_snapshot_event(
+            session_id=self.session_id,
+            snapshot=snapshot,
+            turn_number=0,
+        )
+        events_jsonl_append(self._context_jsonl, evt)
+
     @classmethod
     def resume(
         cls,
@@ -111,6 +133,18 @@ class ChatSession:
             storage_root=storage_root,
             message_source=message_source,
         )
+
+        header_snapshot = replay_header_snapshot(path=session._context_jsonl)
+        if header_snapshot is None:
+            raise ChatSessionError(
+                f"Session {session_id} is missing required header_snapshot in {session._context_jsonl}"
+            )
+        try:
+            session._agent._context.import_header_snapshot(header_snapshot)
+        except Exception as e:
+            raise ChatSessionError(
+                f"Failed to restore header snapshot for session {session_id}: {e}"
+            ) from e
 
         turn_number, items, usage_entries = replay_session_events(
             path=session._context_jsonl,
@@ -138,6 +172,19 @@ class ChatSession:
                 logger.info(f"Restored {len(todos)} TODO items from todos.json")
             except Exception as e:
                 logger.warning(f"Failed to restore TODO state for session_id={session_id}: {e}", exc_info=True)
+
+        try:
+            session._agent._context.rehydrate_reminder_state_from_conversation(
+                suppress_task_nudge_on_next_turn=True,
+            )
+        except Exception as e:
+            logger.warning(
+                f"Failed to rehydrate reminder state for session_id={session_id}: {e}",
+                exc_info=True,
+            )
+
+        # Header 从持久化快照恢复后，禁止自动改写（尤其是 MCP header）。
+        session._agent._lock_header_from_snapshot = True
 
         # MCP tools：resume 后标记 dirty，下一次 invoke_llm 前刷新
         try:
@@ -252,6 +299,46 @@ class ChatSession:
             },
         }
         events_jsonl_append(self._context_jsonl, usage_reset_event)
+
+    def restore_conversation_to_turn(self, *, target_turn: int) -> None:
+        """仅回滚会话对话到指定 turn（不回滚 usage）。"""
+        if self._closed:
+            raise ChatSessionClosedError("Cannot restore conversation on a closed session")
+
+        try:
+            normalized_turn = int(target_turn)
+        except Exception as exc:
+            raise ChatSessionError(f"Invalid target_turn={target_turn}") from exc
+
+        if normalized_turn < 0:
+            raise ChatSessionError(f"target_turn must be >= 0, got {normalized_turn}")
+        if normalized_turn > self._turn_number:
+            raise ChatSessionError(
+                f"target_turn={normalized_turn} exceeds current turn={self._turn_number}"
+            )
+
+        _, items, _ = replay_session_events(
+            path=self._context_jsonl,
+            offload_root=self._offload_root,
+            max_turn=normalized_turn,
+        )
+
+        before = ConversationState.capture(self._agent._context.conversation.items)
+        self._agent._context.conversation.items = list(items)
+
+        self._turn_number += 1
+        evt = build_conversation_event(
+            session_id=self.session_id,
+            turn_number=self._turn_number,
+            before=before,
+            after_items=self._agent._context.conversation.items,
+            offload_root=self._offload_root,
+        )
+        events_jsonl_append(self._context_jsonl, evt)
+        self._agent._context.set_turn_number(self._turn_number)
+        self._agent._context.rehydrate_reminder_state_from_conversation(
+            suppress_task_nudge_on_next_turn=True,
+        )
 
     def set_level(self, level: LLMLevel) -> LLMSwitchedEvent:
         """Set the LLM level for this session."""

@@ -42,6 +42,7 @@ from terminal_agent.env_utils import read_env_float, read_env_int
 from terminal_agent.event_renderer import EventRenderer
 from terminal_agent.mention_completer import LocalFileMentionCompleter
 from terminal_agent.question_view import AskUserQuestionUI
+from terminal_agent.rewind_store import RewindStore
 from terminal_agent.selection_menu import (
     SelectionMenuUI,
 )
@@ -79,6 +80,7 @@ class TerminalAgentTUI(
         self._session = session
         self._status_bar = status_bar
         self._renderer = renderer
+        self._rewind_store = RewindStore(session=self._session, project_root=Path.cwd())
 
         self._tool_panel_max_lines = read_env_int(
             "AGENT_SDK_TUI_TOOL_PANEL_MAX_LINES",
@@ -113,6 +115,7 @@ class TerminalAgentTUI(
             "session": self._slash_session,
             "usage": self._slash_usage,
             "context": self._slash_context,
+            "rewind": self._slash_rewind,
             "exit": self._slash_exit,
         }
         self._loading_frame = 0
@@ -456,6 +459,7 @@ class TerminalAgentTUI(
 
         waiting_for_input = False
         questions: list[dict[str, Any]] | None = None
+        stream_completed = False
 
         stream_task = asyncio.create_task(
             self._consume_stream(text),
@@ -464,6 +468,7 @@ class TerminalAgentTUI(
         self._stream_task = stream_task
         try:
             waiting_for_input, questions = await stream_task
+            stream_completed = True
         except asyncio.CancelledError:
             logger.debug("stream task cancelled")
         except Exception as exc:
@@ -479,6 +484,10 @@ class TerminalAgentTUI(
             self._renderer.interrupt_turn()
             await self._animation_controller.shutdown()
         finally:
+            if stream_completed:
+                self._maybe_capture_checkpoint(
+                    user_preview=display_text if display_text is not None else text
+                )
             self._stream_task = None
             self._interrupt_requested_at = None
             self._append_run_elapsed_to_history()
@@ -661,6 +670,37 @@ class TerminalAgentTUI(
         if self._app is None:
             return
         self._app.invalidate()
+
+    def _maybe_capture_checkpoint(self, *, user_preview: str) -> None:
+        try:
+            checkpoint = self._rewind_store.capture_checkpoint_for_latest_turn(
+                user_preview=user_preview,
+            )
+            if checkpoint is not None:
+                logger.info(
+                    "checkpoint captured: session=%s id=%s turn=%s",
+                    self._session.session_id,
+                    checkpoint.checkpoint_id,
+                    checkpoint.turn_number,
+                )
+        except Exception as exc:
+            logger.warning(f"failed to capture checkpoint: {exc}", exc_info=True)
+
+    async def _replace_session(self, new_session: ChatSession, *, close_old: bool = True) -> None:
+        old_session = self._session
+        self._session = new_session
+        self._status_bar.set_session(new_session)
+        self._rewind_store.bind_session(new_session)
+        await self._status_bar.refresh()
+        self._renderer.reset_history_view()
+        self._printed_history_index = 0
+        self.add_resume_history("resume")
+        if close_old and old_session is not new_session:
+            await old_session.close()
+
+    @property
+    def session(self) -> ChatSession:
+        return self._session
 
     def _exit_app(self) -> None:
         self._closing = True
