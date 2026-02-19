@@ -42,6 +42,7 @@ class TestTokenCost(unittest.TestCase):
                 prompt_cache_creation_tokens=None,
                 prompt_image_tokens=None,
                 completion_tokens=5,
+                reasoning_tokens=2,
                 total_tokens=15,
             ),
             level="LOW",
@@ -55,6 +56,7 @@ class TestTokenCost(unittest.TestCase):
                 prompt_cache_creation_tokens=None,
                 prompt_image_tokens=None,
                 completion_tokens=3,
+                reasoning_tokens=1,
                 total_tokens=10,
             ),
             level="MID",
@@ -68,6 +70,7 @@ class TestTokenCost(unittest.TestCase):
                 prompt_cache_creation_tokens=None,
                 prompt_image_tokens=None,
                 completion_tokens=1,
+                reasoning_tokens=0,
                 total_tokens=3,
             ),
             level="MID",
@@ -80,6 +83,7 @@ class TestTokenCost(unittest.TestCase):
         self.assertEqual(summary.by_level["LOW"].invocations, 1)
         self.assertEqual(summary.by_level["MID"].invocations, 2)
         self.assertEqual(summary.by_level["MID"].total_tokens, 13)
+        self.assertEqual(summary.total_reasoning_tokens, 3)
 
     def test_total_cost_does_not_double_count_cached_prompt(self) -> None:
         old = os.environ.pop("comate_agent_sdk_CALCULATE_COST", None)

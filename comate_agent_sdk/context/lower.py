@@ -11,22 +11,16 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
 
-from comate_agent_sdk.context.items import ItemType, SegmentName
-from comate_agent_sdk.context.nudge import render_reminders
-from comate_agent_sdk.context.reminder import ReminderPosition, SystemReminder
+from comate_agent_sdk.context.items import ItemType
 from comate_agent_sdk.llm.messages import (
     SystemMessage,
-    UserMessage,
 )
 
 if TYPE_CHECKING:
     from comate_agent_sdk.context.ir import ContextIR
     from comate_agent_sdk.llm.messages import BaseMessage
-
-logger = logging.getLogger("comate_agent_sdk.context.lower")
 
 
 class LoweringPipeline:
@@ -36,7 +30,6 @@ class LoweringPipeline:
     1. Header → SystemMessage（拼接 system_prompt + subagent + skill 策略）
        cache=True 如果任一 header item 有 cache_hint
     2. Conversation items → 按顺序转为 BaseMessage
-    3. 注入 system-reminders（按 position 插入 UserMessage(is_meta=True)）
     """
 
     @staticmethod
@@ -73,24 +66,6 @@ class LoweringPipeline:
             if item.message is not None:
                 messages.append(item.message)
 
-        # Step 3: 注入 system-reminders
-        messages = LoweringPipeline._inject_reminders(messages, context.reminders)
-
-        # Step 4: 追加 turn-based nudge 到最后一条 UserMessage 尾部（不创建新消息）
-        nudge_text = render_reminders(context._nudge)
-        if nudge_text:
-            # 从后往前找最后一条 UserMessage，追加 nudge 文本
-            for i in range(len(messages) - 1, -1, -1):
-                if isinstance(messages[i], UserMessage):
-                    original = messages[i]
-                    messages[i] = UserMessage(
-                        content=f"{original.text}\n\n{nudge_text}",
-                        is_meta=original.is_meta,
-                        cache=original.cache,
-                    )
-                    logger.debug(f"Appended nudge to last UserMessage (length: {len(nudge_text)} chars)")
-                    break
-
         return messages
 
     @staticmethod
@@ -120,82 +95,3 @@ class LoweringPipeline:
                 parts.append(item.content_text)
 
         return "\n".join(parts) if parts else ""
-
-    @staticmethod
-    def _inject_reminders(
-        messages: list[BaseMessage],
-        reminders: list[SystemReminder],
-    ) -> list[BaseMessage]:
-        """将 system-reminders 注入到消息列表中
-
-        每个 reminder 根据其 position 属性插入到合适位置。
-        注入为 UserMessage(content="<system-reminder>...</system-reminder>", is_meta=True)
-        """
-        if not reminders:
-            return messages
-
-        # 收集需要注入的 reminders
-        to_inject: list[SystemReminder] = []
-        for reminder in reminders:
-            if reminder.should_inject():
-                to_inject.append(reminder)
-
-        if not to_inject:
-            return messages
-
-        # 按 position 分组
-        by_position: dict[ReminderPosition, list[SystemReminder]] = {}
-        for reminder in to_inject:
-            by_position.setdefault(reminder.position, []).append(reminder)
-
-        result = list(messages)
-
-        # AFTER_SYSTEM: 在 SystemMessage 之后插入
-        if ReminderPosition.AFTER_SYSTEM in by_position:
-            insert_idx = 0
-            for i, msg in enumerate(result):
-                if isinstance(msg, SystemMessage):
-                    insert_idx = i + 1
-                    break
-            for reminder in reversed(by_position[ReminderPosition.AFTER_SYSTEM]):
-                result.insert(
-                    insert_idx,
-                    UserMessage(content=reminder.wrap_content(), is_meta=True),
-                )
-
-        # LAST_USER: 在最后一个 UserMessage 之后插入
-        if ReminderPosition.LAST_USER in by_position:
-            insert_idx = len(result)
-            for i in range(len(result) - 1, -1, -1):
-                if isinstance(result[i], UserMessage):
-                    insert_idx = i + 1
-                    break
-            for reminder in reversed(by_position[ReminderPosition.LAST_USER]):
-                result.insert(
-                    insert_idx,
-                    UserMessage(content=reminder.wrap_content(), is_meta=True),
-                )
-
-        # LAST_TOOL_RESULT: 在最后一个 ToolMessage 之后插入
-        if ReminderPosition.LAST_TOOL_RESULT in by_position:
-            from comate_agent_sdk.llm.messages import ToolMessage
-
-            insert_idx = len(result)
-            for i in range(len(result) - 1, -1, -1):
-                if isinstance(result[i], ToolMessage):
-                    insert_idx = i + 1
-                    break
-            for reminder in reversed(by_position[ReminderPosition.LAST_TOOL_RESULT]):
-                result.insert(
-                    insert_idx,
-                    UserMessage(content=reminder.wrap_content(), is_meta=True),
-                )
-
-        # END: 追加到末尾
-        if ReminderPosition.END in by_position:
-            for reminder in by_position[ReminderPosition.END]:
-                result.append(
-                    UserMessage(content=reminder.wrap_content(), is_meta=True),
-                )
-
-        return result

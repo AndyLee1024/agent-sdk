@@ -147,6 +147,15 @@ class ChatDeepSeek(ChatOpenAILike):
             prompt_cached_tokens=prompt_cache_hit,  # DeepSeek 的缓存命中
             prompt_cache_creation_tokens=None,  # DeepSeek 不单独统计缓存创建
             prompt_image_tokens=None,
+            reasoning_tokens=(
+                getattr(
+                    response.usage.completion_tokens_details,
+                    "reasoning_tokens",
+                    0,
+                )
+                if getattr(response.usage, "completion_tokens_details", None) is not None
+                else 0
+            ),
             completion_tokens=response.usage.completion_tokens,
             total_tokens=response.usage.total_tokens,
         )

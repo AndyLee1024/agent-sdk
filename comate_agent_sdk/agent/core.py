@@ -695,11 +695,11 @@ class AgentRuntime:
     def set_plan_mode(self, enabled: bool) -> None:
         """启用/禁用 plan mode。
 
-        Plan mode 会在每轮 lower 时追加提醒：
+        Plan mode 会在每轮调用 LLM 前追加提醒：
         - DO NOT write, edit, or execute code
         - Use ExitPlanMode when ready for approval
         """
-        self._context._nudge.mode_plan = enabled
+        self._context.set_plan_mode(enabled)
 
     def _destroy_ephemeral_messages(self) -> None:
         from comate_agent_sdk.agent.history import destroy_ephemeral_messages

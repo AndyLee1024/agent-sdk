@@ -28,6 +28,9 @@ class ChatInvokeUsage(BaseModel):
     completion_tokens: int
     """The number of tokens in the completion."""
 
+    reasoning_tokens: int | None = None
+    """The number of reasoning/thinking tokens inside completion_tokens."""
+
     total_tokens: int
     """The total number of tokens in the response."""
 

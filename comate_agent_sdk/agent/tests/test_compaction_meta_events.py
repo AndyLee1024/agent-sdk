@@ -21,9 +21,15 @@ class _FakeCompactionService:
 class _FakeContext:
     def __init__(self) -> None:
         self.total_tokens = 1000
+        self.purge_calls = 0
 
     def lower(self):
         return [UserMessage(content="hello")]
+
+    def purge_system_reminders(self, *, include_persistent: bool = True) -> int:
+        assert include_persistent is True
+        self.purge_calls += 1
+        return 0
 
     async def auto_compact(self, policy, current_total_tokens: int | None = None) -> bool:
         policy.meta_records = [
@@ -77,6 +83,7 @@ class TestCompactionMetaEvents(unittest.TestCase):
         self.assertTrue(compacted)
         self.assertIsNotNone(event)
         self.assertEqual(meta_events, [])
+        self.assertEqual(agent._context.purge_calls, 1)
 
     def test_compaction_meta_events_emitted_when_enabled(self) -> None:
         agent = self._build_agent(emit_compaction_meta_events=True)
@@ -90,6 +97,7 @@ class TestCompactionMetaEvents(unittest.TestCase):
         self.assertEqual(meta_events[0].tool_blocks_dropped, 3)
         self.assertEqual(meta_events[1].phase, "selective_done")
         self.assertEqual(meta_events[1].tokens_after, 700)
+        self.assertEqual(agent._context.purge_calls, 1)
 
 
 if __name__ == "__main__":

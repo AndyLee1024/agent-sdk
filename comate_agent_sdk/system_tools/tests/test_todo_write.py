@@ -49,8 +49,8 @@ async def test_todo_write_updates_context():
         assert len(todo_state["todos"]) == 2
         assert todo_state["todos"][0]["id"] == "1"
         assert todo_state["todos"][0]["priority"] == "high"
-
-        assert any(r.name == "todo_gentle_reminder" for r in ctx_ir.reminders)
+        assert ctx_ir._reminder_engine.state.todo_active_count == 2
+        assert ctx_ir._reminder_engine.state.last_todowrite_turn == 0
 
         todo_file = session_root / "todos.json"
         assert todo_file.exists()
@@ -78,7 +78,7 @@ async def test_todo_write_empty_list():
 
         result = _parse(raw)
         assert result["ok"] is True
-        assert any(r.name == "todo_list_empty" for r in ctx_ir.reminders)
+        assert ctx_ir._reminder_engine.state.todo_active_count == 0
         assert not ctx_ir.has_todos()
         assert not (session_root / "todos.json").exists()
 

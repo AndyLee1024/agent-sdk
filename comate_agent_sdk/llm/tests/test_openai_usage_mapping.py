@@ -22,6 +22,7 @@ class TestOpenAIUsageMapping(unittest.TestCase):
         assert usage is not None
         self.assertEqual(usage.prompt_tokens, 12)
         self.assertEqual(usage.prompt_cached_tokens, 3)
+        self.assertEqual(usage.reasoning_tokens, 4)
         self.assertEqual(usage.completion_tokens, 10)
         self.assertEqual(usage.total_tokens, 22)
 
@@ -41,6 +42,7 @@ class TestOpenAIUsageMapping(unittest.TestCase):
 
         assert usage is not None
         self.assertEqual(usage.prompt_tokens, 5)
+        self.assertEqual(usage.reasoning_tokens, 0)
         self.assertEqual(usage.completion_tokens, 3)
 
     def test_get_context_window_known_model(self) -> None:

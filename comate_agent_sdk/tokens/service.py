@@ -345,6 +345,7 @@ class TokenCost:
                 total_prompt_cached_tokens=0,
                 total_prompt_cached_cost=0.0,
                 total_completion_tokens=0,
+                total_reasoning_tokens=0,
                 total_completion_cost=0.0,
                 total_tokens=0,
                 total_cost=0.0,
@@ -354,6 +355,7 @@ class TokenCost:
         # Calculate totals
         total_prompt = sum(u.usage.prompt_tokens for u in filtered_usage)
         total_completion = sum(u.usage.completion_tokens for u in filtered_usage)
+        total_reasoning = sum(u.usage.reasoning_tokens or 0 for u in filtered_usage)
         total_tokens = sum(u.usage.total_tokens for u in filtered_usage)
         total_prompt_cached = sum(
             u.usage.prompt_cached_tokens or 0 for u in filtered_usage
@@ -431,6 +433,7 @@ class TokenCost:
             total_prompt_cached_tokens=total_prompt_cached,
             total_prompt_cached_cost=total_prompt_cached_cost,
             total_completion_tokens=total_completion,
+            total_reasoning_tokens=total_reasoning,
             total_completion_cost=total_completion_cost,
             total_tokens=total_tokens,
             total_cost=total_cost,

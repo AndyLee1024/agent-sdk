@@ -217,6 +217,13 @@ async def check_and_compact(
         )
         return False, event, []
 
+    purge_func = getattr(agent._context, "purge_system_reminders", None)
+    if callable(purge_func):
+        purged = int(purge_func(include_persistent=True))
+        if purged > 0:
+            logger.info(f"Compaction pre-purge removed {purged} system reminders (check)")
+    # TODO: 其他 hook/meta 消息暂不纳入 purge 范围，后续统一治理。
+
     policy = _build_compaction_policy(agent, threshold)
 
     compacted = await agent._context.auto_compact(
@@ -287,6 +294,13 @@ async def precheck_and_compact(
             f"压缩冷却中，跳过本轮压缩: remaining={remaining:.1f}s, reason={reason}"
         )
         return False, event, []
+
+    purge_func = getattr(agent._context, "purge_system_reminders", None)
+    if callable(purge_func):
+        purged = int(purge_func(include_persistent=True))
+        if purged > 0:
+            logger.info(f"Compaction pre-purge removed {purged} system reminders (precheck)")
+    # TODO: 其他 hook/meta 消息暂不纳入 purge 范围，后续统一治理。
 
     policy = _build_compaction_policy(agent, threshold)
 

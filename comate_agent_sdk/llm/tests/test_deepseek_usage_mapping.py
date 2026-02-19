@@ -21,6 +21,7 @@ class TestDeepSeekUsageMapping(unittest.TestCase):
                 total_tokens=30,
                 prompt_cache_hit_tokens=None,
                 prompt_cache_miss_tokens=None,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=6),
             )
         )
 
@@ -28,6 +29,7 @@ class TestDeepSeekUsageMapping(unittest.TestCase):
 
         assert usage is not None
         self.assertEqual(usage.prompt_tokens, 20)
+        self.assertEqual(usage.reasoning_tokens, 6)
         self.assertEqual(usage.completion_tokens, 10)
         self.assertEqual(usage.total_tokens, 30)
 

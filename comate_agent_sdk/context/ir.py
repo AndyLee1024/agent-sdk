@@ -27,13 +27,15 @@ from comate_agent_sdk.context.items import (
     SegmentName,
 )
 from comate_agent_sdk.context.lower import LoweringPipeline
-from comate_agent_sdk.context.nudge import NudgeState, update_nudge_todo_count
 from comate_agent_sdk.context.observer import (
     ContextEvent,
     ContextEventBus,
     EventType,
 )
-from comate_agent_sdk.context.reminder import SystemReminder
+from comate_agent_sdk.context.reminder_engine import (
+    ReminderEngine,
+    ReminderOrigin,
+)
 from comate_agent_sdk.llm.messages import (
     AssistantMessage,
     BaseMessage,
@@ -96,7 +98,7 @@ class ContextIR:
         budget: 预算配置
         token_counter: token 计数器
         event_bus: 事件总线
-        reminders: 系统提醒列表
+        _reminder_engine: 统一 system-reminder 调度引擎
         _todo_state: TODO 状态存储 {todos: [...], updated_at: timestamp}
         _memory_item: Memory 独立存储（不在 header 或 conversation 中）
     """
@@ -110,11 +112,10 @@ class ContextIR:
     budget: BudgetConfig = field(default_factory=BudgetConfig)
     token_counter: TokenCounter = field(default_factory=TokenCounter)
     event_bus: ContextEventBus = field(default_factory=ContextEventBus)
-    reminders: list[SystemReminder] = field(default_factory=list)
+    _reminder_engine: ReminderEngine = field(default_factory=ReminderEngine)
     _pending_skill_items: list[ContextItem] = field(default_factory=list)
     _todo_state: dict[str, Any] = field(default_factory=dict)
     _turn_number: int = 0
-    _nudge: NudgeState = field(default_factory=NudgeState)
     _memory_item: ContextItem | None = field(default=None, repr=False)
     _inflight_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     _thinking_protected_assistant_ids: set[str] = field(default_factory=set, repr=False)
@@ -420,8 +421,7 @@ class ContextIR:
             and not bool(getattr(message, "is_meta", False))
         ):
             self._turn_number += 1
-            # 同步 turn number 到 NudgeState
-            self._nudge.turn = self._turn_number
+            self._reminder_engine.set_turn(self._turn_number)
 
         # 提取文本内容用于 token 估算
         content_text = message.text if hasattr(message, "text") else ""
@@ -667,8 +667,7 @@ class ContextIR:
             return
         if value > self._turn_number:
             self._turn_number = value
-            # 同步到 NudgeState
-            self._nudge.turn = self._turn_number
+            self._reminder_engine.set_turn(self._turn_number)
 
     def get_turn_number(self) -> int:
         """获取当前 turn_number（真实用户输入轮次）。"""
@@ -807,31 +806,110 @@ class ContextIR:
         """是否有待注入的 Skill items"""
         return len(self._pending_skill_items) > 0
 
-    # ===== Reminder =====
+    # ===== Reminder Engine =====
 
-    def register_reminder(self, reminder: SystemReminder) -> None:
-        """注册系统提醒"""
-        # 防止重名
-        self.reminders = [r for r in self.reminders if r.name != reminder.name]
-        self.reminders.append(reminder)
-        self.event_bus.emit(ContextEvent(
-            event_type=EventType.REMINDER_REGISTERED,
-            detail=f"reminder registered: {reminder.name}",
-        ))
+    def set_plan_mode(self, enabled: bool) -> None:
+        """设置 plan mode 提醒开关。"""
+        self._reminder_engine.set_plan_mode(enabled)
 
-    def remove_reminder(self, name: str) -> None:
-        """移除系统提醒"""
-        before_count = len(self.reminders)
-        self.reminders = [r for r in self.reminders if r.name != name]
-        if len(self.reminders) < before_count:
+    def record_tool_event(
+        self,
+        *,
+        tool_name: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """记录工具事件，驱动 reminder 调度状态。"""
+        self._reminder_engine.record_tool_event(
+            tool_name=tool_name,
+            turn=self._turn_number,
+            payload=payload,
+        )
+
+    def inject_due_reminders(self) -> ContextItem | None:
+        """把当前轮次到期的 reminder 注入为一条 meta UserMessage。"""
+        if self.has_tool_barrier:
+            return None
+
+        reminders = self._reminder_engine.collect_due_reminders(turn=self._turn_number)
+        if not reminders:
+            return None
+
+        reminder_text = ReminderEngine.render_merged_message(reminders)
+        if not reminder_text:
+            return None
+
+        rule_ids = [r.rule_id for r in reminders]
+        for item in reversed(self.conversation.items):
+            if item.destroyed:
+                continue
+            if not self._is_system_reminder_item(item):
+                continue
+            same_turn = int(item.metadata.get("reminder_turn", -1)) == self._turn_number
+            existing_rule_ids = item.metadata.get("reminder_rule_ids", [])
+            same_rules = isinstance(existing_rule_ids, list) and existing_rule_ids == rule_ids
+            if same_turn and same_rules:
+                return None
+            break
+
+        metadata: dict[str, Any] = {
+            "origin": ReminderOrigin.SYSTEM_REMINDER.value,
+            "reminder_rule_ids": rule_ids,
+            "reminder_tools": [r.tool_name for r in reminders],
+            "reminder_turn": self._turn_number,
+        }
+        return self.add_message(
+            UserMessage(content=reminder_text, is_meta=True),
+            item_type=ItemType.SYSTEM_REMINDER,
+            metadata=metadata,
+        )
+
+    def _is_system_reminder_item(self, item: ContextItem) -> bool:
+        if item.item_type == ItemType.SYSTEM_REMINDER:
+            return True
+
+        origin = str(item.metadata.get("origin", "")).strip()
+        if origin == ReminderOrigin.SYSTEM_REMINDER.value:
+            return True
+
+        message = item.message
+        if not isinstance(message, UserMessage) or not bool(getattr(message, "is_meta", False)):
+            return False
+
+        text = (message.text or "").strip()
+        return "<system-reminder>" in text and "</system-reminder>" in text
+
+    def purge_system_reminders(
+        self,
+        *,
+        include_persistent: bool = True,
+    ) -> int:
+        """统一清理 conversation 中的 system reminder。
+
+        注意：
+        - 当前仅清理 system-reminder（origin/tag/item_type 命中）
+        - TODO: 后续可扩展为对其他 hook/meta 消息的统一治理策略
+        """
+        removed_ids: list[str] = []
+        kept: list[ContextItem] = []
+
+        for item in self.conversation.items:
+            if include_persistent and self._is_system_reminder_item(item):
+                removed_ids.append(item.id)
+                continue
+            kept.append(item)
+
+        if not removed_ids:
+            return 0
+
+        self.conversation.items = kept
+        for item_id in removed_ids:
             self.event_bus.emit(ContextEvent(
-                event_type=EventType.REMINDER_REMOVED,
-                detail=f"reminder removed: {name}",
+                event_type=EventType.ITEM_REMOVED,
+                item_type=ItemType.SYSTEM_REMINDER,
+                item_id=item_id,
+                detail="system reminder purged",
             ))
-
-    def cleanup_one_shot_reminders(self) -> None:
-        """清理已使用的一次性提醒"""
-        self.reminders = [r for r in self.reminders if not r.one_shot]
+        return len(removed_ids)
 
     # ===== Ephemeral =====
 
@@ -923,10 +1001,7 @@ class ContextIR:
         Returns:
             可直接传给 llm.ainvoke() 的消息列表
         """
-        messages = LoweringPipeline.lower(self)
-        # 清理一次性 reminders
-        self.cleanup_one_shot_reminders()
-        return messages
+        return LoweringPipeline.lower(self)
 
     # ===== Compaction =====
 
@@ -971,7 +1046,7 @@ class ContextIR:
         self._inflight_tool_call_ids.clear()
         self._thinking_protected_assistant_ids.clear()
         self._flushed_hook_injection_texts.clear()
-        self.reminders.clear()
+        self._reminder_engine.clear()
         self._todo_state.clear()
         self._memory_item = None
 
@@ -1014,7 +1089,7 @@ class ContextIR:
     # ===== TODO 状态管理 =====
 
     def set_todo_state(self, todos: list[dict]) -> None:
-        """设置 TODO 状态并更新 NudgeState
+        """设置 TODO 状态并更新 ReminderEngine
 
         Args:
             todos: TODO 列表（字典格式，来自 TodoWrite 工具）
@@ -1031,10 +1106,11 @@ class ContextIR:
             "updated_at": time.time(),
         }
 
-        # 更新 NudgeState（包含 turn-based 节流逻辑）
-        update_nudge_todo_count(self._nudge, len(active_todos), self._turn_number)
-        # 同时更新 last_todo_write_turn（TodoWrite 工具调用时的轮次）
-        self._nudge.last_todo_write_turn = self._turn_number
+        self._reminder_engine.update_todo_state(
+            active_count=len(active_todos),
+            turn=self._turn_number,
+            update_last_write_turn=True,
+        )
 
         # 触发事件
         self.event_bus.emit(ContextEvent(
@@ -1065,17 +1141,12 @@ class ContextIR:
             "updated_at": time.time(),
         }
 
-        # 恢复 NudgeState 的 last_todo_write_turn
-        try:
-            self._nudge.last_todo_write_turn = int(turn_number_at_update)
-        except Exception:
-            self._nudge.last_todo_write_turn = 0
-
-        # 恢复 todo_active_count 和 todo_last_changed_turn（如果是空状态）
-        if not active_todos and self._nudge.todo_last_changed_turn == 0:
-            self._nudge.todo_last_changed_turn = self._turn_number
-
-        self._nudge.todo_active_count = len(active_todos)
+        self._reminder_engine.update_todo_state(
+            active_count=len(active_todos),
+            turn=self._turn_number,
+            update_last_write_turn=False,
+        )
+        self._reminder_engine.restore_todo_write_turn(turn_number_at_update)
 
 
     def get_todo_state(self) -> dict[str, Any]:
@@ -1088,4 +1159,4 @@ class ContextIR:
 
     def get_todo_persist_turn_number_at_update(self) -> int:
         """用于持久化的 todo 更新轮次。"""
-        return int(self._nudge.last_todo_write_turn)
+        return int(self._reminder_engine.state.last_todowrite_turn)

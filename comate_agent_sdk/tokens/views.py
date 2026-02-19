@@ -109,6 +109,7 @@ class UsageSummary(BaseModel):
     total_prompt_cached_cost: float
 
     total_completion_tokens: int
+    total_reasoning_tokens: int = 0
     total_completion_cost: float
     total_tokens: int
     total_cost: float

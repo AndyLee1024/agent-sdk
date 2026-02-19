@@ -7,7 +7,7 @@
 - ContextItem / Segment: 核心数据类型
 - LoweringPipeline: IR → API messages 转换
 - SelectiveCompactionPolicy: 选择性压缩
-- SystemReminder: 动态提醒注入
+- ReminderEngine: 统一动态提醒调度
 - BudgetConfig / BudgetStatus: 预算控制
 - ContextEventBus: 可观测性
 - ContextFileSystem: 上下文卸载到文件系统
@@ -39,6 +39,7 @@ from comate_agent_sdk.context.observer import (
     ContextEventBus,
     EventType,
 )
+from comate_agent_sdk.context.reminder_engine import ReminderEngine, ReminderOrigin, ReminderState
 from comate_agent_sdk.context.offload import OffloadPolicy
 from comate_agent_sdk.context.reminder import ReminderPosition, SystemReminder
 
@@ -68,6 +69,9 @@ __all__ = [
     "EnvOptions",
     # Memory
     "MemoryConfig",
+    "ReminderEngine",
+    "ReminderOrigin",
+    "ReminderState",
     # Reminder
     "SystemReminder",
     "ReminderPosition",

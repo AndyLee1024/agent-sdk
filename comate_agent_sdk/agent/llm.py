@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 async def invoke_llm(agent: "AgentRuntime") -> ChatInvokeCompletion:
     """调用 LLM（包含 retry + exponential backoff）。"""
     last_error: Exception | None = None
+    inject_due_reminders = getattr(agent._context, "inject_due_reminders", None)
+    if callable(inject_due_reminders):
+        inject_due_reminders()
 
     for attempt in range(agent.llm_max_retries):
         try:

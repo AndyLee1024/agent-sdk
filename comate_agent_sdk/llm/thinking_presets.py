@@ -31,6 +31,12 @@ class ThinkingPreset:
     effort: Literal["low", "medium", "high"] | None = None
     """OpenAI: reasoning_effort level. None = not applicable."""
 
+    openai_extra_body: dict | None = None
+    """OpenAI-compatible providers: extra_body params merged into the request.
+    Used for providers that enable thinking via non-standard extra_body fields
+    (e.g. GLM-4.7: {"thinking": {"type": "enabled"}}).
+    The dict is shallow-merged into extra_body alongside other cache params."""
+
     history_policy: Literal["preserve", "strip", "auto"] = "auto"
     """How to handle thinking blocks in serialized history.
     preserve = always keep (MiniMax-M2.5 — chain must not break).
@@ -65,6 +71,13 @@ _PRESETS: dict[str, ThinkingPreset] = {
         supports_thinking=True,
         budget_tokens=8192,   # send thinking param; model returns thinking blocks
         history_policy="preserve",
+    ),
+ 
+    "glm-4.7": ThinkingPreset(
+        supports_thinking=True,
+        budget_tokens=8192,          # Anthropic 协议: send thinking={type:enabled, budget_tokens:X}
+        openai_extra_body={"thinking": {"type": "enabled"}},  # OpenAI 兼容协议: extra_body 注入
+        history_policy="strip",
     ),
     # ── Prefix: Gemini flash (disable thinking by default) ──────────────────
     "^gemini-2.5-flash": ThinkingPreset(

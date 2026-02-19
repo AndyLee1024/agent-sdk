@@ -16,7 +16,13 @@ from openai.types.shared_params.reasoning_effort import ReasoningEffort
 
 from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice, ToolDefinition
 from comate_agent_sdk.llm.exceptions import ModelProviderError, ModelRateLimitError
-from comate_agent_sdk.llm.messages import BaseMessage, Function, ToolCall
+from comate_agent_sdk.llm.messages import (
+    BaseMessage,
+    ContentPartTextParam,
+    ContentPartThinkingParam,
+    Function,
+    ToolCall,
+)
 from comate_agent_sdk.llm.openai.serializer import OpenAIMessageSerializer
 from comate_agent_sdk.llm.thinking_presets import get_thinking_preset
 from comate_agent_sdk.llm.views import ChatInvokeCompletion, ChatInvokeUsage
@@ -199,6 +205,15 @@ class ChatOpenAI(BaseChatModel):
                 else None,
                 prompt_cache_creation_tokens=None,
                 prompt_image_tokens=None,
+                reasoning_tokens=(
+                    getattr(
+                        response.usage.completion_tokens_details,
+                        "reasoning_tokens",
+                        0,
+                    )
+                    if response.usage.completion_tokens_details is not None
+                    else 0
+                ),
                 # Completion
                 # OpenAI 的 completion_tokens 已包含推理相关 token，避免重复累计。
                 completion_tokens=response.usage.completion_tokens,
@@ -373,6 +388,9 @@ class ChatOpenAI(BaseChatModel):
             cache_retention = self._resolve_prompt_cache_retention()
             if cache_retention is not None:
                 extra_body["prompt_cache_retention"] = cache_retention
+            # Merge preset openai_extra_body (e.g. GLM-4.7 thinking via extra_body)
+            if preset.openai_extra_body:
+                extra_body.update(preset.openai_extra_body)
             if extra_body:
                 model_params["extra_body"] = extra_body
 
@@ -420,11 +438,26 @@ class ChatOpenAI(BaseChatModel):
             # Extract content
             content = response.choices[0].message.content
 
+            # Extract reasoning_content (OpenAI-compatible providers like GLM-4.7, DeepSeek)
+            reasoning_content = getattr(response.choices[0].message, "reasoning_content", None)
+
             # Extract tool calls
             tool_calls = self._extract_tool_calls(response)
 
+            # Build raw_content_blocks when reasoning content exists (for tool call loops)
+            raw_content_blocks = None
+            if reasoning_content:
+                blocks: list[ContentPartThinkingParam | ContentPartTextParam] = [
+                    ContentPartThinkingParam(thinking=reasoning_content, signature=None)
+                ]
+                if content:
+                    blocks.append(ContentPartTextParam(text=content))
+                raw_content_blocks = blocks
+
             return ChatInvokeCompletion(
                 content=content,
+                thinking=reasoning_content,
+                raw_content_blocks=raw_content_blocks,
                 tool_calls=tool_calls,
                 usage=usage,
                 stop_reason=response.choices[0].finish_reason
@@ -445,4 +478,3 @@ class ChatOpenAI(BaseChatModel):
 
         except Exception as e:
             raise ModelProviderError(message=str(e), model=self.name) from e
-

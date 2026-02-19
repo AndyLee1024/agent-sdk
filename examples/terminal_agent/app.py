@@ -72,6 +72,24 @@ def _resolve_session(agent: Agent, session_id: str | None) -> tuple[ChatSession,
     return ChatSession(agent), "new"
 
 
+def _format_exit_usage_line(usage: object) -> str:
+    total_prompt_tokens = int(getattr(usage, "total_prompt_tokens", 0) or 0)
+    total_prompt_cached_tokens = int(
+        getattr(usage, "total_prompt_cached_tokens", 0) or 0
+    )
+    total_completion_tokens = int(getattr(usage, "total_completion_tokens", 0) or 0)
+    total_reasoning_tokens = int(getattr(usage, "total_reasoning_tokens", 0) or 0)
+
+    input_tokens = max(total_prompt_tokens - total_prompt_cached_tokens, 0)
+    total_tokens = input_tokens + total_completion_tokens
+
+    return (
+        f"Token usage: total={total_tokens:,} "
+        f"input={input_tokens:,} (+ {total_prompt_cached_tokens:,} cached) "
+        f"output={total_completion_tokens:,} (reasoning {total_reasoning_tokens:,})"
+    )
+
+
 async def _preload_mcp(session: ChatSession, con: Console) -> None:
     """Pre-load MCP tools and print connection status under the logo."""
     from terminal_agent.startup import mcp_connecting_animation, print_error, print_success, print_warning
@@ -126,10 +144,22 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
     tui = TerminalAgentTUI(session, status_bar, renderer)
     tui.add_resume_history(mode)
 
+    usage_line: str | None = None
     try:
         await tui.run()
+        try:
+            usage = await session.get_usage()
+            usage_line = _format_exit_usage_line(usage)
+        except Exception as exc:
+            logger.warning(
+                f"Failed to collect usage for exit summary: {exc}",
+                exc_info=True,
+            )
     finally:
         await session.close()
+
+    if usage_line:
+        console.print(f"[dim]{usage_line}[/]")
 
     console.print(
         f"[dim]Goodbye. Resume with: [bold cyan]comate resume "

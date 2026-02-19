@@ -503,9 +503,16 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
 
             await _fire_post_tool_hooks(tool_message)
 
-            # 更新 NudgeState（跟踪 Task/TodoWrite 工具使用）
-            from comate_agent_sdk.context.nudge import update_nudge_on_tool
-            update_nudge_on_tool(agent._context._nudge, tool_name, agent._context.get_turn_number())
+            reminder_payload: dict[str, Any] | None = None
+            if tool_name == "TodoWrite" and isinstance(raw_envelope, dict):
+                data = raw_envelope.get("data", {})
+                if isinstance(data, dict):
+                    active_count = data.get("active_count")
+                    if isinstance(active_count, int):
+                        reminder_payload = {"active_count": active_count}
+            record_tool_event = getattr(agent._context, "record_tool_event", None)
+            if callable(record_tool_event):
+                record_tool_event(tool_name=tool_name, payload=reminder_payload)
 
             # Set span output
             if Laminar is not None:
