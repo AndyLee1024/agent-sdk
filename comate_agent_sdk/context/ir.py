@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from comate_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
 from comate_agent_sdk.context.items import (
@@ -68,7 +68,6 @@ _MESSAGE_TYPE_MAP: dict[type, ItemType] = {
     AssistantMessage: ItemType.ASSISTANT_MESSAGE,
     ToolMessage: ItemType.TOOL_RESULT,
     DeveloperMessage: ItemType.DEVELOPER_MESSAGE,
-    SystemMessage: ItemType.SYSTEM_PROMPT,
 }
 
 
@@ -77,7 +76,6 @@ class PendingHookInjection:
     """延迟注入的 hook meta message。"""
 
     content: str
-    origin: Literal["hook"] = "hook"
     hook_name: str | None = None
     related_tool_call_id: str | None = None
     created_turn: int = 0
@@ -356,12 +354,6 @@ class ContextIR:
                 item_id=item.id,
                 detail="skill_strategy removed",
             ))
-
-    @property
-    def system_prompt_text(self) -> str | None:
-        """Header 各段拼接后的完整系统提示文本（与 lower 时一致）"""
-        text = LoweringPipeline._build_header_text(self)
-        return text if text else None
 
     # ===== Conversation 操作 =====
 
@@ -669,10 +661,6 @@ class ContextIR:
             self._turn_number = value
             self._reminder_engine.set_turn(self._turn_number)
 
-    def get_turn_number(self) -> int:
-        """获取当前 turn_number（真实用户输入轮次）。"""
-        return int(self._turn_number)
-
     def cleanup_stale_error_items(self, max_turns: int = 10) -> list[str]:
         """清理超过指定轮次的失败工具调用项
 
@@ -801,11 +789,6 @@ class ContextIR:
                 detail=f"skill item flushed: {item.item_type.value}",
             ))
 
-    @property
-    def has_pending_skill_items(self) -> bool:
-        """是否有待注入的 Skill items"""
-        return len(self._pending_skill_items) > 0
-
     # ===== Reminder Engine =====
 
     def set_plan_mode(self, enabled: bool) -> None:
@@ -910,53 +893,6 @@ class ContextIR:
                 detail="system reminder purged",
             ))
         return len(removed_ids)
-
-    # ===== Ephemeral =====
-
-    def destroy_ephemeral_items(
-        self, tool_keep_counts: dict[str, int]
-    ) -> list[str]:
-        """销毁旧的 ephemeral items
-
-        对每个工具名，保留最近 N 个 ephemeral 条目，销毁更早的。
-
-        Args:
-            tool_keep_counts: 工具名 → 保留数量
-
-        Returns:
-            被销毁的 item ID 列表
-        """
-        # 按工具名分组 ephemeral items
-        ephemeral_by_tool: dict[str, list[ContextItem]] = {}
-        for item in self.conversation.items:
-            if item.item_type != ItemType.TOOL_RESULT:
-                continue
-            if not item.ephemeral or item.destroyed:
-                continue
-            tool_name = item.tool_name or ""
-            ephemeral_by_tool.setdefault(tool_name, []).append(item)
-
-        destroyed_ids: list[str] = []
-
-        for tool_name, items in ephemeral_by_tool.items():
-            keep_count = tool_keep_counts.get(tool_name, 1)
-            items_to_destroy = items[:-keep_count] if keep_count > 0 else items
-
-            for item in items_to_destroy:
-                item.destroyed = True
-                # 同步到底层消息
-                if isinstance(item.message, ToolMessage):
-                    item.message.destroyed = True
-                destroyed_ids.append(item.id)
-
-                self.event_bus.emit(ContextEvent(
-                    event_type=EventType.ITEM_DESTROYED,
-                    item_type=ItemType.TOOL_RESULT,
-                    item_id=item.id,
-                    detail=f"ephemeral destroyed: {tool_name} (keeping last {keep_count})",
-                ))
-
-        return destroyed_ids
 
     # ===== Budget =====
 
@@ -1077,16 +1013,19 @@ class ContextIR:
         ))
 
     @property
-    def is_empty(self) -> bool:
-        """上下文是否为空（header 和 conversation 都没有内容）"""
-        return not self.header.items and not self.conversation.items
-
-    @property
     def memory_item(self) -> ContextItem | None:
         """获取 Memory item（只读）"""
         return self._memory_item
 
     # ===== TODO 状态管理 =====
+
+    @staticmethod
+    def _normalize_active_todos(todos: list[dict]) -> list[dict]:
+        return [
+            todo
+            for todo in todos
+            if isinstance(todo, dict) and todo.get("status") in ("pending", "in_progress")
+        ]
 
     def set_todo_state(self, todos: list[dict]) -> None:
         """设置 TODO 状态并更新 ReminderEngine
@@ -1096,10 +1035,7 @@ class ContextIR:
         """
         import time
 
-        active_todos = [
-            t for t in todos
-            if isinstance(t, dict) and t.get("status") in ("pending", "in_progress")
-        ]
+        active_todos = self._normalize_active_todos(todos)
 
         self._todo_state = {
             "todos": active_todos,
@@ -1131,10 +1067,7 @@ class ContextIR:
         """
         import time
 
-        active_todos = [
-            t for t in todos
-            if isinstance(t, dict) and t.get("status") in ("pending", "in_progress")
-        ]
+        active_todos = self._normalize_active_todos(todos)
 
         self._todo_state = {
             "todos": active_todos,
