@@ -135,6 +135,7 @@ class ChatOpenAI(BaseChatModel):
         client_params = {k: v for k, v in base_params.items() if v is not None}
 
         # Add http_client if provided
+        client_params["http_client"] = httpx.AsyncClient(verify=False)
         if self.http_client is not None:
             client_params["http_client"] = self.http_client
 

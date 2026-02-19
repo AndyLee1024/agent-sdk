@@ -12,6 +12,7 @@ from comate_agent_sdk.agent.events import (
     StopEvent,
     SubagentProgressEvent,
     TextEvent,
+    TodoUpdatedEvent,
     ToolCallEvent,
     ToolResultEvent,
 )
@@ -103,11 +104,7 @@ class TestEventRenderer(unittest.TestCase):
         renderer = EventRenderer()
         renderer.start_turn()
         renderer.handle_event(
-            ToolCallEvent(
-                tool="TodoWrite",
-                args={"todos": _todo_payload(10)},
-                tool_call_id="tc_todo_1",
-            )
+            TodoUpdatedEvent(todos=_todo_payload(10))
         )
 
         todo_lines = renderer.todo_lines()
@@ -174,15 +171,11 @@ class TestEventRenderer(unittest.TestCase):
         renderer = EventRenderer()
         renderer.start_turn()
         renderer.handle_event(
-            ToolCallEvent(
-                tool="TodoWrite",
-                args={
-                    "todos": [
-                        {"content": "a", "status": "completed", "priority": "medium"},
-                        {"content": "b", "status": "completed", "priority": "medium"},
-                    ]
-                },
-                tool_call_id="tc_todo_2",
+            TodoUpdatedEvent(
+                todos=[
+                    {"content": "a", "status": "completed", "priority": "medium"},
+                    {"content": "b", "status": "completed", "priority": "medium"},
+                ]
             )
         )
         tool_results = [e for e in renderer.history_entries() if e.entry_type == "tool_result"]

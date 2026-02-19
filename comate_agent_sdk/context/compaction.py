@@ -27,6 +27,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("comate_agent_sdk.context.compaction")
 
+try:
+    import tiktoken as _tiktoken
+
+    _TIKTOKEN_AVAILABLE = True
+except ImportError:
+    _tiktoken = None  # type: ignore[assignment]
+    _TIKTOKEN_AVAILABLE = False
+
 
 @dataclass(frozen=True)
 class _ToolCallInfo:
@@ -66,10 +74,11 @@ class CompactionMetaRecord:
 class CompactionStrategy(Enum):
     """压缩策略。"""
 
-    NONE = "none"            # 不压缩
-    DROP = "drop"            # 直接丢弃
-    TRUNCATE = "truncate"    # 保留最近 N 个
-    SUMMARIZE = "summarize"  # LLM 摘要（暂未实现，留接口）
+    NONE = "none"                # 不压缩
+    DROP = "drop"                # 直接丢弃
+    TRUNCATE = "truncate"        # 保留最近 N 个
+    SUMMARIZE = "summarize"      # LLM 摘要（暂未实现，留接口）
+    OFFLOAD_MIDDLE = "offload_middle"  # 首尾保留，中间卸载到磁盘
 
 
 @dataclass
@@ -79,12 +88,20 @@ class TypeCompactionRule:
     strategy: CompactionStrategy = CompactionStrategy.NONE
     keep_recent: int = 5
 
+    # OFFLOAD_MIDDLE 策略参数
+    token_threshold: int = 500   # 超过此阈值才触发卸载
+    head_tokens: int = 100       # 保留首部 tokens
+    tail_tokens: int = 100       # 保留尾部 tokens
+
 
 # 默认规则
 DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
+    # 工具结果：超过阈值时首尾保留 + 中间卸载到磁盘
     ItemType.TOOL_RESULT.value: TypeCompactionRule(
-        strategy=CompactionStrategy.TRUNCATE,
-        keep_recent=5,
+        strategy=CompactionStrategy.OFFLOAD_MIDDLE,
+        token_threshold=500,
+        head_tokens=100,
+        tail_tokens=100,
     ),
     ItemType.SKILL_PROMPT.value: TypeCompactionRule(
         strategy=CompactionStrategy.DROP
@@ -92,13 +109,12 @@ DEFAULT_COMPACTION_RULES: dict[str, TypeCompactionRule] = {
     ItemType.SKILL_METADATA.value: TypeCompactionRule(
         strategy=CompactionStrategy.DROP
     ),
+    # 对话消息：永不压缩，保留完整对话骨架
     ItemType.ASSISTANT_MESSAGE.value: TypeCompactionRule(
-        strategy=CompactionStrategy.TRUNCATE,
-        keep_recent=5,
+        strategy=CompactionStrategy.NONE,
     ),
     ItemType.USER_MESSAGE.value: TypeCompactionRule(
-        strategy=CompactionStrategy.TRUNCATE,
-        keep_recent=5,
+        strategy=CompactionStrategy.NONE,
     ),
     # 以下类型永不压缩
     ItemType.SYSTEM_PROMPT.value: TypeCompactionRule(
@@ -258,6 +274,28 @@ class SelectiveCompactionPolicy:
                                 f"(保留最近 {rule.keep_recent}, 轮次保底={self.dialogue_rounds_keep_min}), "
                                 f"释放 ~{tokens_before - context.total_tokens} tokens"
                             )
+
+                elif rule.strategy == CompactionStrategy.OFFLOAD_MIDDLE:
+                    offloaded_count = 0
+                    for item in items:
+                        if item.destroyed or item.offloaded:
+                            continue
+                        if item.token_count > rule.token_threshold:
+                            success = await self._offload_middle_content(
+                                context,
+                                item,
+                                head_tokens=rule.head_tokens,
+                                tail_tokens=rule.tail_tokens,
+                            )
+                            if success:
+                                offloaded_count += 1
+
+                    if offloaded_count > 0:
+                        compacted_any = True
+                        logger.info(
+                            f"OFFLOAD_MIDDLE {item_type.value}: 卸载 {offloaded_count} 条, "
+                            f"释放 ~{tokens_before - context.total_tokens} tokens"
+                        )
 
                 current_tokens = context.total_tokens
                 if current_tokens < self.threshold:
@@ -454,9 +492,9 @@ class SelectiveCompactionPolicy:
         if max_tokens <= 0:
             return ""
         try:
-            import tiktoken
-
-            encoder = tiktoken.get_encoding("cl100k_base")
+            if not _TIKTOKEN_AVAILABLE:
+                raise RuntimeError("tiktoken not available")
+            encoder = _tiktoken.get_encoding("cl100k_base")
             token_ids = encoder.encode(text)
             return encoder.decode(token_ids[:max_tokens])
         except Exception:
@@ -464,6 +502,125 @@ class SelectiveCompactionPolicy:
             ratio = min(max_tokens / token_base, 1.0)
             keep_chars = max(1, int(len(text) * ratio))
             return text[:keep_chars]
+
+    def _extract_head_tail(
+        self,
+        text: str,
+        *,
+        head_tokens: int = 100,
+        tail_tokens: int = 100,
+    ) -> tuple[str, str, int]:
+        """提取文本首尾部分。
+
+        Returns:
+            (head_text, tail_text, middle_tokens)
+            当 middle_tokens == 0 时表示无需卸载（总长度不超过首尾之和）。
+        """
+        if not text:
+            return text, "", 0
+        try:
+            if not _TIKTOKEN_AVAILABLE:
+                raise RuntimeError("tiktoken not available")
+            encoder = _tiktoken.get_encoding("cl100k_base")
+            token_ids = encoder.encode(text)
+            total = len(token_ids)
+
+            if total <= head_tokens + tail_tokens:
+                return text, "", 0
+
+            head_text = encoder.decode(token_ids[:head_tokens])
+            tail_text = encoder.decode(token_ids[-tail_tokens:])
+            middle_tokens = total - head_tokens - tail_tokens
+            return head_text, tail_text, middle_tokens
+        except Exception:
+            # 回退到字符估算
+            total_chars = len(text)
+            # 粗估每 token 约 4 字符
+            chars_per_token = 4
+            head_chars = head_tokens * chars_per_token
+            tail_chars = tail_tokens * chars_per_token
+
+            if total_chars <= head_chars + tail_chars:
+                return text, "", 0
+
+            middle_char_count = total_chars - head_chars - tail_chars
+            middle_tokens_est = max(1, middle_char_count // chars_per_token)
+            return text[:head_chars], text[-tail_chars:], middle_tokens_est
+
+    async def _offload_middle_content(
+        self,
+        context: "ContextIR",
+        item: "ContextItem",
+        *,
+        head_tokens: int = 100,
+        tail_tokens: int = 100,
+    ) -> bool:
+        """首尾保留 + 中间卸载策略。
+
+        与 destroy_ephemeral_messages() 兼容：
+        - destroyed=True 或 offloaded=True 的 item 直接跳过。
+
+        Returns:
+            True if offloaded, False otherwise.
+        """
+        from comate_agent_sdk.llm.messages import ToolMessage
+
+        if not self.fs:
+            return False
+
+        # 已被销毁或已卸载的 item 直接跳过
+        if item.destroyed or item.offloaded:
+            return False
+
+        msg = item.message
+        if not isinstance(msg, ToolMessage):
+            return False
+
+        # message 层面被标记销毁的也跳过
+        if getattr(msg, "destroyed", False):
+            return False
+
+        text = msg.text
+        head, tail, middle_tokens = self._extract_head_tail(
+            text,
+            head_tokens=head_tokens,
+            tail_tokens=tail_tokens,
+        )
+
+        if middle_tokens <= 0:
+            return False
+
+        # 卸载完整原始内容到文件系统
+        tool_call_id = msg.tool_call_id or item.id
+        tool_name = item.metadata.get("tool_name") or item.tool_name or "unknown"
+        write_result = self.fs.offload_tool_result(
+            item,
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            result_token_count=item.token_count,
+        )
+
+        # 构建新内容：首部 + 占位符 + 尾部
+        abs_path = self.fs.root_path / write_result.relative_path
+        new_content = (
+            f"{head}\n\n"
+            f"[... 已卸载 {middle_tokens} tokens ...]\n"
+            f"[路径: {abs_path}]\n\n"
+            f"{tail}"
+        )
+
+        # 更新 item 及其关联的 message
+        msg.content = new_content
+        item.content_text = new_content
+        item.token_count = context.token_counter.count(new_content)
+        item.offloaded = True
+        item.offload_path = write_result.relative_path
+
+        # 同步到 message 层（与 destroy_ephemeral_messages 保持一致）
+        msg.offloaded = True
+        msg.offload_path = str(abs_path)
+
+        return True
 
     def _refresh_assistant_item_tokens(self, context: "ContextIR", item: "ContextItem") -> None:
         from comate_agent_sdk.llm.messages import AssistantMessage

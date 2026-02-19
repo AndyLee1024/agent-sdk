@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -147,6 +148,56 @@ class ContextIR:
 
         self.header.items.insert(insert_idx, item_ref)
 
+    def _set_header_item(
+        self,
+        item_type: ItemType,
+        content: str,
+        *,
+        cache: bool = False,
+        metadata: dict[str, Any] | None = None,
+        insert_idx: int | None = None,
+    ) -> None:
+        """统一的 header item 设置方法（幂等覆盖）。
+
+        Args:
+            item_type: 要设置的 item 类型
+            content: 内容文本
+            cache: 是否建议缓存
+            metadata: 附加元数据
+            insert_idx: 指定插入位置；None 表示 append + _ensure_header_item_position
+        """
+        existing = self.header.find_one_by_type(item_type)
+        token_count = self.token_counter.count(content)
+
+        if existing:
+            existing.content_text = content
+            existing.token_count = token_count
+            existing.cache_hint = cache
+            if metadata is not None:
+                existing.metadata = metadata
+            self._ensure_header_item_position(existing)
+            return
+
+        item = ContextItem(
+            item_type=item_type,
+            content_text=content,
+            token_count=token_count,
+            priority=DEFAULT_PRIORITIES[item_type],
+            cache_hint=cache,
+            metadata=metadata or {},
+        )
+        if insert_idx is not None:
+            self.header.items.insert(insert_idx, item)
+        else:
+            self.header.items.append(item)
+            self._ensure_header_item_position(item)
+        self.event_bus.emit(ContextEvent(
+            event_type=EventType.ITEM_ADDED,
+            item_type=item_type,
+            item_id=item.id,
+            detail=f"{item_type.value} set",
+        ))
+
     def set_system_prompt(self, prompt: str, cache: bool = True) -> None:
         """设置系统提示（幂等覆盖）
 
@@ -154,72 +205,29 @@ class ContextIR:
             prompt: 系统提示文本
             cache: 是否建议缓存（如 Anthropic prompt cache）
         """
-        existing = self.header.find_one_by_type(ItemType.SYSTEM_PROMPT)
-        token_count = self.token_counter.count(prompt)
-
-        if existing:
-            existing.content_text = prompt
-            existing.token_count = token_count
-            existing.cache_hint = cache
-        else:
-            item = ContextItem(
-                item_type=ItemType.SYSTEM_PROMPT,
-                content_text=prompt,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.SYSTEM_PROMPT],
-                cache_hint=cache,
-            )
-            self.header.items.insert(0, item)  # system_prompt 总在最前面
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.SYSTEM_PROMPT,
-                item_id=item.id,
-                detail="system_prompt set",
-            ))
+        self._set_header_item(ItemType.SYSTEM_PROMPT, prompt, cache=cache, insert_idx=0)
 
     def set_agent_loop(self, prompt: str, cache: bool = False) -> None:
         """设置 Agent 循环控制指令（幂等覆盖）
 
-        插入位置：SYSTEM_PROMPT 之后、MEMORY 之前
+        插入位置：SYSTEM_PROMPT 之后、TOOL_STRATEGY/SUBAGENT_STRATEGY/SKILL_STRATEGY 之前
 
         Args:
             prompt: Agent 循环控制指令文本
             cache: 是否建议缓存（如 Anthropic prompt cache）
         """
-        existing = self.header.find_one_by_type(ItemType.AGENT_LOOP)
-        token_count = self.token_counter.count(prompt)
-
-        if existing:
-            existing.content_text = prompt
-            existing.token_count = token_count
-            existing.cache_hint = cache
-        else:
-            item = ContextItem(
-                item_type=ItemType.AGENT_LOOP,
-                content_text=prompt,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.AGENT_LOOP],
-                cache_hint=cache,
-            )
-            # 在 SYSTEM_PROMPT 之后、TOOL_STRATEGY/SUBAGENT_STRATEGY/SKILL_STRATEGY 之前插入
-            insert_idx = 0
-            for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type == ItemType.SYSTEM_PROMPT:
-                    insert_idx = i + 1
-                elif existing_item.item_type in (
-                    ItemType.TOOL_STRATEGY,
-                    ItemType.SUBAGENT_STRATEGY,
-                    ItemType.SKILL_STRATEGY,
-                ):
-                    insert_idx = i
-                    break
-            self.header.items.insert(insert_idx, item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.AGENT_LOOP,
-                item_id=item.id,
-                detail="agent_loop set",
-            ))
+        insert_idx = 0
+        for i, existing_item in enumerate(self.header.items):
+            if existing_item.item_type == ItemType.SYSTEM_PROMPT:
+                insert_idx = i + 1
+            elif existing_item.item_type in (
+                ItemType.TOOL_STRATEGY,
+                ItemType.SUBAGENT_STRATEGY,
+                ItemType.SKILL_STRATEGY,
+            ):
+                insert_idx = i
+                break
+        self._set_header_item(ItemType.AGENT_LOOP, prompt, cache=cache, insert_idx=insert_idx)
 
     def set_memory(self, content: str, cache: bool = True) -> None:
         """设置 MEMORY 静态背景知识（幂等覆盖）
@@ -267,67 +275,37 @@ class ContextIR:
             ))
 
     def set_subagent_strategy(self, prompt: str) -> None:
-        """设置 Subagent 策略提示（幂等覆盖）"""
-        existing = self.header.find_one_by_type(ItemType.SUBAGENT_STRATEGY)
-        token_count = self.token_counter.count(prompt)
+        """设置 Subagent 策略提示（幂等覆盖）
 
-        if existing:
-            existing.content_text = prompt
-            existing.token_count = token_count
-        else:
-            item = ContextItem(
-                item_type=ItemType.SUBAGENT_STRATEGY,
-                content_text=prompt,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.SUBAGENT_STRATEGY],
-            )
-            # 在 system_prompt/agent_loop/tool_strategy 之后、skill_strategy 之前插入
-            insert_idx = 0
-            for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP, ItemType.TOOL_STRATEGY):
-                    insert_idx = i + 1
-                elif existing_item.item_type == ItemType.SKILL_STRATEGY:
-                    break
-            self.header.items.insert(insert_idx, item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.SUBAGENT_STRATEGY,
-                item_id=item.id,
-                detail="subagent_strategy set",
-            ))
+        插入位置：TOOL_STRATEGY 之后、SKILL_STRATEGY 之前
+        """
+        insert_idx = 0
+        for i, existing_item in enumerate(self.header.items):
+            if existing_item.item_type in (
+                ItemType.SYSTEM_PROMPT,
+                ItemType.AGENT_LOOP,
+                ItemType.TOOL_STRATEGY,
+            ):
+                insert_idx = i + 1
+            elif existing_item.item_type == ItemType.SKILL_STRATEGY:
+                break
+        self._set_header_item(ItemType.SUBAGENT_STRATEGY, prompt, insert_idx=insert_idx)
 
     def set_tool_strategy(self, prompt: str) -> None:
         """设置 Tool 策略提示（幂等覆盖）
 
         插入位置：AGENT_LOOP 之后、SUBAGENT_STRATEGY 之前
         """
-        existing = self.header.find_one_by_type(ItemType.TOOL_STRATEGY)
-        token_count = self.token_counter.count(prompt)
-
-        if existing:
-            existing.content_text = prompt
-            existing.token_count = token_count
-        else:
-            item = ContextItem(
-                item_type=ItemType.TOOL_STRATEGY,
-                content_text=prompt,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.TOOL_STRATEGY],
-            )
-            # 在 system_prompt/agent_loop 之后、subagent_strategy/skill_strategy 之前插入
-            insert_idx = 0
-            for i, existing_item in enumerate(self.header.items):
-                if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP):
-                    insert_idx = i + 1
-                elif existing_item.item_type in (ItemType.SUBAGENT_STRATEGY, ItemType.SKILL_STRATEGY):
-                    break
-            self.header.items.insert(insert_idx, item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.TOOL_STRATEGY,
-                item_id=item.id,
-                detail="tool_strategy set",
-            ))
+        insert_idx = 0
+        for i, existing_item in enumerate(self.header.items):
+            if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP):
+                insert_idx = i + 1
+            elif existing_item.item_type in (
+                ItemType.SUBAGENT_STRATEGY,
+                ItemType.SKILL_STRATEGY,
+            ):
+                break
+        self._set_header_item(ItemType.TOOL_STRATEGY, prompt, insert_idx=insert_idx)
 
     def set_mcp_tools(self, overview_text: str, *, metadata: dict[str, Any] | None = None) -> None:
         """设置 MCP tools 概览（幂等覆盖）
@@ -336,32 +314,7 @@ class ContextIR:
         - 将 MCP tool 的概览注入到 header（lowered 后进入 SystemMessage）
         - 结构化信息保存在 ContextItem.metadata（不直接进入 prompt，避免 token 爆炸）
         """
-        existing = self.header.find_one_by_type(ItemType.MCP_TOOL)
-        token_count = self.token_counter.count(overview_text)
-        meta = metadata or {}
-
-        if existing:
-            existing.content_text = overview_text
-            existing.token_count = token_count
-            existing.metadata = meta
-            self._ensure_header_item_position(existing)
-            return
-
-        item = ContextItem(
-            item_type=ItemType.MCP_TOOL,
-            content_text=overview_text,
-            token_count=token_count,
-            priority=DEFAULT_PRIORITIES[ItemType.MCP_TOOL],
-            metadata=meta,
-        )
-        self.header.items.append(item)
-        self._ensure_header_item_position(item)
-        self.event_bus.emit(ContextEvent(
-            event_type=EventType.ITEM_ADDED,
-            item_type=ItemType.MCP_TOOL,
-            item_id=item.id,
-            detail="mcp_tools set",
-        ))
+        self._set_header_item(ItemType.MCP_TOOL, overview_text, metadata=metadata)
 
     def remove_mcp_tools(self) -> None:
         """移除 MCP tools 概览。"""
@@ -376,84 +329,21 @@ class ContextIR:
 
     def set_skill_strategy(self, prompt: str) -> None:
         """设置 Skill 策略提示（幂等覆盖）"""
-        existing = self.header.find_one_by_type(ItemType.SKILL_STRATEGY)
-        token_count = self.token_counter.count(prompt)
-
-        if existing:
-            existing.content_text = prompt
-            existing.token_count = token_count
-            self._ensure_header_item_position(existing)
-        else:
-            item = ContextItem(
-                item_type=ItemType.SKILL_STRATEGY,
-                content_text=prompt,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.SKILL_STRATEGY],
-            )
-            self.header.items.append(item)
-            self._ensure_header_item_position(item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.SKILL_STRATEGY,
-                item_id=item.id,
-                detail="skill_strategy set",
-            ))
+        self._set_header_item(ItemType.SKILL_STRATEGY, prompt)
 
     def set_system_env(self, content: str) -> None:
         """设置系统环境信息（幂等覆盖）
 
         插入位置：Header 段末尾（SKILL_STRATEGY 之后）
         """
-        existing = self.header.find_one_by_type(ItemType.SYSTEM_ENV)
-        token_count = self.token_counter.count(content)
-
-        if existing:
-            existing.content_text = content
-            existing.token_count = token_count
-            self._ensure_header_item_position(existing)
-        else:
-            item = ContextItem(
-                item_type=ItemType.SYSTEM_ENV,
-                content_text=content,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.SYSTEM_ENV],
-            )
-            self.header.items.append(item)
-            self._ensure_header_item_position(item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.SYSTEM_ENV,
-                item_id=item.id,
-                detail="system_env set",
-            ))
+        self._set_header_item(ItemType.SYSTEM_ENV, content)
 
     def set_git_env(self, content: str) -> None:
         """设置 Git 状态信息（幂等覆盖）
 
         插入位置：SYSTEM_ENV 之后（Header 段最末尾）
         """
-        existing = self.header.find_one_by_type(ItemType.GIT_ENV)
-        token_count = self.token_counter.count(content)
-
-        if existing:
-            existing.content_text = content
-            existing.token_count = token_count
-            self._ensure_header_item_position(existing)
-        else:
-            item = ContextItem(
-                item_type=ItemType.GIT_ENV,
-                content_text=content,
-                token_count=token_count,
-                priority=DEFAULT_PRIORITIES[ItemType.GIT_ENV],
-            )
-            self.header.items.append(item)
-            self._ensure_header_item_position(item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=ItemType.GIT_ENV,
-                item_id=item.id,
-                detail="git_env set",
-            ))
+        self._set_header_item(ItemType.GIT_ENV, content)
 
     def remove_skill_strategy(self) -> None:
         """移除 Skill 策略提示"""
@@ -539,8 +429,6 @@ class ContextIR:
         # AssistantMessage 特殊处理：需要包括 tool_calls 的 tokens
         # 因为 tool_calls 也会被发送给 LLM，占用 prompt tokens
         if isinstance(message, AssistantMessage) and message.tool_calls:
-            import json
-
             tool_calls_json = json.dumps(
                 [
                     {

@@ -1951,7 +1951,7 @@ async def TodoWrite(
                     except FileNotFoundError:
                         pass
 
-                await _io_call(_remove_todo)
+                await iu.io_call(_remove_todo)
             else:
                 payload = {
                     "schema_version": 2,

@@ -46,7 +46,10 @@ def main() -> None:
     from terminal_agent.app import run
 
     rpc_stdio, session_id = _parse_args(sys.argv[1:])
-    asyncio.run(run(rpc_stdio=rpc_stdio, session_id=session_id))
+    try:
+        asyncio.run(run(rpc_stdio=rpc_stdio, session_id=session_id))
+    except KeyboardInterrupt:
+        pass
 
 
 if __name__ == "__main__":

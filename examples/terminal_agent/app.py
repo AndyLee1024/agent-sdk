@@ -21,8 +21,6 @@ from terminal_agent.tui import TerminalAgentTUI
 
 console = Console()
 logger = logging.getLogger(__name__)
-logging.getLogger("comate_agent_sdk.system_tools.tools").setLevel(logging.ERROR)
-logging.getLogger("comate_agent_sdk.mcp.manager").setLevel(logging.ERROR)
 
 
 @tool("Add two numbers 涉及到加法运算 必须使用这个工具")

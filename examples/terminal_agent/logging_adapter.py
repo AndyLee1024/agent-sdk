@@ -116,15 +116,34 @@ class TUILoggingHandler(logging.Handler):
 
 
 def setup_tui_logging(renderer: EventRenderer) -> None:
-    """配置 TUI logging handler
+    """统一日志初始化：文件 + TUI 双通道。
 
-    将 comate_agent_sdk.* 的 WARNING/ERROR 日志输出到 TUI
+    - 所有日志（含 traceback）写入 ~/.comate/logs/agent.log（RotatingFileHandler）
+    - WARNING/ERROR 以用户友好格式显示在 TUI scrollback
+    - 清除 root logger 默认的 stderr handler，阻止 traceback 泄漏到终端
     """
-    handler = TUILoggingHandler(renderer)
-    handler.setLevel(logging.WARNING)
+    import os
+    from logging.handlers import RotatingFileHandler
 
-    # 只处理 comate_agent_sdk.* 的日志
-    root_logger = logging.getLogger("comate_agent_sdk")
-    root_logger.addHandler(handler)
-    # 设置最低级别为 WARNING，确保 handler 能收到日志
-    root_logger.setLevel(logging.WARNING)
+    # 1. 日志文件 handler（完整调试信息，含 traceback）
+    log_dir = os.path.join(os.path.expanduser("~"), ".comate", "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "agent.log")
+    file_handler = RotatingFileHandler(
+        log_path, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8",
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
+
+    # 2. 清除 root logger 的所有 handler，阻止 stderr 泄漏
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(file_handler)
+    root.setLevel(logging.DEBUG)
+
+    # 3. TUI handler 挂到 root（覆盖所有命名空间的 WARNING/ERROR）
+    tui_handler = TUILoggingHandler(renderer)
+    tui_handler.setLevel(logging.WARNING)
+    root.addHandler(tui_handler)

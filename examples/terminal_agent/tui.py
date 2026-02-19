@@ -59,7 +59,6 @@ from terminal_agent.tui_parts import (
 )
 
 logger = logging.getLogger(__name__)
-logging.getLogger("comate_agent_sdk.system_tools.tools").setLevel(logging.ERROR)
 
 
 class TerminalAgentTUI(
@@ -169,6 +168,9 @@ class TerminalAgentTUI(
         self._suppress_input_change_hook = False
         self._last_input_len = 0
         self._last_input_text = ""
+
+        # Running 计时：记录本次 busy 开始的单调时间，结束后清空
+        self._run_start_time: float | None = None
 
         self._input_prompt_text = "> "
         self._input_prompt_width = max(1, get_cwidth(self._input_prompt_text))
@@ -369,6 +371,45 @@ class TerminalAgentTUI(
             mouse_support=False,
         )
 
+    # 极客风运行完成词语，随机选一个拼成 history 记录
+    _RUN_ELAPSED_VERBS: tuple[str, ...] = (
+        "Executed",
+        "Compiled",
+        "Dispatched",
+        "Processed",
+        "Computed",
+        "Resolved",
+        "Terminated",
+        "Committed",
+        "Deployed",
+        "Flushed",
+        "Finalized",
+        "Propagated",
+        "Synchronized",
+        "Yielded",
+        "Emitted",
+    )
+
+    @staticmethod
+    def _format_run_elapsed(seconds: float) -> str:
+        """将秒数格式化为人类可读的时间字符串."""
+        if seconds < 10.0:
+            return f"{seconds:.1f}s"
+        if seconds < 60.0:
+            return f"{int(seconds)}s"
+        minutes = int(seconds) // 60
+        secs = int(seconds) % 60
+        return f"{minutes}m {secs}s"
+
+    def _append_run_elapsed_to_history(self) -> None:
+        """将本次 running 耗时以极客风格写入 history scrollback."""
+        if self._run_start_time is None:
+            return
+        elapsed = time.monotonic() - self._run_start_time
+        verb = random.choice(self._RUN_ELAPSED_VERBS)
+        duration_str = self._format_run_elapsed(elapsed)
+        self._renderer.append_system_message(f"{verb} in {duration_str}")
+
     def _set_busy(self, value: bool) -> None:
         self._busy = value
         self._render_dirty = True
@@ -391,6 +432,7 @@ class TerminalAgentTUI(
         self._interrupt_requested_at = None
 
         self._set_busy(True)
+        self._run_start_time = time.monotonic()
         self._waiting_for_input = False
         self._pending_questions = None
         # 本轮默认 loading 文案：避免出现 Working… 这种突兀 fallback
@@ -437,6 +479,8 @@ class TerminalAgentTUI(
         finally:
             self._stream_task = None
             self._interrupt_requested_at = None
+            self._append_run_elapsed_to_history()
+            self._run_start_time = None
             self._set_busy(False)
             await self._status_bar.refresh()
 

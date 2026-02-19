@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from prompt_toolkit.utils import get_cwidth
@@ -93,15 +94,28 @@ class RenderPanelsMixin:
         # 优先使用动画器的渲染（流光走字 + 随机 geek 术语）
         if self._tool_result_animator.is_active:
             renderable = self._tool_result_animator.renderable()
-            return self._rich_text_to_pt_fragments(renderable)
+            frags = self._rich_text_to_pt_fragments(renderable)
+            return self._append_run_elapsed_fragment(frags)
 
         if self._animator.is_active:
             renderable = self._animator.renderable()
-            return self._rich_text_to_pt_fragments(renderable)
+            frags = self._rich_text_to_pt_fragments(renderable)
+            return self._append_run_elapsed_fragment(frags)
 
         # 获取语义化的 loading 状态
         loading_state = self._renderer.loading_state()
         text = loading_state.text.strip()
+
+        # --- DEBUG: 写入临时日志，排查 _run_start_time 和 _busy 的值 ---
+        import logging as _logging
+        _dbg = _logging.getLogger("_loading_text_debug")
+        _dbg.debug(
+            f"branch=fallback busy={getattr(self,'_busy',None)} "
+            f"run_start={getattr(self,'_run_start_time',None)} "
+            f"text={text!r}"
+        )
+        # --- END DEBUG ---
+
         if not text:
             if self._busy:
                 return self._animated_loading_fragments(self._fallback_loading_phrase)
@@ -112,7 +126,17 @@ class RenderPanelsMixin:
     def _animated_loading_fragments(self, phrase: str) -> list[tuple[str, str]]:
         """用与 SubmissionAnimator 一致的流光走字 + 脉冲 glyph 渲染 loading 文案."""
         width = self._terminal_width()
-        clipped = fit_single_line(phrase, width - 4)  # 留出 glyph + 空格
+
+        # 若正在计时，预先计算时间后缀宽度，给 phrase 预留空间
+        run_start: float | None = getattr(self, "_run_start_time", None)
+        elapsed_suffix = ""
+        if run_start is not None:
+            elapsed = time.monotonic() - run_start
+            elapsed_suffix = f"  ·  {self._format_run_elapsed(elapsed)}"
+
+        # glyph(1) + space(1) = 2，再减去时间后缀宽度
+        phrase_budget = width - 4 - get_cwidth(elapsed_suffix)
+        clipped = fit_single_line(phrase, max(phrase_budget, 8))
 
         frame = self._loading_frame
         pulse_idx = frame % len(PULSE_COLORS)
@@ -125,11 +149,32 @@ class RenderPanelsMixin:
         dot = RichText(f"{glyph} ", style=f"bold {glyph_color}")
         sweep = _cyan_sweep_text(clipped, frame=frame)
         combined = RichText.assemble(dot, sweep)
-        return self._rich_text_to_pt_fragments(combined)
+        frags = self._rich_text_to_pt_fragments(combined)
+        if elapsed_suffix:
+            frags = frags + [("fg:#6B7280", elapsed_suffix)]
+        return frags
+
+    def _append_run_elapsed_fragment(
+        self,
+        frags: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        """若当前正在计时，在 fragments 末尾追加 '  ·  Xs' 时间后缀."""
+        run_start: float | None = getattr(self, "_run_start_time", None)
+        if run_start is None:
+            return frags
+        elapsed = time.monotonic() - run_start
+        duration_str = self._format_run_elapsed(elapsed)
+        # Rich __rich_console__ 末尾会输出一个 "\n" segment，需要先剥掉再追加，
+        # 否则时间后缀会落在换行符之后，在单行 Window 里不可见。
+        tail: list[tuple[str, str]] = []
+        trimmed = list(frags)
+        while trimmed and trimmed[-1][1] == "\n":
+            tail.insert(0, trimmed.pop())
+        return trimmed + [("fg:#6B7280", f"  ·  {duration_str}")] + tail
 
     def _loading_height(self) -> int:
-        if self._animator.is_active:
-            return 1
+        # 工具面板优先：即使 animator 仍活跃，也需要为多行工具面板分配正确高度，
+        # 否则在 Task subagent 执行期间嵌套工具行会被 Window 裁剪为 1 行。
         if self._renderer.has_running_tools():
             show_flash_line = (
                 self._tool_result_flash_active and self._tool_panel_max_lines >= 2
@@ -143,6 +188,8 @@ class RenderPanelsMixin:
             tool_lines = self._renderer.tool_panel_entries(max_lines=max(1, tool_max))
             total = len(tool_lines) + (1 if show_flash_line else 0)
             return max(1, total)
+        if self._animator.is_active:
+            return 1
         if self._tool_result_animator.is_active:
             return 1
         if self._renderer.loading_state().text.strip():

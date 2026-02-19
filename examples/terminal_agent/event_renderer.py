@@ -278,7 +278,9 @@ class EventRenderer:
                 subagent_name = state.subagent_name or "Task"
                 description = state.subagent_description or state.title
                 title = f"{subagent_name}({description})"
-                entries.append((0, f"{title} · {elapsed}{tokens_suffix}"))
+                tool_count = len(state.nested_tools)
+                tool_count_suffix = f" · +{tool_count} tool uses" if tool_count > 0 else ""
+                entries.append((0, f"{title} · {elapsed}{tool_count_suffix}{tokens_suffix}"))
 
                 # 嵌套工具调用（最多显示最近 3 个）
                 for child_id, child_tool in state.nested_tools[-3:]:
@@ -379,9 +381,13 @@ class EventRenderer:
         title = tool_name
         is_task = tool_name.lower() == "task"
         summary = summarize_tool_args(tool_name, args, self._project_root).strip()
+        subagent_name = ""
+        subagent_description = ""
         if is_task:
             title = _extract_task_title(args)
             summary = ""
+            subagent_name = str(args.get("subagent_type", "")).strip() or "Task"
+            subagent_description = str(args.get("description", "")).strip()
 
         return _RunningTool(
             tool_name=tool_name,
@@ -390,6 +396,8 @@ class EventRenderer:
             is_task=is_task,
             args_summary=summary,
             show_init=is_task,
+            subagent_name=subagent_name,
+            subagent_description=subagent_description,
         )
 
     def _append_tool_result(
@@ -411,7 +419,15 @@ class EventRenderer:
 
         elapsed = _format_duration(time.monotonic() - state.started_at_monotonic)
         if state.is_task:
-            base = f"{state.title} · {elapsed}"
+            subagent_name = state.subagent_name or "Task"
+            description = state.subagent_description or state.title
+            if description and description != subagent_name:
+                task_title = f"{subagent_name}({description})"
+            else:
+                task_title = subagent_name
+            tool_count = len(state.nested_tools)
+            tool_count_suffix = f" · +{tool_count} tool uses" if tool_count > 0 else ""
+            base = f"{task_title} · {elapsed}{tool_count_suffix}"
         else:
             display_name = "Update" if state.tool_name in ("Edit", "MultiEdit") else state.tool_name
             summary = state.args_summary
@@ -661,13 +677,8 @@ class EventRenderer:
             case ToolCallEvent(tool=tool_name, args=arguments, tool_call_id=tool_call_id):
                 args_dict = arguments if isinstance(arguments, dict) else {"_raw": str(arguments)}
                 self._thinking_content = ""
-                # 处理 TodoWrite 工具：更新 todo 列表
+                # TodoWrite: skip normal tool tracking; updates come via TodoUpdatedEvent.
                 if tool_name.lower() == "todowrite":
-                    from terminal_agent.tool_view import extract_todos
-                    todos = extract_todos(args_dict)
-                    if todos:
-                        self._update_todos([{"content": t.content, "status": t.status, "priority": t.priority} for t in todos])
-                    # TodoWrite is rendered in the dedicated todo panel.
                     self._rebuild_loading_line()
                     return (False, None)
                 self._append_tool_call(tool_name, args_dict, tool_call_id)
