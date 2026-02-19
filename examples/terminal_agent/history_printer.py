@@ -11,7 +11,7 @@ from terminal_agent.models import HistoryEntry
 
 def _entry_prefix(entry: HistoryEntry) -> str:
     if entry.entry_type == "user":
-        return "❯"
+        return ">"
     if entry.entry_type == "assistant":
         return "⏺"
     if entry.entry_type == "tool_call":
@@ -47,17 +47,25 @@ def render_history_group(
 
     renderables: list[Any] = []
     for entry in entries:
-        # Thinking entries: 灰色显示 + 💭 前缀
+        # Thinking entries: 灰色显示，无前缀
         if entry.entry_type == "thinking":
             content = str(entry.text)
             content_lines = content.splitlines() or [""]
             line_text = Text()
-            line_text.append("💭 ", style="dim")
+            line_text.append("  ", style="dim")
             line_text.append(content_lines[0], style="dim")
             for line in content_lines[1:]:
                 line_text.append("\n")
-                line_text.append("   ", style="dim")  # 3 空格缩进对齐
+                line_text.append("  ", style="dim")
                 line_text.append(line, style="dim")
+            renderables.append(line_text)
+            renderables.append(Text(""))
+            continue
+
+        # Elapsed entries: 灰色显示，无前缀
+        if entry.entry_type == "elapsed":
+            line_text = Text()
+            line_text.append(str(entry.text), style="dim")
             renderables.append(line_text)
             renderables.append(Text(""))
             continue

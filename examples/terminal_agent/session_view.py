@@ -63,7 +63,7 @@ def render_session_header(console: Console, session_id: str, mode: str) -> None:
 
 
 def render_user_message(console: Console, content: str) -> None:
-    console.print(f"[green]❯[/] {_truncate(content, 1000)}")
+    console.print(f"[green]>[/] {_truncate(content, 1000)}")
 
 
 def render_resume_timeline(console: Console, session: ChatSession) -> None:

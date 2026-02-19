@@ -225,6 +225,14 @@ class EventRenderer:
             HistoryEntry(entry_type="system", text=normalized, is_error=is_error)
         )
 
+    def append_elapsed_message(self, content: str) -> None:
+        """追加一条灰色无前缀的计时统计行到 history scrollback."""
+        normalized = content.strip()
+        if not normalized:
+            return
+        self._flush_assistant_segment()
+        self._history.append(HistoryEntry(entry_type="elapsed", text=normalized))
+
     def append_assistant_message(self, content: str) -> None:
         normalized = content.strip()
         if not normalized:

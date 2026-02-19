@@ -28,6 +28,8 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
+
+
 from prompt_toolkit.filters import Condition, has_completions, has_focus
 from comate_agent_sdk.agent import ChatSession
 
@@ -91,7 +93,7 @@ class TerminalAgentTUI(
         self._waiting_for_input = False
         self._pending_questions: list[dict[str, Any]] | None = None
         self._ui_mode = UIMode.NORMAL
-        self._show_thinking = False  # Ctrl+T 开关，默认关闭
+        self._show_thinking = True  # Ctrl+T 开关，默认打开
         self._input_read_only = Condition(lambda: self._busy)
 
         self._slash_completer = SlashCommandCompleter(SLASH_COMMAND_SPECS)
@@ -408,7 +410,7 @@ class TerminalAgentTUI(
         elapsed = time.monotonic() - self._run_start_time
         verb = random.choice(self._RUN_ELAPSED_VERBS)
         duration_str = self._format_run_elapsed(elapsed)
-        self._renderer.append_system_message(f"{verb} in {duration_str}")
+        self._renderer.append_elapsed_message(f"{verb} in {duration_str}")
 
     def _set_busy(self, value: bool) -> None:
         self._busy = value

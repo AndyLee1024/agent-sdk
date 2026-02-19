@@ -83,10 +83,11 @@ def _format_exit_usage_line(usage: object) -> str:
     input_tokens = max(total_prompt_tokens - total_prompt_cached_tokens, 0)
     total_tokens = input_tokens + total_completion_tokens
 
+    reasoning_part = f" (reasoning {total_reasoning_tokens:,})" if total_reasoning_tokens > 0 else ""
     return (
         f"Token usage: total={total_tokens:,} "
         f"input={input_tokens:,} (+ {total_prompt_cached_tokens:,} cached) "
-        f"output={total_completion_tokens:,} (reasoning {total_reasoning_tokens:,})"
+        f"output={total_completion_tokens:,}{reasoning_part}"
     )
 
 

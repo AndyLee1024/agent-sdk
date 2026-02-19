@@ -5,7 +5,7 @@ from rich.console import Console
 ASSISTANT_PREFIX = "⏺"
 ASSISTANT_PREFIX_STYLE = "bold cyan"
 ASSISTANT_MESSAGE_GAP_LINES = 1
-USER_PREFIX = "❯"
+USER_PREFIX = ">"
 USER_PREFIX_STYLE = "bold ansicyan"
 
 TOOL_RUNNING_STYLE = "bold blue"

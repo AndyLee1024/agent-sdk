@@ -212,10 +212,11 @@ class CommandsMixin:
             usage.total_prompt_tokens - usage.total_prompt_cached_tokens,
             0,
         )
+        total_tokens = prompt_new_tokens + usage.total_completion_tokens
 
         lines = [
             "Token Usage",
-            f"- total: {usage.total_tokens:,}",
+            f"- total: {total_tokens:,}",
             f"- entries: {usage.entry_count}",
             f"- prompt: {usage.total_prompt_tokens:,}",
             f"- prompt_cached: {usage.total_prompt_cached_tokens:,}",
