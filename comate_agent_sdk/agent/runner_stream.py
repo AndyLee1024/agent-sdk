@@ -4,8 +4,8 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
-from contextlib import suppress
+from collections.abc import AsyncIterator, Callable
+from contextlib import nullcontext, suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -58,6 +58,13 @@ class _RunningTaskState:
     started_at_monotonic: float
     tokens: int = 0
     usage_tracking_mode: Literal["queue", "stream"] = "queue"
+
+
+@dataclass
+class _TaskStreamOut:
+    """Result holder for _iter_task_stream_events."""
+
+    tool_message: ToolMessage | None = None
 
 
 def _source_matches_prefix(*, source: str, source_prefix: str) -> bool:
@@ -183,6 +190,130 @@ async def _run_stop_hook(agent: "AgentRuntime", stop_reason: str) -> bool:
     return True
 
 
+async def _iter_task_stream_events(
+    agent: "AgentRuntime",
+    tool_call: ToolCall,
+    subagent_name: str,
+    description: str,
+    current_task_state: _RunningTaskState | None,
+    out: _TaskStreamOut,
+    *,
+    check_interrupt: Callable[[], bool] | None = None,
+) -> AsyncIterator[AgentEvent]:
+    task_tool = agent._tool_map.get("Task")
+    create_runtime_func = getattr(task_tool, "_create_subagent_runtime", None)
+    if create_runtime_func is None:
+        out.tool_message = ToolMessage(
+            tool_call_id=tool_call.id,
+            tool_name="Task",
+            content="Error: Task tool is not properly configured for streaming",
+            is_error=True,
+        )
+        return
+
+    try:
+        parsed_args = json.loads(tool_call.function.arguments)
+    except json.JSONDecodeError:
+        parsed_args = {"_raw": tool_call.function.arguments}
+    args = parsed_args if isinstance(parsed_args, dict) else {"_raw": tool_call.function.arguments}
+
+    raw_subagent_type = args.get("subagent_type", "")
+    subagent_type = raw_subagent_type if isinstance(raw_subagent_type, str) else str(raw_subagent_type)
+    raw_prompt = args.get("prompt", "")
+    prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
+
+    try:
+        subagent_runtime, agent_def = await create_runtime_func(subagent_type, tool_call.id)
+        if current_task_state is not None:
+            current_task_state.usage_tracking_mode = "stream"
+            runtime_source_prefix = getattr(subagent_runtime, "_subagent_source_prefix", None)
+            if isinstance(runtime_source_prefix, str) and runtime_source_prefix:
+                current_task_state.source_prefix = runtime_source_prefix
+
+        result_text = ""
+        tool_call_times: dict[str, float] = {}
+        timeout = agent_def.timeout if agent_def and agent_def.timeout else None
+        timeout_ctx = asyncio.timeout(timeout) if timeout else nullcontext()
+
+        async with timeout_ctx:
+            async for event in subagent_runtime.query_stream(prompt):
+                if check_interrupt and check_interrupt():
+                    out.tool_message = ToolMessage(
+                        tool_call_id=tool_call.id,
+                        tool_name="Task",
+                        content=f"Error: Subagent '{subagent_name}' cancelled due to user interrupt",
+                        is_error=True,
+                    )
+                    return
+
+                if isinstance(event, UsageDeltaEvent):
+                    if current_task_state is not None and _usage_belongs_to_task(event, current_task_state):
+                        delta_tokens = _usage_delta_tokens_for_progress(event)
+                        current_task_state.tokens += delta_tokens
+                        elapsed_ms = (time.monotonic() - current_task_state.started_at_monotonic) * 1000
+                        yield SubagentProgressEvent(
+                            tool_call_id=tool_call.id,
+                            subagent_name=subagent_name,
+                            description=description,
+                            status="running",
+                            elapsed_ms=elapsed_ms,
+                            tokens=current_task_state.tokens,
+                        )
+                    continue
+
+                if isinstance(event, ToolCallEvent):
+                    tool_call_times[event.tool_call_id] = time.time()
+                    yield SubagentToolCallEvent(
+                        parent_tool_call_id=tool_call.id,
+                        subagent_name=subagent_name,
+                        tool=event.tool,
+                        args=event.args,
+                        tool_call_id=event.tool_call_id,
+                    )
+                    continue
+
+                if isinstance(event, ToolResultEvent):
+                    start_time = tool_call_times.get(event.tool_call_id, time.time())
+                    duration_ms = (time.time() - start_time) * 1000
+                    yield SubagentToolResultEvent(
+                        parent_tool_call_id=tool_call.id,
+                        subagent_name=subagent_name,
+                        tool=event.tool,
+                        tool_call_id=event.tool_call_id,
+                        is_error=event.is_error,
+                        duration_ms=duration_ms,
+                    )
+                    continue
+
+                if isinstance(event, TextEvent):
+                    result_text += event.content
+
+        out.tool_message = ToolMessage(
+            tool_call_id=tool_call.id,
+            tool_name="Task",
+            content=result_text or "(no output)",
+            is_error=False,
+        )
+    except asyncio.TimeoutError:
+        out.tool_message = ToolMessage(
+            tool_call_id=tool_call.id,
+            tool_name="Task",
+            content=f"Error: Subagent '{subagent_name}' timeout after {timeout}s",
+            is_error=True,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        error_msg = f"Error in subagent '{subagent_name}': {exc}"
+        logger.error(error_msg, exc_info=True)
+        out.tool_message = ToolMessage(
+            tool_call_id=tool_call.id,
+            tool_name="Task",
+            content=error_msg,
+            is_error=True,
+        )
+
+
 async def query_stream(
     agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]
 ) -> AsyncIterator[AgentEvent]:
@@ -251,128 +382,23 @@ async def query_stream(
     ) -> ToolMessage:
         """流式执行 Task 工具（用于并行执行）"""
         subagent_name, description = meta
-
-        # 获取参数
-        try:
-            args = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError:
-            args = {"_raw": tool_call.function.arguments}
-
-        subagent_type = args.get("subagent_type", "")
-        prompt = args.get("prompt", "")
-
-        # 获取 _create_subagent_runtime 方法
-        task_tool = agent._tool_map.get("Task")
-        create_runtime_func = getattr(task_tool, "_create_subagent_runtime", None)
-
-        if create_runtime_func is None:
-            return ToolMessage(
-                tool_call_id=tool_call.id,
-                content="Error: Task tool is not properly configured for streaming",
-                is_error=True,
-            )
-
-        try:
-            # 创建 subagent runtime
-            subagent_runtime, agent_def = await create_runtime_func(subagent_type, tool_call.id)
-
-            current_task_state = running_tasks.get(tool_call.id)
-            if current_task_state is not None:
-                current_task_state.usage_tracking_mode = "stream"
-                runtime_source_prefix = getattr(subagent_runtime, "_subagent_source_prefix", None)
-                if isinstance(runtime_source_prefix, str) and runtime_source_prefix:
-                    current_task_state.source_prefix = runtime_source_prefix
-
-            # 流式执行
-            result_text = ""
-            tool_call_times: dict[str, float] = {}
-
-            timeout = agent_def.timeout if agent_def and agent_def.timeout else None
-            stream = subagent_runtime.query_stream(prompt)
-
-            if timeout:
-                stream = asyncio.wait_for(stream, timeout=timeout)
-
-            async for event in stream:
-                # 流式分支只累计当前 task source_prefix 命中的 usage，避免并行串算。
-                if isinstance(event, UsageDeltaEvent):
-                    if current_task_state is not None and _usage_belongs_to_task(event, current_task_state):
-                        delta_tokens = _usage_delta_tokens_for_progress(event)
-                        current_task_state.tokens += delta_tokens
-                        elapsed_ms = (time.monotonic() - current_task_state.started_at_monotonic) * 1000
-                        # 将 SubagentProgressEvent 放入队列
-                        subagent_event_queue.put_nowait(
-                            SubagentProgressEvent(
-                                tool_call_id=tool_call.id,
-                                subagent_name=subagent_name,
-                                description=description,
-                                status="running",
-                                elapsed_ms=elapsed_ms,
-                                tokens=current_task_state.tokens,
-                            )
-                        )
-                    continue
-
-                # 封装 ToolCallEvent → SubagentToolCallEvent
-                if isinstance(event, ToolCallEvent):
-                    tool_call_times[event.tool_call_id] = time.time()
-                    subagent_event_queue.put_nowait(
-                        SubagentToolCallEvent(
-                            parent_tool_call_id=tool_call.id,
-                            subagent_name=subagent_name,
-                            tool=event.tool,
-                            args=event.args,
-                            tool_call_id=event.tool_call_id,
-                        )
-                    )
-                    continue
-
-                # 封装 ToolResultEvent → SubagentToolResultEvent
-                if isinstance(event, ToolResultEvent):
-                    start_time = tool_call_times.get(event.tool_call_id, time.time())
-                    duration_ms = (time.time() - start_time) * 1000
-                    subagent_event_queue.put_nowait(
-                        SubagentToolResultEvent(
-                            parent_tool_call_id=tool_call.id,
-                            subagent_name=subagent_name,
-                            tool=event.tool,
-                            tool_call_id=event.tool_call_id,
-                            is_error=event.is_error,
-                            duration_ms=duration_ms,
-                        )
-                    )
-                    continue
-
-                # 收集 TextEvent 作为最终结果
-                if isinstance(event, TextEvent):
-                    result_text += event.content
-                    continue
-
-            # 构造 ToolMessage
-            return ToolMessage(
-                tool_call_id=tool_call.id,
-                tool_name="Task",
-                content=result_text or "(no output)",
-                is_error=False,
-            )
-
-        except asyncio.TimeoutError:
-            error_msg = f"Error: Subagent '{subagent_name}' timeout after {timeout}s"
-            return ToolMessage(
-                tool_call_id=tool_call.id,
-                tool_name="Task",
-                content=error_msg,
-                is_error=True,
-            )
-        except Exception as e:
-            error_msg = f"Error in subagent '{subagent_name}': {e}"
-            logger.error(error_msg, exc_info=True)
-            return ToolMessage(
-                tool_call_id=tool_call.id,
-                tool_name="Task",
-                content=error_msg,
-                is_error=True,
-            )
+        current_task_state = running_tasks.get(tool_call.id)
+        out = _TaskStreamOut()
+        async for event in _iter_task_stream_events(
+            agent,
+            tool_call,
+            subagent_name,
+            description,
+            current_task_state,
+            out,
+        ):
+            subagent_event_queue.put_nowait(event)
+        return out.tool_message or ToolMessage(
+            tool_call_id=tool_call.id,
+            tool_name="Task",
+            content="Error: streaming task produced no result",
+            is_error=True,
+        )
 
     async def _yield_interrupted_stop() -> AsyncIterator[AgentEvent]:
         async for usage_event in _drain_usage_events():
@@ -712,106 +738,338 @@ async def query_stream(
             expected_ids = [call.id for call in tool_calls if str(call.id).strip()]
             agent._context.begin_tool_barrier(expected_ids)
 
-            results_by_id: dict[str, ToolMessage] = {}
-            txn_committed = False
+            _stop_signal: list[str | None] = [None]
 
-            # Execute tool calls, yielding events for each.
-            # Contiguous Task tool calls can run in parallel (streamed by completion order),
-            # while ToolMessage writes remain in original order for reproducibility.
-            step_number = 0
-            idx = 0
-            while idx < len(tool_calls):
-                if _is_interrupt_requested(agent):
-                    for call in tool_calls[idx:]:
-                        results_by_id[call.id] = ToolMessage(
-                            tool_call_id=call.id,
-                            tool_name=str(call.function.name or "").strip() or "Tool",
-                            content=json.dumps(
-                                {
-                                    "status": "cancelled",
-                                    "reason": "user_interrupt",
-                                },
-                                ensure_ascii=False,
-                            ),
-                            is_error=True,
-                        )
-                    agent._context.add_messages_atomic(
-                        [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+            async def _run_all_tool_calls() -> AsyncIterator[AgentEvent]:
+                results_by_id: dict[str, ToolMessage] = {}
+                txn_committed = False
+
+                # Execute tool calls, yielding events for each.
+                # Contiguous Task tool calls can run in parallel (streamed by completion order),
+                # while ToolMessage writes remain in original order for reproducibility.
+                step_number = 0
+                idx = 0
+                while idx < len(tool_calls):
+                    if _is_interrupt_requested(agent):
+                        for call in tool_calls[idx:]:
+                            results_by_id[call.id] = ToolMessage(
+                                tool_call_id=call.id,
+                                tool_name=str(call.function.name or "").strip() or "Tool",
+                                content=json.dumps(
+                                    {
+                                        "status": "cancelled",
+                                        "reason": "user_interrupt",
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                                is_error=True,
+                            )
+                        if not txn_committed:
+                            agent._context.add_messages_atomic(
+                                [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                            )
+                            txn_committed = True
+                        _stop_signal[0] = "interrupted"
+                        async for event in _yield_interrupted_stop():
+                            yield event
+                        return
+
+                    tool_call = tool_calls[idx]
+                    tool_name = tool_call.function.name
+
+                    # Parallel Task group (contiguous only)
+                    if agent.task_parallel_enabled and tool_name == "Task":
+                        group: list[ToolCall] = []
+                        while idx < len(tool_calls) and tool_calls[idx].function.name == "Task":
+                            group.append(tool_calls[idx])
+                            idx += 1
+
+                        args_by_id: dict[str, dict] = {}
+                        meta_by_id: dict[str, tuple[str, str]] = {}
+
+                        # Emit step start + tool call + subagent start for each call (in call order)
+                        for tc in group:
+                            step_number += 1
+
+                            try:
+                                args = json.loads(tc.function.arguments)
+                            except json.JSONDecodeError:
+                                args = {"_raw": tc.function.arguments}
+                            args_by_id[tc.id] = _normalize_tool_call_event_args(
+                                agent,
+                                tool_name="Task",
+                                raw_args=args,
+                            )
+                            task_args = args_by_id[tc.id]
+
+                            subagent_name, description, source_prefix = _resolve_task_metadata(
+                                tool_call_id=tc.id,
+                                args=task_args,
+                            )
+                            meta_by_id[tc.id] = (subagent_name, description)
+                            running_tasks[tc.id] = _RunningTaskState(
+                                tool_call_id=tc.id,
+                                subagent_name=subagent_name,
+                                description=description,
+                                source_prefix=source_prefix,
+                                started_at_monotonic=time.monotonic(),
+                            )
+                            await agent.run_hook_event(
+                                "SubagentStart",
+                                tool_call_id=tc.id,
+                                subagent_name=subagent_name,
+                                subagent_description=description,
+                                subagent_status="running",
+                            )
+
+                            yield StepStartEvent(
+                                step_id=tc.id,
+                                title=description,
+                                step_number=step_number,
+                            )
+
+                            yield ToolCallEvent(
+                                tool="Task",
+                                args=args_by_id[tc.id],
+                                tool_call_id=tc.id,
+                                display_name=description,
+                            )
+
+                            yield SubagentStartEvent(
+                                tool_call_id=tc.id,
+                                subagent_name=subagent_name,
+                                description=description,
+                            )
+                            yield SubagentProgressEvent(
+                                tool_call_id=tc.id,
+                                subagent_name=subagent_name,
+                                description=description,
+                                status="running",
+                                elapsed_ms=0.0,
+                                tokens=0,
+                            )
+                            async for hidden_event in _drain_hidden_events(agent):
+                                yield hidden_event
+
+                        semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
+
+                        # 检查是否启用流式 Task
+                        task_tool = agent._tool_map.get("Task")
+                        is_streaming = getattr(task_tool, "_is_streaming_task", False)
+
+                        async def _run(tc: ToolCall) -> tuple[ToolCall, ToolMessage, float]:
+                            start = time.time()
+                            async with semaphore:
+                                # 流式执行 Task
+                                if is_streaming:
+                                    tool_result = await _execute_task_streaming(agent, tc, meta_by_id[tc.id])
+                                else:
+                                    tool_result = await execute_tool_call(agent, tc)
+                            duration_ms = (time.time() - start) * 1000
+                            return tc, tool_result, duration_ms
+
+                        futures = [asyncio.create_task(_run(tc)) for tc in group]
+                        pending = set(futures)
+                        group_results_by_id: dict[str, ToolMessage] = {}
+
+                        while pending:
+                            async for usage_event in _drain_usage_events():
+                                yield usage_event
+                            async for subagent_event in _drain_subagent_events():
+                                yield subagent_event
+
+                            if _is_interrupt_requested(agent):
+                                for fut in pending:
+                                    fut.cancel()
+                                await asyncio.gather(*pending, return_exceptions=True)
+
+                                # Mark unfinished task calls as cancelled.
+                                completed_ids = set(group_results_by_id.keys())
+                                for tc in group:
+                                    if tc.id in completed_ids:
+                                        continue
+                                    cancelled = ToolMessage(
+                                        tool_call_id=tc.id,
+                                        tool_name="Task",
+                                        content=json.dumps(
+                                            {"status": "cancelled", "reason": "user_interrupt"},
+                                            ensure_ascii=False,
+                                        ),
+                                        is_error=True,
+                                    )
+                                    group_results_by_id[tc.id] = cancelled
+                                    async for event in _emit_cancelled_task(tc.id):
+                                        yield event
+
+                                for tc in group:
+                                    results_by_id[tc.id] = group_results_by_id[tc.id]
+                                for call in tool_calls[idx:]:
+                                    results_by_id[call.id] = ToolMessage(
+                                        tool_call_id=call.id,
+                                        tool_name=str(call.function.name or "").strip() or "Tool",
+                                        content=json.dumps(
+                                            {"status": "cancelled", "reason": "user_interrupt"},
+                                            ensure_ascii=False,
+                                        ),
+                                        is_error=True,
+                                    )
+                                if not txn_committed:
+                                    agent._context.add_messages_atomic(
+                                        [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                                    )
+                                    txn_committed = True
+                                _stop_signal[0] = "interrupted"
+                                async for event in _yield_interrupted_stop():
+                                    yield event
+                                return
+
+                            done, pending = await asyncio.wait(
+                                pending,
+                                timeout=usage_poll_interval_seconds,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+
+                            async for usage_event in _drain_usage_events():
+                                yield usage_event
+                            async for subagent_event in _drain_subagent_events():
+                                yield subagent_event
+
+                            if not done:
+                                continue
+
+                            for fut in done:
+                                tc, tool_result, duration_ms = await fut
+                                subagent_name, description = meta_by_id.get(tc.id, ("Task", "Task"))
+
+                                state = running_tasks.pop(tc.id, None)
+                                total_tokens = state.tokens if state is not None else 0
+
+                                stop_status: Literal["completed", "error", "timeout", "cancelled"] = "completed"
+                                error_msg: str | None = None
+                                if tool_result.is_error:
+                                    error_msg = tool_result.text
+                                    if "timeout" in tool_result.text.lower():
+                                        stop_status = "timeout"
+                                    elif "cancelled" in tool_result.text.lower():
+                                        stop_status = "cancelled"
+                                    else:
+                                        stop_status = "error"
+                                await agent.run_hook_event(
+                                    "SubagentStop",
+                                    tool_call_id=tc.id,
+                                    subagent_name=subagent_name,
+                                    subagent_description=description,
+                                    subagent_status=stop_status,
+                                )
+
+                                yield SubagentProgressEvent(
+                                    tool_call_id=tc.id,
+                                    subagent_name=subagent_name,
+                                    description=description,
+                                    status=stop_status,
+                                    elapsed_ms=duration_ms,
+                                    tokens=total_tokens,
+                                )
+
+                                yield SubagentStopEvent(
+                                    tool_call_id=tc.id,
+                                    subagent_name=subagent_name,
+                                    status=stop_status,
+                                    duration_ms=duration_ms,
+                                    error=error_msg,
+                                )
+
+                                screenshot_base64 = extract_screenshot(tool_result)
+                                yield ToolResultEvent(
+                                    tool="Task",
+                                    result=tool_result.text,
+                                    tool_call_id=tc.id,
+                                    is_error=tool_result.is_error,
+                                    screenshot_base64=screenshot_base64,
+                                )
+
+                                yield StepCompleteEvent(
+                                    step_id=tc.id,
+                                    status="error" if tool_result.is_error else "completed",
+                                    duration_ms=duration_ms,
+                                )
+                                async for hidden_event in _drain_hidden_events(agent):
+                                    yield hidden_event
+
+                                group_results_by_id[tc.id] = tool_result
+
+                        for tc in group:
+                            results_by_id[tc.id] = group_results_by_id[tc.id]
+
+                        continue
+
+                    # Default: serial execution
+                    step_number += 1
+
+                    try:
+                        args = json.loads(tool_call.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {"_raw": tool_call.function.arguments}
+                    args_dict = _normalize_tool_call_event_args(
+                        agent,
+                        tool_name=tool_name,
+                        raw_args=args,
                     )
-                    async for event in _yield_interrupted_stop():
-                        yield event
-                    return
 
-                tool_call = tool_calls[idx]
-                tool_name = tool_call.function.name
+                    is_task = tool_name == "Task"
+                    # 检查 Task 工具是否启用了流式模式
+                    is_task_stream = False
+                    if is_task:
+                        task_tool = agent._tool_map.get("Task")
+                        is_task_stream = getattr(task_tool, "_is_streaming_task", False)
 
-                # Parallel Task group (contiguous only)
-                if agent.task_parallel_enabled and tool_name == "Task":
-                    group: list[ToolCall] = []
-                    while idx < len(tool_calls) and tool_calls[idx].function.name == "Task":
-                        group.append(tool_calls[idx])
-                        idx += 1
-
-                    args_by_id: dict[str, dict] = {}
-                    meta_by_id: dict[str, tuple[str, str]] = {}
-
-                    # Emit step start + tool call + subagent start for each call (in call order)
-                    for tc in group:
-                        step_number += 1
-
-                        try:
-                            args = json.loads(tc.function.arguments)
-                        except json.JSONDecodeError:
-                            args = {"_raw": tc.function.arguments}
-                        args_by_id[tc.id] = _normalize_tool_call_event_args(
-                            agent,
-                            tool_name="Task",
-                            raw_args=args,
+                    task_subagent_name = "Task"
+                    task_description = tool_name
+                    if is_task:
+                        task_subagent_name, task_description, task_source_prefix = _resolve_task_metadata(
+                            tool_call_id=tool_call.id,
+                            args=args_dict,
                         )
-                        task_args = args_by_id[tc.id]
+                    else:
+                        task_source_prefix = ""
 
-                        subagent_name, description, source_prefix = _resolve_task_metadata(
-                            tool_call_id=tc.id,
-                            args=task_args,
-                        )
-                        meta_by_id[tc.id] = (subagent_name, description)
-                        running_tasks[tc.id] = _RunningTaskState(
-                            tool_call_id=tc.id,
-                            subagent_name=subagent_name,
-                            description=description,
-                            source_prefix=source_prefix,
+                    yield StepStartEvent(
+                        step_id=tool_call.id,
+                        title=task_description if is_task else tool_name,
+                        step_number=step_number,
+                    )
+
+                    yield ToolCallEvent(
+                        tool=tool_name,
+                        args=args_dict,
+                        tool_call_id=tool_call.id,
+                        display_name=task_description if is_task else tool_name,
+                    )
+
+                    if is_task:
+                        running_tasks[tool_call.id] = _RunningTaskState(
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            description=task_description,
+                            source_prefix=task_source_prefix,
                             started_at_monotonic=time.monotonic(),
                         )
                         await agent.run_hook_event(
                             "SubagentStart",
-                            tool_call_id=tc.id,
-                            subagent_name=subagent_name,
-                            subagent_description=description,
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            subagent_description=task_description,
                             subagent_status="running",
                         )
-
-                        yield StepStartEvent(
-                            step_id=tc.id,
-                            title=description,
-                            step_number=step_number,
-                        )
-
-                        yield ToolCallEvent(
-                            tool="Task",
-                            args=args_by_id[tc.id],
-                            tool_call_id=tc.id,
-                            display_name=description,
-                        )
-
                         yield SubagentStartEvent(
-                            tool_call_id=tc.id,
-                            subagent_name=subagent_name,
-                            description=description,
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            description=task_description,
                         )
                         yield SubagentProgressEvent(
-                            tool_call_id=tc.id,
-                            subagent_name=subagent_name,
-                            description=description,
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            description=task_description,
                             status="running",
                             elapsed_ms=0.0,
                             tokens=0,
@@ -819,584 +1077,293 @@ async def query_stream(
                         async for hidden_event in _drain_hidden_events(agent):
                             yield hidden_event
 
-                    semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
+                    step_start_time = time.time()
 
-                    # 检查是否启用流式 Task
-                    task_tool = agent._tool_map.get("Task")
-                    is_streaming = getattr(task_tool, "_is_streaming_task", False)
-
-                    async def _run(tc: ToolCall) -> tuple[ToolCall, ToolMessage, float]:
-                        start = time.time()
-                        async with semaphore:
-                            # 流式执行 Task
-                            if is_streaming:
-                                tool_result = await _execute_task_streaming(agent, tc, meta_by_id[tc.id])
-                            else:
-                                tool_result = await execute_tool_call(agent, tc)
-                        duration_ms = (time.time() - start) * 1000
-                        return tc, tool_result, duration_ms
-
-                    futures = [asyncio.create_task(_run(tc)) for tc in group]
-                    pending = set(futures)
-                    group_results_by_id: dict[str, ToolMessage] = {}
-
-                    while pending:
-                        async for usage_event in _drain_usage_events():
-                            yield usage_event
-                        async for subagent_event in _drain_subagent_events():
-                            yield subagent_event
-
-                        if _is_interrupt_requested(agent):
-                            for fut in pending:
-                                fut.cancel()
-                            await asyncio.gather(*pending, return_exceptions=True)
-
-                            # Mark unfinished task calls as cancelled.
-                            completed_ids = set(group_results_by_id.keys())
-                            for tc in group:
-                                if tc.id in completed_ids:
-                                    continue
-                                cancelled = ToolMessage(
-                                    tool_call_id=tc.id,
-                                    tool_name="Task",
-                                    content=json.dumps(
-                                        {"status": "cancelled", "reason": "user_interrupt"},
-                                        ensure_ascii=False,
-                                    ),
-                                    is_error=True,
-                                )
-                                group_results_by_id[tc.id] = cancelled
-                                async for event in _emit_cancelled_task(tc.id):
-                                    yield event
-
-                            for tc in group:
-                                results_by_id[tc.id] = group_results_by_id[tc.id]
-                            for call in tool_calls[idx:]:
-                                results_by_id[call.id] = ToolMessage(
-                                    tool_call_id=call.id,
-                                    tool_name=str(call.function.name or "").strip() or "Tool",
-                                    content=json.dumps(
-                                        {"status": "cancelled", "reason": "user_interrupt"},
-                                        ensure_ascii=False,
-                                    ),
-                                    is_error=True,
-                                )
-                            agent._context.add_messages_atomic(
-                                [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
-                            )
-                            async for event in _yield_interrupted_stop():
-                                yield event
-                            return
-
-                        done, pending = await asyncio.wait(
-                            pending,
-                            timeout=usage_poll_interval_seconds,
-                            return_when=asyncio.FIRST_COMPLETED,
+                    # === Task 流式处理：流式执行 ===
+                    if is_task_stream:
+                        current_task_state = running_tasks.get(tool_call.id)
+                        out = _TaskStreamOut()
+                        async for event in _iter_task_stream_events(
+                            agent,
+                            tool_call,
+                            task_subagent_name,
+                            task_description,
+                            current_task_state,
+                            out,
+                            check_interrupt=lambda: _is_interrupt_requested(agent),
+                        ):
+                            yield event
+                        tool_result = out.tool_message or ToolMessage(
+                            tool_call_id=tool_call.id,
+                            tool_name="Task",
+                            content="Error: streaming task produced no result",
+                            is_error=True,
                         )
 
-                        async for usage_event in _drain_usage_events():
-                            yield usage_event
-                        async for subagent_event in _drain_subagent_events():
-                            yield subagent_event
+                    # === Task 或普通工具：调用 execute_tool_call ===
+                    else:
+                        tool_result_task = asyncio.create_task(execute_tool_call(agent, tool_call))
+                        while True:
+                            async for usage_event in _drain_usage_events():
+                                yield usage_event
 
-                        if not done:
-                            continue
+                            if _is_interrupt_requested(agent):
+                                tool_result_task.cancel()
+                                with suppress(asyncio.CancelledError):
+                                    await tool_result_task
 
-                        for fut in done:
-                            tc, tool_result, duration_ms = await fut
-                            subagent_name, description = meta_by_id.get(tc.id, ("Task", "Task"))
-
-                            state = running_tasks.pop(tc.id, None)
-                            total_tokens = state.tokens if state is not None else 0
-
-                            stop_status: Literal["completed", "error", "timeout", "cancelled"] = "completed"
-                            error_msg: str | None = None
-                            if tool_result.is_error:
-                                error_msg = tool_result.text
-                                if "timeout" in tool_result.text.lower():
-                                    stop_status = "timeout"
+                                step_duration_ms = (time.time() - step_start_time) * 1000
+                                if is_task:
+                                    cancelled_result = ToolMessage(
+                                        tool_call_id=tool_call.id,
+                                        tool_name="Task",
+                                        content=json.dumps(
+                                            {"status": "cancelled", "reason": "user_interrupt"},
+                                            ensure_ascii=False,
+                                        ),
+                                        is_error=True,
+                                    )
+                                    results_by_id[tool_call.id] = cancelled_result
+                                    async for event in _emit_cancelled_task(tool_call.id):
+                                        yield event
                                 else:
-                                    stop_status = "error"
-                            await agent.run_hook_event(
-                                "SubagentStop",
-                                tool_call_id=tc.id,
-                                subagent_name=subagent_name,
-                                subagent_description=description,
-                                subagent_status=stop_status,
+                                    yield StepCompleteEvent(
+                                        step_id=tool_call.id,
+                                        status="cancelled",
+                                        duration_ms=step_duration_ms,
+                                    )
+                                    results_by_id[tool_call.id] = ToolMessage(
+                                        tool_call_id=tool_call.id,
+                                        tool_name=str(tool_name or "").strip() or "Tool",
+                                        content=json.dumps(
+                                            {"status": "cancelled", "reason": "user_interrupt"},
+                                            ensure_ascii=False,
+                                        ),
+                                        is_error=True,
+                                    )
+
+                                for call in tool_calls[idx + 1 :]:
+                                    results_by_id[call.id] = ToolMessage(
+                                        tool_call_id=call.id,
+                                        tool_name=str(call.function.name or "").strip() or "Tool",
+                                        content=json.dumps(
+                                            {"status": "cancelled", "reason": "user_interrupt"},
+                                            ensure_ascii=False,
+                                        ),
+                                        is_error=True,
+                                    )
+
+                                if not txn_committed:
+                                    agent._context.add_messages_atomic(
+                                        [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                                    )
+                                    txn_committed = True
+
+                                _stop_signal[0] = "interrupted"
+                                async for event in _yield_interrupted_stop():
+                                    yield event
+                                return
+
+                            done, _ = await asyncio.wait(
+                                {tool_result_task},
+                                timeout=usage_poll_interval_seconds,
+                                return_when=asyncio.ALL_COMPLETED,
                             )
+                            async for usage_event in _drain_usage_events():
+                                yield usage_event
+                            if done:
+                                break
 
-                            yield SubagentProgressEvent(
-                                tool_call_id=tc.id,
-                                subagent_name=subagent_name,
-                                description=description,
-                                status=stop_status,
-                                elapsed_ms=duration_ms,
-                                tokens=total_tokens,
-                            )
+                        tool_result = await tool_result_task
+                    step_duration_ms = (time.time() - step_start_time) * 1000
+                    results_by_id[tool_call.id] = tool_result
+                    async for hidden_event in _drain_hidden_events(agent):
+                        yield hidden_event
 
-                            yield SubagentStopEvent(
-                                tool_call_id=tc.id,
-                                subagent_name=subagent_name,
-                                status=stop_status,
-                                duration_ms=duration_ms,
-                                error=error_msg,
-                            )
+                    if is_task:
+                        state = running_tasks.pop(tool_call.id, None)
+                        total_tokens = state.tokens if state is not None else 0
+                        stop_status: Literal["completed", "error", "timeout", "cancelled"] = "completed"
+                        error_msg: str | None = None
+                        if tool_result.is_error:
+                            error_msg = tool_result.text
+                            if "timeout" in tool_result.text.lower():
+                                stop_status = "timeout"
+                            elif "cancelled" in tool_result.text.lower():
+                                stop_status = "cancelled"
+                            else:
+                                stop_status = "error"
+                        await agent.run_hook_event(
+                            "SubagentStop",
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            subagent_description=task_description,
+                            subagent_status=stop_status,
+                        )
+                        yield SubagentProgressEvent(
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            description=task_description,
+                            status=stop_status,
+                            elapsed_ms=step_duration_ms,
+                            tokens=total_tokens,
+                        )
+                        yield SubagentStopEvent(
+                            tool_call_id=tool_call.id,
+                            subagent_name=task_subagent_name,
+                            status=stop_status,
+                            duration_ms=step_duration_ms,
+                            error=error_msg,
+                        )
 
-                            screenshot_base64 = extract_screenshot(tool_result)
-                            yield ToolResultEvent(
-                                tool="Task",
-                                result=tool_result.text,
-                                tool_call_id=tc.id,
-                                is_error=tool_result.is_error,
-                                screenshot_base64=screenshot_base64,
-                            )
-
-                            yield StepCompleteEvent(
-                                step_id=tc.id,
-                                status="error" if tool_result.is_error else "completed",
-                                duration_ms=duration_ms,
-                            )
-                            async for hidden_event in _drain_hidden_events(agent):
-                                yield hidden_event
-
-                            group_results_by_id[tc.id] = tool_result
-
-                    for tc in group:
-                        results_by_id[tc.id] = group_results_by_id[tc.id]
-
-                    continue
-
-                # Default: serial execution
-                step_number += 1
-
-                try:
-                    args = json.loads(tool_call.function.arguments)
-                except json.JSONDecodeError:
-                    args = {"_raw": tool_call.function.arguments}
-                args_dict = _normalize_tool_call_event_args(
-                    agent,
-                    tool_name=tool_name,
-                    raw_args=args,
-                )
-
-                is_task = tool_name == "Task"
-                # 检查 Task 工具是否启用了流式模式
-                is_task_stream = False
-                if is_task:
-                    task_tool = agent._tool_map.get("Task")
-                    is_task_stream = getattr(task_tool, "_is_streaming_task", False)
-
-                task_subagent_name = "Task"
-                task_description = tool_name
-                if is_task:
-                    task_subagent_name, task_description, task_source_prefix = _resolve_task_metadata(
+                    screenshot_base64 = extract_screenshot(tool_result)
+                    # Extract diff metadata for Edit/MultiEdit tools
+                    diff_metadata: dict[str, Any] | None = None
+                    if tool_name in ("Edit", "MultiEdit") and not tool_result.is_error:
+                        payload = tool_result.raw_envelope
+                        if isinstance(payload, dict):
+                            data = payload.get("data", {})
+                            if isinstance(data, dict):
+                                diff_lines = data.get("diff")
+                                meta: dict[str, Any] = {}
+                                if isinstance(diff_lines, list) and len(diff_lines) > 0:
+                                    meta["diff"] = diff_lines
+                                sl = data.get("start_line")
+                                el = data.get("end_line")
+                                if isinstance(sl, int) and sl > 0:
+                                    meta["start_line"] = sl
+                                    meta["end_line"] = el if isinstance(el, int) else sl
+                                if meta:
+                                    diff_metadata = meta
+                    yield ToolResultEvent(
+                        tool=tool_name,
+                        result=tool_result.text,
                         tool_call_id=tool_call.id,
-                        args=args_dict,
+                        is_error=tool_result.is_error,
+                        screenshot_base64=screenshot_base64,
+                        metadata=diff_metadata,
                     )
-                else:
-                    task_source_prefix = ""
 
-                yield StepStartEvent(
-                    step_id=tool_call.id,
-                    title=task_description if is_task else tool_name,
-                    step_number=step_number,
-                )
-
-                yield ToolCallEvent(
-                    tool=tool_name,
-                    args=args_dict,
-                    tool_call_id=tool_call.id,
-                    display_name=task_description if is_task else tool_name,
-                )
-
-                if is_task:
-                    running_tasks[tool_call.id] = _RunningTaskState(
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        description=task_description,
-                        source_prefix=task_source_prefix,
-                        started_at_monotonic=time.monotonic(),
-                    )
-                    await agent.run_hook_event(
-                        "SubagentStart",
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        subagent_description=task_description,
-                        subagent_status="running",
-                    )
-                    yield SubagentStartEvent(
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        description=task_description,
-                    )
-                    yield SubagentProgressEvent(
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        description=task_description,
-                        status="running",
-                        elapsed_ms=0.0,
-                        tokens=0,
+                    yield StepCompleteEvent(
+                        step_id=tool_call.id,
+                        status="error" if tool_result.is_error else "completed",
+                        duration_ms=step_duration_ms,
                     )
                     async for hidden_event in _drain_hidden_events(agent):
                         yield hidden_event
 
-                step_start_time = time.time()
-
-                # === Task 流式处理：流式执行 ===
-                if is_task_stream:
-                    # 获取 subagent runtime 创建函数
-                    create_runtime_func = getattr(
-                        agent._tool_map.get("Task"),
-                        "_create_subagent_runtime",
-                        None,
-                    )
-                    if create_runtime_func is None:
-                        error_msg = "Error: Task tool is not properly configured for streaming"
-                        tool_result = ToolMessage(
-                            tool_call_id=tool_call.id,
-                            tool_name="Task",
-                            content=error_msg,
-                            is_error=True,
-                        )
-                    else:
-                        # 创建 subagent runtime
-                        subagent_type = args_dict.get("subagent_type", "")
-                        prompt = args_dict.get("prompt", "")
-
-                        try:
-                            subagent_runtime, agent_def = await create_runtime_func(
-                                subagent_type, tool_call.id
-                            )
-
-                            current_task_state = running_tasks.get(tool_call.id)
-                            if current_task_state is not None:
-                                current_task_state.usage_tracking_mode = "stream"
-                                runtime_source_prefix = getattr(subagent_runtime, "_subagent_source_prefix", None)
-                                if isinstance(runtime_source_prefix, str) and runtime_source_prefix:
-                                    current_task_state.source_prefix = runtime_source_prefix
-
-                            # 流式执行
-                            result_text = ""
-                            tool_call_times: dict[str, float] = {}
-
-                            timeout = agent_def.timeout if agent_def and agent_def.timeout else None
-                            stream = subagent_runtime.query_stream(prompt)
-
-                            if timeout:
-                                stream = asyncio.wait_for(stream, timeout=timeout)
-
-                            async for event in stream:
-                                # 检查中断
-                                if _is_interrupt_requested(agent):
-                                    break
-
-                                # 流式分支只累计当前 task source_prefix 命中的 usage。
-                                if isinstance(event, UsageDeltaEvent):
-                                    if current_task_state is not None and _usage_belongs_to_task(event, current_task_state):
-                                        delta_tokens = _usage_delta_tokens_for_progress(event)
-                                        current_task_state.tokens += delta_tokens
-                                        elapsed_ms = (time.monotonic() - current_task_state.started_at_monotonic) * 1000
-                                        yield SubagentProgressEvent(
-                                            tool_call_id=tool_call.id,
-                                            subagent_name=task_subagent_name,
-                                            description=task_description,
-                                            status="running",
-                                            elapsed_ms=elapsed_ms,
-                                            tokens=current_task_state.tokens,
-                                        )
-                                    continue
-
-                                # 封装 ToolCallEvent → SubagentToolCallEvent
-                                if isinstance(event, ToolCallEvent):
-                                    tool_call_times[event.tool_call_id] = time.time()
-                                    yield SubagentToolCallEvent(
-                                        parent_tool_call_id=tool_call.id,
-                                        subagent_name=task_subagent_name,
-                                        tool=event.tool,
-                                        args=event.args,
-                                        tool_call_id=event.tool_call_id,
-                                    )
-                                    continue
-
-                                # 封装 ToolResultEvent → SubagentToolResultEvent
-                                if isinstance(event, ToolResultEvent):
-                                    start_time = tool_call_times.get(event.tool_call_id, time.time())
-                                    duration_ms = (time.time() - start_time) * 1000
-                                    yield SubagentToolResultEvent(
-                                        parent_tool_call_id=tool_call.id,
-                                        subagent_name=task_subagent_name,
-                                        tool=event.tool,
-                                        tool_call_id=event.tool_call_id,
-                                        is_error=event.is_error,
-                                        duration_ms=duration_ms,
-                                    )
-                                    continue
-
-                                # 收集 TextEvent 作为最终结果
-                                if isinstance(event, TextEvent):
-                                    result_text += event.content
-                                    continue
-
-                                # 其他事件（ThinkingEvent、StopEvent 等）忽略
-
-                            # 构造 ToolMessage
-                            tool_result = ToolMessage(
-                                tool_call_id=tool_call.id,
-                                tool_name="Task",
-                                content=result_text or "(no output)",
-                                is_error=False,
-                            )
-
-                        except asyncio.TimeoutError:
-                            error_msg = f"Error: Subagent '{task_subagent_name}' timeout after {timeout}s"
-                            tool_result = ToolMessage(
-                                tool_call_id=tool_call.id,
-                                tool_name="Task",
-                                content=error_msg,
-                                is_error=True,
-                            )
-                        except Exception as e:
-                            error_msg = f"Error in subagent '{task_subagent_name}': {e}"
-                            logger.error(error_msg, exc_info=True)
-                            tool_result = ToolMessage(
-                                tool_call_id=tool_call.id,
-                                tool_name="Task",
-                                content=error_msg,
-                                is_error=True,
-                            )
-
-                # === Task 或普通工具：调用 execute_tool_call ===
-                else:
-                    tool_result_task = asyncio.create_task(execute_tool_call(agent, tool_call))
-                    while True:
-                        async for usage_event in _drain_usage_events():
-                            yield usage_event
-
-                        if _is_interrupt_requested(agent):
-                            tool_result_task.cancel()
-                            with suppress(asyncio.CancelledError):
-                                await tool_result_task
-
-                            step_duration_ms = (time.time() - step_start_time) * 1000
-                            if is_task:
-                                cancelled_result = ToolMessage(
-                                    tool_call_id=tool_call.id,
-                                    tool_name="Task",
-                                    content=json.dumps(
-                                        {"status": "cancelled", "reason": "user_interrupt"},
-                                        ensure_ascii=False,
-                                    ),
-                                    is_error=True,
-                                )
-                                results_by_id[tool_call.id] = cancelled_result
-                                async for event in _emit_cancelled_task(tool_call.id):
-                                    yield event
-                            else:
-                                yield StepCompleteEvent(
-                                    step_id=tool_call.id,
-                                    status="cancelled",
-                                    duration_ms=step_duration_ms,
-                                )
-                                results_by_id[tool_call.id] = ToolMessage(
-                                    tool_call_id=tool_call.id,
-                                    tool_name=str(tool_name or "").strip() or "Tool",
-                                    content=json.dumps(
-                                        {"status": "cancelled", "reason": "user_interrupt"},
-                                        ensure_ascii=False,
-                                    ),
-                                    is_error=True,
-                                )
-
-                            for call in tool_calls[idx + 1 :]:
-                                results_by_id[call.id] = ToolMessage(
-                                    tool_call_id=call.id,
-                                    tool_name=str(call.function.name or "").strip() or "Tool",
-                                    content=json.dumps(
-                                        {"status": "cancelled", "reason": "user_interrupt"},
-                                        ensure_ascii=False,
-                                    ),
-                                    is_error=True,
-                                )
-
-                            agent._context.add_messages_atomic(
-                                [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
-                            )
-
-                            async for event in _yield_interrupted_stop():
-                                yield event
-                            return
-
-                        done, _ = await asyncio.wait(
-                            {tool_result_task},
-                            timeout=usage_poll_interval_seconds,
-                            return_when=asyncio.ALL_COMPLETED,
-                        )
-                        async for usage_event in _drain_usage_events():
-                            yield usage_event
-                        if done:
-                            break
-
-                    tool_result = await tool_result_task
-                step_duration_ms = (time.time() - step_start_time) * 1000
-                results_by_id[tool_call.id] = tool_result
-                async for hidden_event in _drain_hidden_events(agent):
-                    yield hidden_event
-
-                if is_task:
-                    state = running_tasks.pop(tool_call.id, None)
-                    total_tokens = state.tokens if state is not None else 0
-                    stop_status: Literal["completed", "error", "timeout", "cancelled"] = "completed"
-                    error_msg: str | None = None
-                    if tool_result.is_error:
-                        error_msg = tool_result.text
-                        if "timeout" in tool_result.text.lower():
-                            stop_status = "timeout"
+                    # Check if this was TodoWrite - if so, yield TodoUpdatedEvent
+                    if tool_name == "TodoWrite" and not tool_result.is_error:
+                        todos: list[dict] = []
+                        payload = tool_result.raw_envelope
+                        if is_tool_result_envelope(payload):
+                            data = payload.get("data", {})
+                            if isinstance(data, dict):
+                                raw_todos = data.get("todos", [])
+                                if isinstance(raw_todos, list):
+                                    todos = [t for t in raw_todos if isinstance(t, dict)]
                         else:
-                            stop_status = "error"
-                    await agent.run_hook_event(
-                        "SubagentStop",
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        subagent_description=task_description,
-                        subagent_status=stop_status,
-                    )
-                    yield SubagentProgressEvent(
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        description=task_description,
-                        status=stop_status,
-                        elapsed_ms=step_duration_ms,
-                        tokens=total_tokens,
-                    )
-                    yield SubagentStopEvent(
-                        tool_call_id=tool_call.id,
-                        subagent_name=task_subagent_name,
-                        status=stop_status,
-                        duration_ms=step_duration_ms,
-                        error=error_msg,
-                    )
+                            try:
+                                parsed_payload = json.loads(tool_result.text)
+                                if is_tool_result_envelope(parsed_payload):
+                                    data = parsed_payload.get("data", {})
+                                    if isinstance(data, dict):
+                                        raw_todos = data.get("todos", [])
+                                        if isinstance(raw_todos, list):
+                                            todos = [t for t in raw_todos if isinstance(t, dict)]
+                            except Exception:
+                                todos = []
 
-                screenshot_base64 = extract_screenshot(tool_result)
-                # Extract diff metadata for Edit/MultiEdit tools
-                diff_metadata: dict[str, Any] | None = None
-                if tool_name in ("Edit", "MultiEdit") and not tool_result.is_error:
-                    payload = tool_result.raw_envelope
-                    if isinstance(payload, dict):
-                        data = payload.get("data", {})
-                        if isinstance(data, dict):
-                            diff_lines = data.get("diff")
-                            meta: dict[str, Any] = {}
-                            if isinstance(diff_lines, list) and len(diff_lines) > 0:
-                                meta["diff"] = diff_lines
-                            sl = data.get("start_line")
-                            el = data.get("end_line")
-                            if isinstance(sl, int) and sl > 0:
-                                meta["start_line"] = sl
-                                meta["end_line"] = el if isinstance(el, int) else sl
-                            if meta:
-                                diff_metadata = meta
-                yield ToolResultEvent(
-                    tool=tool_name,
-                    result=tool_result.text,
-                    tool_call_id=tool_call.id,
-                    is_error=tool_result.is_error,
-                    screenshot_base64=screenshot_base64,
-                    metadata=diff_metadata,
-                )
+                        if todos:
+                            yield TodoUpdatedEvent(todos=todos)
 
-                yield StepCompleteEvent(
-                    step_id=tool_call.id,
-                    status="error" if tool_result.is_error else "completed",
-                    duration_ms=step_duration_ms,
-                )
-                async for hidden_event in _drain_hidden_events(agent):
-                    yield hidden_event
+                    # Check if this was AskUserQuestion - if so, yield UserQuestionEvent and stop
+                    if tool_name == "AskUserQuestion" and not tool_result.is_error:
+                        questions: list[dict] = []
+                        payload = tool_result.raw_envelope
+                        if is_tool_result_envelope(payload):
+                            data = payload.get("data", {})
+                            if isinstance(data, dict):
+                                raw_questions = data.get("questions", [])
+                                if isinstance(raw_questions, list):
+                                    questions = [q for q in raw_questions if isinstance(q, dict)]
+                        else:
+                            try:
+                                parsed_payload = json.loads(tool_result.text)
+                                if is_tool_result_envelope(parsed_payload):
+                                    data = parsed_payload.get("data", {})
+                                    if isinstance(data, dict):
+                                        raw_questions = data.get("questions", [])
+                                        if isinstance(raw_questions, list):
+                                            questions = [q for q in raw_questions if isinstance(q, dict)]
+                            except Exception:
+                                questions = []
 
-                # Check if this was TodoWrite - if so, yield TodoUpdatedEvent
-                if tool_name == "TodoWrite" and not tool_result.is_error:
-                    todos: list[dict] = []
-                    payload = tool_result.raw_envelope
-                    if is_tool_result_envelope(payload):
-                        data = payload.get("data", {})
-                        if isinstance(data, dict):
-                            raw_todos = data.get("todos", [])
-                            if isinstance(raw_todos, list):
-                                todos = [t for t in raw_todos if isinstance(t, dict)]
-                    else:
-                        try:
-                            parsed_payload = json.loads(tool_result.text)
-                            if is_tool_result_envelope(parsed_payload):
-                                data = parsed_payload.get("data", {})
-                                if isinstance(data, dict):
-                                    raw_todos = data.get("todos", [])
-                                    if isinstance(raw_todos, list):
-                                        todos = [t for t in raw_todos if isinstance(t, dict)]
-                        except Exception:
-                            todos = []
-
-                    if todos:
-                        yield TodoUpdatedEvent(todos=todos)
-
-                # Check if this was AskUserQuestion - if so, yield UserQuestionEvent and stop
-                if tool_name == "AskUserQuestion" and not tool_result.is_error:
-                    questions: list[dict] = []
-                    payload = tool_result.raw_envelope
-                    if is_tool_result_envelope(payload):
-                        data = payload.get("data", {})
-                        if isinstance(data, dict):
-                            raw_questions = data.get("questions", [])
+                        if not questions:
+                            # fallback for legacy behavior
+                            raw_questions = args_dict.get("questions", [])
                             if isinstance(raw_questions, list):
                                 questions = [q for q in raw_questions if isinstance(q, dict)]
-                    else:
-                        try:
-                            parsed_payload = json.loads(tool_result.text)
-                            if is_tool_result_envelope(parsed_payload):
-                                data = parsed_payload.get("data", {})
-                                if isinstance(data, dict):
-                                    raw_questions = data.get("questions", [])
-                                    if isinstance(raw_questions, list):
-                                        questions = [q for q in raw_questions if isinstance(q, dict)]
-                        except Exception:
-                            questions = []
 
-                    if not questions:
-                        # fallback for legacy behavior
-                        raw_questions = args_dict.get("questions", [])
-                        if isinstance(raw_questions, list):
-                            questions = [q for q in raw_questions if isinstance(q, dict)]
+                        if questions:
+                            yield UserQuestionEvent(
+                                questions=questions,
+                                tool_call_id=tool_call.id,
+                            )
+                            if not txn_committed:
+                                agent._context.add_messages_atomic(
+                                    [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                                )
+                                txn_committed = True
+                                async for hidden_event in _drain_hidden_events(agent):
+                                    yield hidden_event
+                            async for usage_event in _drain_usage_events():
+                                yield usage_event
+                            if await _run_stop_hook(agent, "waiting_for_input"):
+                                async for hidden_event in _drain_hidden_events(agent):
+                                    yield hidden_event
+                                idx += 1
+                                continue
+                            async for hidden_event in _drain_hidden_events(agent):
+                                yield hidden_event
+                            yield StopEvent(reason="waiting_for_input")
+                            _stop_signal[0] = "waiting_for_input"
+                            return
 
-                    if questions:
-                        yield UserQuestionEvent(
-                            questions=questions,
-                            tool_call_id=tool_call.id,
-                        )
+                    if _is_interrupt_requested(agent):
+                        for call in tool_calls[idx + 1 :]:
+                            results_by_id[call.id] = ToolMessage(
+                                tool_call_id=call.id,
+                                tool_name=str(call.function.name or "").strip() or "Tool",
+                                content=json.dumps(
+                                    {"status": "cancelled", "reason": "user_interrupt"},
+                                    ensure_ascii=False,
+                                ),
+                                is_error=True,
+                            )
                         if not txn_committed:
                             agent._context.add_messages_atomic(
                                 [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
                             )
                             txn_committed = True
-                            async for hidden_event in _drain_hidden_events(agent):
-                                yield hidden_event
-                        async for usage_event in _drain_usage_events():
-                            yield usage_event
-                        if await _run_stop_hook(agent, "waiting_for_input"):
-                            async for hidden_event in _drain_hidden_events(agent):
-                                yield hidden_event
-                            idx += 1
-                            continue
-                        async for hidden_event in _drain_hidden_events(agent):
-                            yield hidden_event
-                        yield StopEvent(reason="waiting_for_input")
+                        _stop_signal[0] = "interrupted"
+                        async for event in _yield_interrupted_stop():
+                            yield event
                         return
 
-                idx += 1
+                    idx += 1
 
-            if not txn_committed:
-                agent._context.add_messages_atomic(
-                    [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
-                )
-                async for hidden_event in _drain_hidden_events(agent):
-                    yield hidden_event
+                if not txn_committed:
+                    agent._context.add_messages_atomic(
+                        [assistant_msg] + [results_by_id[call.id] for call in tool_calls]
+                    )
+                    async for hidden_event in _drain_hidden_events(agent):
+                        yield hidden_event
+
+            async for event in _run_all_tool_calls():
+                yield event
+            if _stop_signal[0]:
+                return
 
             # Check for compaction after tool execution
             compacted, pre_compact_event, compaction_meta_events = await check_and_compact(agent, response)
