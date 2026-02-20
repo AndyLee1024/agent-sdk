@@ -2,7 +2,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
-from comate_agent_sdk.agent.runner import precheck_and_compact
+from comate_agent_sdk.agent.runner_engine.compaction import precheck_and_compact
 from comate_agent_sdk.context.compaction import CompactionMetaRecord
 from comate_agent_sdk.context.usage_tracker import ContextUsageTracker
 from comate_agent_sdk.llm.messages import UserMessage

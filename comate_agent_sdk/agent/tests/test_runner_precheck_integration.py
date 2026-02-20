@@ -75,7 +75,7 @@ class TestRunnerPrecheckIntegration(unittest.IsolatedAsyncioTestCase):
             return False, None, []
 
         with patch(
-            "comate_agent_sdk.agent.runner.precheck_and_compact",
+            "comate_agent_sdk.agent.runner_engine.query_sync.precheck_and_compact",
             new=AsyncMock(side_effect=_fake_precheck),
         ):
             result = await agent.query("run precheck")
@@ -122,7 +122,7 @@ class TestRunnerPrecheckIntegration(unittest.IsolatedAsyncioTestCase):
             return False, None, []
 
         with patch(
-            "comate_agent_sdk.agent.runner_stream.precheck_and_compact",
+            "comate_agent_sdk.agent.runner_engine.query_stream.precheck_and_compact",
             new=AsyncMock(side_effect=_fake_precheck),
         ):
             async for _ in agent.query_stream("run precheck stream"):
@@ -153,7 +153,7 @@ class TestRunnerPrecheckIntegration(unittest.IsolatedAsyncioTestCase):
 
         events: list[object] = []
         with patch(
-            "comate_agent_sdk.agent.runner_stream.precheck_and_compact",
+            "comate_agent_sdk.agent.runner_engine.query_stream.precheck_and_compact",
             new=AsyncMock(side_effect=_fake_precheck),
         ):
             async for event in agent.query_stream("hello"):

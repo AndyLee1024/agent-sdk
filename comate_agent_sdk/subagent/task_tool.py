@@ -222,7 +222,7 @@ def create_task_tool(
 
     # 如果启用流式 Task，附加必要的方法和标记
     if use_streaming_task:
-        # 为 Task 附加 subagent runtime 创建函数（供 runner_stream.py 使用）
+        # 为 Task 附加 subagent runtime 创建函数（供 runner_engine/query_stream.py 使用）
         async def _create_subagent_runtime_for_streaming(
             subagent_type: str,
             tool_call_id: str | None,

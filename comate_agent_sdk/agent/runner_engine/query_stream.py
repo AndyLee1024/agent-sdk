@@ -7,12 +7,10 @@ import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import nullcontext, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from comate_agent_sdk.agent.events import (
     AgentEvent,
-    HiddenUserMessageEvent,
-    PreCompactEvent,
     StepCompleteEvent,
     StepStartEvent,
     StopEvent,
@@ -31,7 +29,6 @@ from comate_agent_sdk.agent.events import (
 )
 from comate_agent_sdk.agent.history import destroy_ephemeral_messages
 from comate_agent_sdk.agent.llm import invoke_llm
-from comate_agent_sdk.agent.runner import check_and_compact, generate_max_iterations_summary, precheck_and_compact
 from comate_agent_sdk.agent.tool_exec import _coerce_tool_arguments, execute_tool_call, extract_screenshot
 from comate_agent_sdk.llm.messages import (
     ContentPartImageParam,
@@ -40,7 +37,20 @@ from comate_agent_sdk.llm.messages import (
     ToolMessage,
     UserMessage,
 )
-from comate_agent_sdk.system_tools.tool_result import is_tool_result_envelope
+
+from .compaction import check_and_compact, generate_max_iterations_summary, precheck_and_compact
+from .lifecycle import (
+    drain_hidden_events as _drain_hidden_events,
+    fire_session_start_if_needed as _fire_session_start_if_needed,
+    fire_user_prompt_submit as _fire_user_prompt_submit,
+    is_interrupt_requested as _is_interrupt_requested,
+)
+from .stop_policy import should_continue_after_stop_block
+from .tool_policy import (
+    is_ask_user_question,
+    policy_violation_message,
+)
+from .tool_result_projection import extract_diff_metadata, extract_questions, extract_todos
 
 logger = logging.getLogger("comate_agent_sdk.agent")
 
@@ -143,51 +153,12 @@ def _normalize_tool_call_event_args(
     return raw_args
 
 
-def _is_interrupt_requested(agent: "AgentRuntime") -> bool:
-    controller = getattr(agent, "_run_controller", None)
-    if controller is None:
-        return False
-    return bool(controller.is_interrupted)
-
-
-async def _drain_hidden_events(agent: "AgentRuntime") -> AsyncIterator[AgentEvent]:
-    for content in agent.drain_hidden_user_messages():
-        yield HiddenUserMessageEvent(content=content)
-
-
-async def _fire_session_start_if_needed(agent: "AgentRuntime") -> None:
-    if agent._hooks_session_started:
-        return
-    await agent.run_hook_event("SessionStart")
-    agent._hooks_session_started = True
-
-
-async def _fire_user_prompt_submit(agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]) -> None:
-    prompt = message if isinstance(message, str) else "[multi-modal]"
-    await agent.run_hook_event("UserPromptSubmit", prompt=prompt)
-
-
 async def _run_stop_hook(agent: "AgentRuntime", stop_reason: str) -> bool:
-    outcome = await agent.run_hook_event(
-        "Stop",
-        stop_reason=stop_reason,
-        stop_hook_active=agent._stop_hook_block_count > 0,
+    return await should_continue_after_stop_block(
+        agent,
+        stop_reason,
+        drain_hidden_immediately=False,
     )
-    if outcome is None or not outcome.should_block_stop:
-        agent.reset_stop_hook_state()
-        return False
-
-    should_continue = agent.mark_stop_blocked_once()
-    block_reason = outcome.reason or f"Stop blocked by hook: {stop_reason}"
-    agent.add_hidden_user_message(block_reason)
-
-    if not should_continue:
-        logger.warning(
-            f"Stop hook blocked {agent._stop_hook_block_count} times, forcing stop (reason={stop_reason})"
-        )
-        agent.reset_stop_hook_state()
-        return False
-    return True
 
 
 async def _iter_task_stream_events(
@@ -314,7 +285,7 @@ async def _iter_task_stream_events(
         )
 
 
-async def query_stream(
+async def run_query_stream(
     agent: "AgentRuntime", message: str | list[ContentPartTextParam | ContentPartImageParam]
 ) -> AsyncIterator[AgentEvent]:
     """流式执行：发送消息并逐步产出事件。"""
@@ -562,35 +533,8 @@ async def query_stream(
 
             tool_calls = list(response.tool_calls or [])
 
-            def _is_ask_user_question(call: ToolCall) -> bool:
-                return str(call.function.name or "").strip() == "AskUserQuestion"
-
-            def _policy_violation_message(
-                *,
-                call: ToolCall,
-                code: str,
-                message: str,
-                required_fix: str,
-            ) -> ToolMessage:
-                content = json.dumps(
-                    {
-                        "error": {
-                            "code": code,
-                            "message": message,
-                            "required_fix": required_fix,
-                        }
-                    },
-                    ensure_ascii=False,
-                )
-                return ToolMessage(
-                    tool_call_id=call.id,
-                    tool_name=str(call.function.name or "").strip() or "Tool",
-                    content=content,
-                    is_error=True,
-                )
-
-            has_ask = any(_is_ask_user_question(call) for call in tool_calls)
-            has_other = any(not _is_ask_user_question(call) for call in tool_calls)
+            has_ask = any(is_ask_user_question(call) for call in tool_calls)
+            has_other = any(not is_ask_user_question(call) for call in tool_calls)
 
             if has_ask and has_other:
                 if not askuser_repair_attempted:
@@ -605,15 +549,15 @@ async def query_stream(
 
                     results_by_id: dict[str, ToolMessage] = {}
                     for call in tool_calls:
-                        if _is_ask_user_question(call):
-                            results_by_id[call.id] = _policy_violation_message(
+                        if is_ask_user_question(call):
+                            results_by_id[call.id] = policy_violation_message(
                                 call=call,
                                 code="ASKUSER_EXCLUSIVE",
                                 message="AskUserQuestion must be called alone in a single assistant tool_calls response.",
                                 required_fix="Retry now with ONLY AskUserQuestion. Run other tools after the user answer in the next turn.",
                             )
                         else:
-                            results_by_id[call.id] = _policy_violation_message(
+                            results_by_id[call.id] = policy_violation_message(
                                 call=call,
                                 code="ASKUSER_BLOCKED_BY_ASK",
                                 message="Blocked because AskUserQuestion was present in the same tool_calls response.",
@@ -726,7 +670,7 @@ async def query_stream(
 
                     continue
 
-                ask_call = next((call for call in tool_calls if _is_ask_user_question(call)), None)
+                ask_call = next((call for call in tool_calls if is_ask_user_question(call)), None)
                 if ask_call is not None:
                     tool_calls = [ask_call]
 
@@ -1217,24 +1161,7 @@ async def query_stream(
                         )
 
                     screenshot_base64 = extract_screenshot(tool_result)
-                    # Extract diff metadata for Edit/MultiEdit tools
-                    diff_metadata: dict[str, Any] | None = None
-                    if tool_name in ("Edit", "MultiEdit") and not tool_result.is_error:
-                        payload = tool_result.raw_envelope
-                        if isinstance(payload, dict):
-                            data = payload.get("data", {})
-                            if isinstance(data, dict):
-                                diff_lines = data.get("diff")
-                                meta: dict[str, Any] = {}
-                                if isinstance(diff_lines, list) and len(diff_lines) > 0:
-                                    meta["diff"] = diff_lines
-                                sl = data.get("start_line")
-                                el = data.get("end_line")
-                                if isinstance(sl, int) and sl > 0:
-                                    meta["start_line"] = sl
-                                    meta["end_line"] = el if isinstance(el, int) else sl
-                                if meta:
-                                    diff_metadata = meta
+                    diff_metadata = extract_diff_metadata(str(tool_name or ""), tool_result)
                     yield ToolResultEvent(
                         tool=tool_name,
                         result=tool_result.text,
@@ -1254,57 +1181,13 @@ async def query_stream(
 
                     # Check if this was TodoWrite - if so, yield TodoUpdatedEvent
                     if tool_name == "TodoWrite" and not tool_result.is_error:
-                        todos: list[dict] = []
-                        payload = tool_result.raw_envelope
-                        if is_tool_result_envelope(payload):
-                            data = payload.get("data", {})
-                            if isinstance(data, dict):
-                                raw_todos = data.get("todos", [])
-                                if isinstance(raw_todos, list):
-                                    todos = [t for t in raw_todos if isinstance(t, dict)]
-                        else:
-                            try:
-                                parsed_payload = json.loads(tool_result.text)
-                                if is_tool_result_envelope(parsed_payload):
-                                    data = parsed_payload.get("data", {})
-                                    if isinstance(data, dict):
-                                        raw_todos = data.get("todos", [])
-                                        if isinstance(raw_todos, list):
-                                            todos = [t for t in raw_todos if isinstance(t, dict)]
-                            except Exception:
-                                todos = []
-
+                        todos = extract_todos(tool_result)
                         if todos:
                             yield TodoUpdatedEvent(todos=todos)
 
                     # Check if this was AskUserQuestion - if so, yield UserQuestionEvent and stop
                     if tool_name == "AskUserQuestion" and not tool_result.is_error:
-                        questions: list[dict] = []
-                        payload = tool_result.raw_envelope
-                        if is_tool_result_envelope(payload):
-                            data = payload.get("data", {})
-                            if isinstance(data, dict):
-                                raw_questions = data.get("questions", [])
-                                if isinstance(raw_questions, list):
-                                    questions = [q for q in raw_questions if isinstance(q, dict)]
-                        else:
-                            try:
-                                parsed_payload = json.loads(tool_result.text)
-                                if is_tool_result_envelope(parsed_payload):
-                                    data = parsed_payload.get("data", {})
-                                    if isinstance(data, dict):
-                                        raw_questions = data.get("questions", [])
-                                        if isinstance(raw_questions, list):
-                                            questions = [q for q in raw_questions if isinstance(q, dict)]
-                            except Exception:
-                                questions = []
-
-                        if not questions:
-                            # fallback for legacy behavior
-                            raw_questions = args_dict.get("questions", [])
-                            if isinstance(raw_questions, list):
-                                questions = [q for q in raw_questions if isinstance(q, dict)]
-
+                        questions = extract_questions(tool_result)
                         if questions:
                             yield UserQuestionEvent(
                                 questions=questions,

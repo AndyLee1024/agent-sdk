@@ -757,27 +757,27 @@ class AgentRuntime:
         return await invoke_llm(self)
 
     async def _generate_max_iterations_summary(self) -> str:
-        from comate_agent_sdk.agent.runner import generate_max_iterations_summary
+        from comate_agent_sdk.agent.runner_engine import generate_max_iterations_summary
 
         return await generate_max_iterations_summary(self)
 
     async def _check_and_compact(self, response: "ChatInvokeCompletion") -> bool:
-        from comate_agent_sdk.agent.runner import check_and_compact
+        from comate_agent_sdk.agent.runner_engine import check_and_compact
 
         compacted, _, _ = await check_and_compact(self, response)
         return compacted
 
     async def query(self, message: str) -> str:
-        from comate_agent_sdk.agent.runner import query
+        from comate_agent_sdk.agent.runner_engine import run_query
 
-        return await query(self, message)
+        return await run_query(self, message)
 
     async def query_stream(
         self, message: str | list[ContentPartTextParam | ContentPartImageParam]
     ) -> AsyncIterator["AgentEvent"]:
-        from comate_agent_sdk.agent.runner_stream import query_stream
+        from comate_agent_sdk.agent.runner_engine import run_query_stream
 
-        async for event in query_stream(self, message):
+        async for event in run_query_stream(self, message):
             yield event
 
     def _setup_tool_strategy(self) -> None:

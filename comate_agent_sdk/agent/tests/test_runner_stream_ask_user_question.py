@@ -5,6 +5,7 @@ from comate_agent_sdk.agent import Agent, AgentConfig
 from comate_agent_sdk.agent.events import StopEvent, UserQuestionEvent
 from comate_agent_sdk.llm.messages import Function, ToolCall
 from comate_agent_sdk.llm.views import ChatInvokeCompletion
+from comate_agent_sdk.tools import tool
 from comate_agent_sdk.system_tools.tools import AskUserQuestion
 
 
@@ -89,6 +90,61 @@ class TestRunnerStreamAskUserQuestion(unittest.IsolatedAsyncioTestCase):
         tool_message = tool_messages[0]
         self.assertIsNotNone(getattr(tool_message, "raw_envelope", None))
         self.assertIn("# AskUserQuestion", tool_message.text)
+
+    async def test_query_stream_does_not_fallback_to_args_when_envelope_missing(self) -> None:
+        @tool("Broken AskUserQuestion that returns plain text", name="AskUserQuestion")
+        async def BrokenAskUserQuestion(questions: list[dict]) -> str:
+            del questions
+            return "plain text without envelope"
+
+        tool_call = ToolCall(
+            id="tc_question_2",
+            function=Function(
+                name="AskUserQuestion",
+                arguments=json.dumps(
+                    {
+                        "questions": [
+                            {
+                                "question": "Should not be emitted?",
+                                "header": "LegacyFallback",
+                                "options": [
+                                    {"label": "Yes", "description": "legacy"},
+                                    {"label": "No", "description": "strict"},
+                                ],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+
+        llm = _FakeChatModel(
+            [
+                ChatInvokeCompletion(tool_calls=[tool_call]),
+                ChatInvokeCompletion(content="done"),
+            ]
+        )
+        template = Agent(
+            llm=llm,  # type: ignore[arg-type]
+            config=AgentConfig(
+                tools=(BrokenAskUserQuestion,),
+                agents=(),
+                offload_enabled=False,
+            ),
+        )
+        agent = template.create_runtime()
+
+        events = []
+        async for event in agent.query_stream("need input"):
+            events.append(event)
+
+        question_events = [e for e in events if isinstance(e, UserQuestionEvent)]
+        self.assertEqual(question_events, [])
+
+        stop_events = [e for e in events if isinstance(e, StopEvent)]
+        self.assertEqual(len(stop_events), 1)
+        self.assertEqual(stop_events[0].reason, "completed")
 
 
 if __name__ == "__main__":
