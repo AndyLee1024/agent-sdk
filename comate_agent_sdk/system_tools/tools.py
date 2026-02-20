@@ -297,11 +297,11 @@ def _validate_bash_command(
 
 
 class BashInput(BaseModel):
-    args: list[str] = Field(min_length=1, description="Executable and arguments")
-    timeout_ms: int = Field(default=_BASH_DEFAULT_TIMEOUT_MS, ge=1, le=_BASH_MAX_TIMEOUT_MS)
-    cwd: str | None = Field(default=None, description="Working directory for command")
+    args: list[str] = Field(min_length=1, description="Command and arguments as a list, e.g. ['git', 'status']. For shell features (pipes, &&, redirects): ['sh', '-c', 'cmd1 | cmd2']")
+    timeout_ms: int = Field(default=_BASH_DEFAULT_TIMEOUT_MS, ge=1, le=_BASH_MAX_TIMEOUT_MS, description="Timeout in milliseconds (default: 120000ms). Increase for long-running commands.")
+    cwd: str | None = Field(default=None, description="Working directory for command. Defaults to project root when omitted.")
     env: dict[str, str] | None = Field(default=None, description="Optional environment variable overrides")
-    max_output_chars: int = Field(default=_BASH_OUTPUT_DEFAULT_MAX_CHARS, ge=200, le=200_000)
+    max_output_chars: int = Field(default=_BASH_OUTPUT_DEFAULT_MAX_CHARS, ge=200, le=200_000, description="Maximum output characters returned (default: 30000). Reduce if output is too large.")
 
     model_config = {"extra": "forbid"}
 
@@ -379,10 +379,10 @@ class ReadInput(BaseModel):
         default=_READ_DEFAULT_LIMIT,
         ge=_READ_MIN_LIMIT,
         le=_READ_MAX_LIMIT,
-        description="Number of lines to read",
+        description="Number of lines to read (default: 500). If file has more, response includes has_more=true and next_offset_line for pagination.",
     )
-    format: Literal["line_numbers", "raw"] = Field(default="line_numbers")
-    max_line_chars: int = Field(default=_LINE_TRUNCATE_CHARS, ge=100, le=20_000)
+    format: Literal["line_numbers", "raw"] = Field(default="line_numbers", description="line_numbers (default): prefixes each line with its number, recommended for code editing; raw: plain text without line numbers.")
+    max_line_chars: int = Field(default=_LINE_TRUNCATE_CHARS, ge=100, le=20_000, description="Lines longer than this are truncated in output (default: 2000).")
 
     model_config = {"extra": "forbid"}
 
@@ -390,25 +390,25 @@ class ReadInput(BaseModel):
 class WriteInput(BaseModel):
     file_path: str = Field(description="Target file path")
     content: str = Field(description="Content to write")
-    mode: Literal["overwrite", "append"] = Field(default="overwrite")
-    encoding: str = Field(default="utf-8")
+    mode: Literal["overwrite", "append"] = Field(default="overwrite", description="overwrite (default): replaces the entire file content; append: adds content to the end of the file.")
+    encoding: str = Field(default="utf-8", description="File encoding (default: utf-8).")
 
     model_config = {"extra": "forbid"}
 
 
 class EditInput(BaseModel):
     file_path: str = Field(description="Target file path")
-    old_string: str = Field(min_length=1, description="Text to replace")
+    old_string: str = Field(min_length=1, description="Text to replace. Must match exactly (including whitespace and indentation). Must appear only once in the file, or set replace_all=True.")
     new_string: str = Field(description="Replacement text")
-    replace_all: bool = Field(default=False)
+    replace_all: bool = Field(default=False, description="If True, replace all occurrences. Use when old_string appears multiple times and all should be replaced.")
 
     model_config = {"extra": "forbid"}
 
 
 class MultiEditOp(BaseModel):
-    old_string: str = Field(description="Text to replace")
+    old_string: str = Field(description="Text to replace. Must match exactly (including whitespace and indentation). Must appear only once in the file, or set replace_all=True.")
     new_string: str = Field(description="Replacement text")
-    replace_all: bool = Field(default=False)
+    replace_all: bool = Field(default=False, description="If True, replace all occurrences. Use when old_string appears multiple times and all should be replaced.")
 
     model_config = {"extra": "forbid"}
 
@@ -421,40 +421,40 @@ class MultiEditInput(BaseModel):
 
 
 class GlobInput(BaseModel):
-    pattern: str
-    path: str | None = None
-    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300)
-    include_dirs: bool = False
+    pattern: str = Field(description="Glob pattern to match file paths, e.g. '**/*.py' (recursive), '*.json' (current dir), 'src/**/*.ts'.")
+    path: str | None = Field(default=None, description="Directory to search in. Defaults to project root when omitted.")
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300, description="Maximum number of results to return (default: 100).")
+    include_dirs: bool = Field(default=False, description="If True, include directories in results in addition to files.")
 
     model_config = {"extra": "forbid"}
 
 
 class GrepInput(BaseModel):
-    pattern: str
-    path: str | None = None
-    glob: str | None = None
-    type: str | None = None
-    output_mode: Literal["content", "files_with_matches", "count"] = "files_with_matches"
+    pattern: str = Field(description="Ripgrep regex pattern to search for, e.g. 'def\\s+\\w+', 'TODO|FIXME', 'class\\s+Foo'.")
+    path: str | None = Field(default=None, description="Directory or file to search in. Defaults to project root when omitted.")
+    glob: str | None = Field(default=None, description="Filter files by glob pattern, e.g. '*.py', '**/*.ts'. Applied on top of path.")
+    type: str | None = Field(default=None, description="Filter by file type shorthand, e.g. 'py', 'js', 'rust'. Faster than glob for common types.")
+    output_mode: Literal["content", "files_with_matches", "count"] = Field(default="files_with_matches", description="files_with_matches (default): return only file paths; content: return matching lines with context; count: return match count per file.")
 
-    B: int | None = Field(default=None, alias="-B", ge=0)
-    A: int | None = Field(default=None, alias="-A", ge=0)
-    C: int | None = Field(default=None, alias="-C", ge=0)
-    i: bool | None = Field(default=None, alias="-i")
-    n: bool | None = Field(default=True, alias="-n")
+    B: int | None = Field(default=None, alias="-B", ge=0, description="Lines of context before each match.")
+    A: int | None = Field(default=None, alias="-A", ge=0, description="Lines of context after each match.")
+    C: int | None = Field(default=None, alias="-C", ge=0, description="Lines of context before and after each match (shorthand for equal -B and -A).")
+    i: bool | None = Field(default=None, alias="-i", description="Case-insensitive search.")
+    n: bool | None = Field(default=True, alias="-n", description="Show line numbers in output (default: True).")
 
-    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300)
-    multiline: bool = False
-    max_files: int = Field(default=2000, ge=1, le=100_000)
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300, description="Maximum number of results to return (default: 100).")
+    multiline: bool = Field(default=False, description="Enable multiline mode where patterns can span multiple lines.")
+    max_files: int = Field(default=2000, ge=1, le=100_000, description="Maximum number of files to search (default: 2000).")
 
     model_config = {"populate_by_name": True, "extra": "forbid"}
 
 
 class LSInput(BaseModel):
-    path: str | None = None
-    ignore: list[str] | None = None
-    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300)
-    include_hidden: bool = False
-    sort_by: Literal["name", "mtime", "size"] = "name"
+    path: str | None = Field(default=None, description="Directory to list. Defaults to project root when omitted.")
+    ignore: list[str] | None = Field(default=None, description="List of glob patterns to exclude, e.g. ['*.pyc', '__pycache__'].")
+    head_limit: int = Field(default=_LIST_SPILL_LIMIT, ge=1, le=300, description="Maximum number of entries to return (default: 100).")
+    include_hidden: bool = Field(default=False, description="If True, include hidden files and directories (names starting with '.').")
+    sort_by: Literal["name", "mtime", "size"] = Field(default="name", description="Sort order: name (default, alphabetical), mtime (most recently modified first), size (largest first).")
 
     model_config = {"extra": "forbid"}
 
@@ -511,7 +511,7 @@ class Question(BaseModel):
     question: str = Field(description="The complete question to ask the user")
     header: str = Field(max_length=12, description="Short label displayed as a chip/tag (max 12 chars)")
     options: list[QuestionOption] = Field(min_length=2, max_length=4, description="Available options (2-4)")
-    multiSelect: bool = Field(default=False)
+    multiSelect: bool = Field(default=False, description="If True, user can select multiple options. Default False (single select only).")
 
     model_config = {"extra": "forbid"}
 

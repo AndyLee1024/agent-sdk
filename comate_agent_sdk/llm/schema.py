@@ -218,7 +218,17 @@ class SchemaOptimizer:
 
     @staticmethod
     def _make_strict_compatible(schema: dict[str, Any] | list[Any]) -> None:
-        """Ensure all properties are required for OpenAI strict mode"""
+        """Mark properties without defaults as required, leaving optional ones out of required.
+
+        For OpenAI strict mode, chat.py._make_strict_schema reads this required list
+        and makes non-required properties nullable (type: ["T", "null"]), then forces
+        all properties into required. This two-step design lets the model know which
+        parameters are truly optional (can be omitted by passing null).
+
+        Rules:
+        - No "default" key in prop schema → required (must be provided)
+        - "default" key present (any value, including null) → not required (optional)
+        """
         if isinstance(schema, dict):
             # First recursively apply to nested objects
             for key, value in schema.items():
@@ -231,9 +241,12 @@ class SchemaOptimizer:
                 and "type" in schema
                 and schema["type"] == "object"
             ):
-                # Add all properties to required array
-                all_props = list(schema["properties"].keys())
-                schema["required"] = all_props  # Set all properties as required
+                required_props = [
+                    prop_name
+                    for prop_name, prop_schema in schema["properties"].items()
+                    if "default" not in prop_schema
+                ]
+                schema["required"] = required_props
 
         elif isinstance(schema, list):
             for item in schema:

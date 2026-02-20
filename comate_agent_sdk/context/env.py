@@ -44,13 +44,13 @@ class EnvProvider:
 
         lines = [
             "<system_env>",
-            f"Project Dir: {normalized_dir}",
-            f"Is Git Repo: {'Yes' if is_git_repo else 'No'}",
-            f"Platform: {sys.platform}",
+            f"project root : {normalized_dir}",
+            f"is git repo: {'Yes' if is_git_repo else 'No'}",
+            f"platform: {sys.platform}",
             f"OS Version: {platform.system()} {platform.release()}",
-            f"Today's Date: {date.today().isoformat()}",
-            f"User Timezone: {tz_name}",
-            f"Python Version: {platform.python_version()}",
+            f"today's date: {date.today().isoformat()}",
+            f"user timezone: {tz_name}",
+            f"python version: {platform.python_version()}",
             "</system_env> \n",
         ]
         return "\n".join(lines)

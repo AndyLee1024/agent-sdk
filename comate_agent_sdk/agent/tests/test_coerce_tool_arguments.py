@@ -210,6 +210,37 @@ class TestCoerceToolArguments(unittest.TestCase):
         assert result["known"] == 42
         assert result["unknown"] == "whatever"
 
+    def test_openai_strict_null_for_optional_param_is_dropped(self):
+        """OpenAI strict mode 对可选参数发 null 时，应从结果中丢弃，让 Pydantic 使用默认值。
+
+        场景：timeout_ms 有 default=30000，OpenAI 发来 null → 不进入 coerced dict。
+        """
+        schema = {
+            "type": "object",
+            "properties": {
+                "args": {"type": "string"},
+                "timeout_ms": {"type": "integer", "default": 30000},
+                "cwd": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": None},
+            },
+        }
+        args = {"args": "ls", "timeout_ms": None, "cwd": None}
+        result = _coerce_tool_arguments(args, schema)
+        assert result["args"] == "ls"
+        assert "timeout_ms" not in result, "null + default → should be dropped"
+        assert "cwd" not in result, "null + default=None → should be dropped"
+
+    def test_required_field_null_is_kept(self):
+        """必填字段（无 default）传 null 时，应保留在结果中让 Pydantic 报错。"""
+        schema = {
+            "type": "object",
+            "properties": {
+                "args": {"type": "string"},  # 无 default → required
+            },
+        }
+        args = {"args": None}
+        result = _coerce_tool_arguments(args, schema)
+        assert result["args"] is None, "required field null should pass through to Pydantic"
+
 
 # ── BashInput defense-in-depth ──────────────────────────────────
 

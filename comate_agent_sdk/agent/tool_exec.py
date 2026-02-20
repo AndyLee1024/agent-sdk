@@ -176,6 +176,10 @@ def _coerce_tool_arguments(args: dict[str, Any], schema: dict[str, Any]) -> dict
     coerced = {}
     for key, value in args.items():
         if key in properties:
+            # OpenAI strict mode sends null for optional params (params with defaults).
+            # Treat null as "omitted" — drop the key so Pydantic uses the field default.
+            if value is None and "default" in properties[key]:
+                continue
             new_value = _coerce_value(value, properties[key])
             if new_value is not value:
                 logger.debug(f"Coerced tool argument '{key}': {type(value).__name__} → {type(new_value).__name__}")
