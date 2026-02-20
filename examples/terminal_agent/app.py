@@ -169,7 +169,7 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
         console.print(f"[dim]{usage_line}[/]")
 
     console.print(
-        f"[dim]Goodbye. Resume with: [bold cyan]comate resume "
+        f"[dim]To continue this session, run [bold cyan]comate resume "
         f"{active_session.session_id}[/][/]"
     )
 

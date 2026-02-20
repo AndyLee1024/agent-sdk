@@ -363,6 +363,9 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
             )
 
     runtime._context = ContextIR()
+    if runtime.header_snapshot is not None:
+        runtime._context.import_header_snapshot(runtime.header_snapshot)
+        runtime._lock_header_from_snapshot = True
 
     compaction_config = runtime.compaction if runtime.compaction is not None else CompactionConfig()
     compaction_llm = _resolve_compaction_llm(runtime, compaction_config)
@@ -382,22 +385,26 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         threshold_ratio=compaction_config.threshold_ratio,
     )
 
-    runtime._setup_agent_loop()
+    if runtime.header_snapshot is None:
+        runtime._setup_agent_loop()
 
     if runtime.agents:
         runtime._setup_subagents()
 
     runtime._setup_skills()
-    runtime._setup_tool_strategy()
+    if runtime.header_snapshot is None:
+        runtime._setup_tool_strategy()
 
-    resolved_prompt = runtime._resolve_system_prompt()
-    if resolved_prompt:
-        runtime._context.set_system_prompt(resolved_prompt, cache=True)
+    if runtime.header_snapshot is None:
+        resolved_prompt = runtime._resolve_system_prompt()
+        if resolved_prompt:
+            runtime._context.set_system_prompt(resolved_prompt, cache=True)
 
-    if runtime.memory:
+    if runtime.header_snapshot is None and runtime.memory:
         runtime._setup_memory()
 
-    _setup_env_info(runtime)
+    if runtime.header_snapshot is None:
+        _setup_env_info(runtime)
 
     from comate_agent_sdk.agent.hooks.engine import HookEngine
     from comate_agent_sdk.agent.hooks.loader import load_hook_config_from_sources

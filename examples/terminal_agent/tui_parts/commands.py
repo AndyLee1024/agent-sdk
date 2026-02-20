@@ -312,7 +312,6 @@ class CommandsMixin:
                 self._execute_rewind_mode(
                     checkpoint=checkpoint,
                     mode=mode_value,
-                    preview_plan=plan,
                 )
             )
 
@@ -342,9 +341,9 @@ class CommandsMixin:
         *,
         checkpoint: RewindCheckpoint,
         mode: str,
-        preview_plan: RewindRestorePlan,
     ) -> None:
         prefill_text: str | None = None
+        rewind_succeeded = False
         if mode == "never_mind":
             self._renderer.append_system_message("Rewind cancelled.")
             self._refresh_layers()
@@ -360,29 +359,20 @@ class CommandsMixin:
         self._set_busy(True)
         try:
             if mode == "restore_code":
-                applied = self._rewind_store.restore_code_to_checkpoint(
+                self._rewind_store.restore_code_before_checkpoint(
                     checkpoint_id=checkpoint.checkpoint_id
                 )
-                dropped_count = self._rewind_store.prune_after_checkpoint(
+                self._rewind_store.prune_after_checkpoint(
                     checkpoint_id=checkpoint.checkpoint_id
-                )
-                self._renderer.append_system_message(
-                    self._render_rewind_done_message(
-                        mode=mode,
-                        checkpoint=checkpoint,
-                        plan=applied,
-                        new_session_id=None,
-                        dropped_checkpoints=dropped_count,
-                    )
                 )
                 prefill_text = self._resolve_checkpoint_user_text(
                     checkpoint=checkpoint,
                     fallback=checkpoint.user_message,
                 )
                 await self._status_bar.refresh()
-                return
+                rewind_succeeded = True
 
-            if mode == "restore_conversation":
+            elif mode == "restore_conversation":
                 new_session = self._session.fork_session()
                 fork_store = RewindStore(
                     session=new_session,
@@ -393,30 +383,25 @@ class CommandsMixin:
                     new_session.restore_conversation_to_turn(
                         target_turn=rewind_turn
                     )
-                    dropped_count = fork_store.prune_after_checkpoint(
+                    fork_store.prune_after_checkpoint(
                         checkpoint_id=checkpoint.checkpoint_id
                     )
-                    await self._replace_session(new_session, close_old=True)
+                    await self._replace_session(
+                        new_session,
+                        close_old=True,
+                        replay_history=False,
+                    )
                 except Exception:
                     await new_session.close()
                     raise
 
-                self._renderer.append_system_message(
-                    self._render_rewind_done_message(
-                        mode=mode,
-                        checkpoint=checkpoint,
-                        plan=preview_plan,
-                        new_session_id=new_session.session_id,
-                        dropped_checkpoints=dropped_count,
-                    )
-                )
                 prefill_text = self._resolve_checkpoint_user_text(
                     checkpoint=checkpoint,
                     fallback=checkpoint.user_message,
                 )
-                return
+                rewind_succeeded = True
 
-            if mode == "restore_both":
+            elif mode == "restore_both":
                 new_session = self._session.fork_session()
                 fork_store = RewindStore(
                     session=new_session,
@@ -427,35 +412,34 @@ class CommandsMixin:
                     new_session.restore_conversation_to_turn(
                         target_turn=rewind_turn
                     )
-                    applied = fork_store.restore_code_to_checkpoint(
+                    fork_store.restore_code_before_checkpoint(
                         checkpoint_id=checkpoint.checkpoint_id
                     )
-                    dropped_count = fork_store.prune_after_checkpoint(
+                    fork_store.prune_after_checkpoint(
                         checkpoint_id=checkpoint.checkpoint_id
                     )
-                    await self._replace_session(new_session, close_old=True)
+                    await self._replace_session(
+                        new_session,
+                        close_old=True,
+                        replay_history=False,
+                    )
                 except Exception:
                     await new_session.close()
                     raise
-                self._renderer.append_system_message(
-                    self._render_rewind_done_message(
-                        mode=mode,
-                        checkpoint=checkpoint,
-                        plan=applied,
-                        new_session_id=new_session.session_id,
-                        dropped_checkpoints=dropped_count,
-                    )
-                )
                 prefill_text = self._resolve_checkpoint_user_text(
                     checkpoint=checkpoint,
                     fallback=checkpoint.user_message,
                 )
-                return
+                rewind_succeeded = True
 
-            self._renderer.append_system_message(
-                f"Unknown rewind mode: {mode}",
-                is_error=True,
-            )
+            else:
+                self._renderer.append_system_message(
+                    f"Unknown rewind mode: {mode}",
+                    is_error=True,
+                )
+
+            if rewind_succeeded:
+                await self._replay_scrollback_after_rewind()
         except Exception as exc:
             logger.exception("rewind failed")
             self._renderer.append_system_message(

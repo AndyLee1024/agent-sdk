@@ -122,10 +122,23 @@ class ChatSession:
         storage_root: Path | None = None,
         message_source: MessageSource | None = None,
     ) -> "ChatSession":
-        runtime = template.create_runtime(
-            session_id=session_id,
-            offload_root_path=str((storage_root or default_session_root(session_id)) / "offload"),
-        )
+        session_root = storage_root or default_session_root(session_id)
+        context_jsonl = session_root / "context.jsonl"
+        header_snapshot = replay_header_snapshot(path=context_jsonl)
+        if header_snapshot is None:
+            raise ChatSessionError(
+                f"Session {session_id} is missing required header_snapshot in {context_jsonl}"
+            )
+        try:
+            runtime = template.create_runtime_from_snapshot(
+                header_snapshot=header_snapshot,
+                session_id=session_id,
+                offload_root_path=str(session_root / "offload"),
+            )
+        except Exception as e:
+            raise ChatSessionError(
+                f"Failed to restore header snapshot for session {session_id}: {e}"
+            ) from e
         session = cls(
             template,
             runtime=runtime,
@@ -133,18 +146,6 @@ class ChatSession:
             storage_root=storage_root,
             message_source=message_source,
         )
-
-        header_snapshot = replay_header_snapshot(path=session._context_jsonl)
-        if header_snapshot is None:
-            raise ChatSessionError(
-                f"Session {session_id} is missing required header_snapshot in {session._context_jsonl}"
-            )
-        try:
-            session._agent._context.import_header_snapshot(header_snapshot)
-        except Exception as e:
-            raise ChatSessionError(
-                f"Failed to restore header snapshot for session {session_id}: {e}"
-            ) from e
 
         turn_number, items, usage_entries = replay_session_events(
             path=session._context_jsonl,

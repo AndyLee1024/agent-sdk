@@ -60,7 +60,9 @@ def setup_subagents(agent: "AgentRuntime") -> None:
 
     # 生成 Subagent 策略提示并写入 ContextIR header
     subagent_prompt = generate_subagent_prompt(agent.agents)
-    agent._context.set_subagent_strategy(subagent_prompt)
+    lock_header = bool(getattr(agent, "_lock_header_from_snapshot", False))
+    if not lock_header:
+        agent._context.set_subagent_strategy(subagent_prompt)
 
     # 避免重复添加 Task 工具
     agent.tools[:] = [
@@ -127,7 +129,8 @@ def setup_skills(agent: "AgentRuntime") -> None:
 
     # 生成 Skill 策略提示并写入 ContextIR header
     skill_prompt = generate_skill_prompt(agent.skills)
-    if skill_prompt:  # 只有当有 active skills 时才注入
+    lock_header = bool(getattr(agent, "_lock_header_from_snapshot", False))
+    if not lock_header and skill_prompt:  # 只有当有 active skills 时才注入
         agent._context.set_skill_strategy(skill_prompt)
 
     # 避免重复添加 Skill 工具（例如用户手动传入 tools 里已包含 Skill）

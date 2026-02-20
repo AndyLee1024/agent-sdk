@@ -1,6 +1,10 @@
-kimi-cli-main 项目架构总结         
-                                                                                                      
-  一、整体技术选型（混合框架方案）                                                                    
+kimi-cli-main 项目架构总结
+
+编辑时间: 2026年2月20日
+创作者:andy
+creator: andylee
+
+一、整体技术选型（混合框架方案）                                                                    
 
   kimi-cli-main 采用了一个聪明的混合架构，而不是依赖单一框架：
 

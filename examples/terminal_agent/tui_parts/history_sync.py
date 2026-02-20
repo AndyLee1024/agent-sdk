@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -13,13 +14,41 @@ from terminal_agent.history_printer import (
     print_history_group_sync,
     render_history_group,
 )
+from terminal_agent.logo import print_logo
 from terminal_agent.markdown_render import render_markdown_to_plain
 from terminal_agent.models import HistoryEntry
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 class HistorySyncMixin:
+    async def _replay_scrollback_after_rewind(self) -> None:
+        """清屏并重建 scrollback：Logo + 当前会话历史。"""
+        self._renderer.reset_history_view()
+        self._printed_history_index = 0
+
+        def _clear_and_print_logo() -> None:
+            out = sys.__stdout__ or sys.stdout
+            out.write("\x1b[3J\x1b[2J\x1b[H")
+            out.flush()
+            scrollback_console = Console(
+                file=out,
+                force_terminal=True,
+                width=self._terminal_width(),
+            )
+            print_logo(scrollback_console)
+
+        try:
+            await run_in_terminal(_clear_and_print_logo, in_executor=False)
+        except Exception as exc:
+            logger.warning(
+                f"failed to clear terminal and replay logo: {exc}",
+                exc_info=True,
+            )
+
+        self.add_resume_history("resume")
+
     def add_resume_history(self, mode: str) -> None:
         if mode != "resume":
             return

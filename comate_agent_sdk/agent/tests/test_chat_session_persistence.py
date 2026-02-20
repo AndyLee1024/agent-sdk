@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig
@@ -829,6 +830,45 @@ class TestChatSessionPersistence(unittest.TestCase):
             self.assertEqual(env_item.content_text, "<system_env>SNAPSHOT_ENV</system_env>")
             self.assertIsNotNone(session._agent._context.memory_item)
             self.assertIn("SNAPSHOT_MEMORY", session._agent._context.memory_item.content_text)
+
+    def test_resume_skips_default_memory_and_env_injection_when_snapshot_present(self) -> None:
+        from comate_agent_sdk.context.env import EnvOptions
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            session_root = root / "session"
+            path = session_root / "context.jsonl"
+            self._append_header_snapshot(path, session_id="s1")
+
+            agent = Agent(
+                llm=_FakeChatModel(),  # type: ignore[arg-type]
+                config=AgentConfig(
+                    tools=(),
+                    agents=(),
+                    offload_enabled=False,
+                    setting_sources=None,
+                    memory="DUMMY_MEMORY",
+                    env_options=EnvOptions(system_env=True, git_env=True),
+                ),
+            )
+
+            with (
+                patch(
+                    "comate_agent_sdk.agent.setup.setup_memory",
+                    side_effect=AssertionError("setup_memory should be skipped in snapshot resume"),
+                ),
+                patch(
+                    "comate_agent_sdk.agent.init._setup_env_info",
+                    side_effect=AssertionError("_setup_env_info should be skipped in snapshot resume"),
+                ),
+            ):
+                session = ChatSession.resume(
+                    agent,
+                    session_id="s1",
+                    storage_root=session_root,
+                )
+
+            self.assertEqual(session.session_id, "s1")
 
 if __name__ == "__main__":
     unittest.main()

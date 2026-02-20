@@ -387,6 +387,7 @@ class TerminalAgentTUI(
         "Terminated",
         "Committed",
         "Deployed",
+        "Brewed",
         "Flushed",
         "Finalized",
         "Propagated",
@@ -655,13 +656,13 @@ class TerminalAgentTUI(
                     self._invalidate()
                     self._render_dirty = False
 
-                # 动态帧率：busy/动画时 12fps，idle 时 4fps
+                # 动态帧率：busy/动画时降为 6fps（缓解 scrollback 污染），idle 时 4fps
                 fast = (
                     self._busy
                     or self._animator.is_active
                     or self._renderer.has_running_tools()
                 )
-                sleep_s = 1 / 12 if fast else 1 / 4
+                sleep_s = 1 / 6 if fast else 1 / 4
                 await asyncio.sleep(sleep_s)
         except asyncio.CancelledError:
             return
@@ -686,7 +687,13 @@ class TerminalAgentTUI(
         except Exception as exc:
             logger.warning(f"failed to capture checkpoint: {exc}", exc_info=True)
 
-    async def _replace_session(self, new_session: ChatSession, *, close_old: bool = True) -> None:
+    async def _replace_session(
+        self,
+        new_session: ChatSession,
+        *,
+        close_old: bool = True,
+        replay_history: bool = True,
+    ) -> None:
         old_session = self._session
         self._session = new_session
         self._status_bar.set_session(new_session)
@@ -694,7 +701,8 @@ class TerminalAgentTUI(
         await self._status_bar.refresh()
         self._renderer.reset_history_view()
         self._printed_history_index = 0
-        self.add_resume_history("resume")
+        if replay_history:
+            self.add_resume_history("resume")
         if close_old and old_session is not new_session:
             await old_session.close()
 

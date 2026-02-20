@@ -136,6 +136,39 @@ class AgentTemplate:
             _subagent_run_id=subagent_run_id,
         )
 
+    def create_runtime_from_snapshot(
+        self,
+        *,
+        header_snapshot: dict[str, Any],
+        session_id: str | None = None,
+        offload_root_path: str | None = None,
+        parent_token_cost: TokenCost | None = None,
+        is_subagent: bool = False,
+        name: str | None = None,
+        subagent_run_id: str | None = None,
+    ) -> "AgentRuntime":
+        """从持久化 header_snapshot 恢复 runtime（用于 session resume/fork）。"""
+        runtime_options = build_runtime_options(
+            config=self.config,
+            resolved_agents=self._resolved_agents,
+            resolved_skills=self._resolved_skills,
+            resolved_memory=self._resolved_memory,
+            resolved_llm_levels=self._resolved_llm_levels,
+            session_id=session_id or self.config.session_id,
+            offload_root_path=offload_root_path or self.config.offload_root_path,
+        )
+        return AgentRuntime(
+            llm=self.resolved_llm,
+            level=self.level,
+            options=runtime_options,
+            name=name if name is not None else self.name,
+            template=self,
+            header_snapshot=header_snapshot,
+            _is_subagent=is_subagent,
+            _parent_token_cost=parent_token_cost,
+            _subagent_run_id=subagent_run_id,
+        )
+
     @observe(name="agent_query")
     async def query(self, message: str) -> str:
         runtime = self.create_runtime()
@@ -194,6 +227,7 @@ class AgentRuntime:
     options: RuntimeAgentOptions = field(default_factory=RuntimeAgentOptions)
     name: str | None = None
     template: AgentTemplate | None = field(default=None, repr=False)
+    header_snapshot: dict[str, Any] | None = field(default=None, repr=False)
     _is_subagent: bool = field(default=False, repr=False)
     _parent_token_cost: TokenCost | None = field(default=None, repr=False)
     _subagent_run_id: str | None = field(default=None, repr=False)

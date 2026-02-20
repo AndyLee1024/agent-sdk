@@ -54,9 +54,70 @@ class RewindStore:
     def __init__(self, *, session: ChatSession, project_root: Path) -> None:
         self._session = session
         self._project_root = project_root.resolve()
+        self._register_hook()
 
     def bind_session(self, session: ChatSession) -> None:
         self._session = session
+        self._register_hook()
+
+    def _register_hook(self) -> None:
+        if hasattr(self._session._agent, "register_python_hook"):
+            self._session._agent.register_python_hook(
+                event_name="PreToolUse",
+                callback=self._on_pre_tool_use,
+            )
+
+    async def _on_pre_tool_use(self, hook_input: Any) -> Any:
+        tool_name = getattr(hook_input, "tool_name", "")
+        if tool_name not in _TRACKED_TOOLS:
+            return None
+
+        args = getattr(hook_input, "tool_input", {})
+        if not isinstance(args, dict):
+            return None
+
+        file_path = args.get("file_path")
+        if not file_path:
+            return None
+
+        relpath = self._normalize_relpath(str(file_path))
+        if relpath is None:
+            return None
+
+        index = self._load_index()
+        checkpoints = index.get("checkpoints", [])
+
+        if not checkpoints:
+            # 第一次工具调用前自动创建 baseline checkpoint（id=0, turn=0）。
+            # 用于为"第一个用户 checkpoint 之前"的代码还原提供原始文件状态基准。
+            # turn=0 的 checkpoint 不会出现在用户可见的 /rewind 列表中。
+            baseline: dict[str, Any] = {
+                "id": 0,
+                "turn_number": 0,
+                "user_preview": "",
+                "user_message": "",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "touched_files": [],
+                "file_events": {},
+                "manifest": {},
+            }
+            checkpoints.append(baseline)
+            index["checkpoints"] = checkpoints
+
+        latest_cp = checkpoints[-1]
+        manifest = latest_cp.get("manifest", {})
+
+        if relpath not in manifest:
+            try:
+                state = self._capture_file_state(relpath)
+                manifest[relpath] = state
+                self._save_checkpoint_file(latest_cp)
+                self._save_index(index)
+            except Exception as e:
+                logger.warning(f"Failed to capture pre-edit baseline for {relpath}: {e}")
+
+        return None
+
 
     @property
     def session_id(self) -> str:
@@ -84,7 +145,11 @@ class RewindStore:
 
     def list_checkpoints(self) -> list[RewindCheckpoint]:
         index = self._load_index()
-        checkpoints = [self._checkpoint_from_dict(cp) for cp in index.get("checkpoints", [])]
+        checkpoints = [
+            self._checkpoint_from_dict(cp)
+            for cp in index.get("checkpoints", [])
+            if int(cp.get("turn_number", 0)) > 0  # 过滤 turn=0 的 baseline，不暴露给用户
+        ]
         checkpoints.sort(key=lambda cp: cp.checkpoint_id)
         return checkpoints
 
@@ -120,6 +185,39 @@ class RewindStore:
                 pass
 
         return len(dropped_ids)
+
+    def restore_code_before_checkpoint(self, *, checkpoint_id: int) -> RewindRestorePlan:
+        """还原代码到 checkpoint_id 对应 Turn 开始前的状态。
+
+        找到 checkpoint_id 的前驱 checkpoint（含 baseline id=0），
+        将代码还原到前驱的 manifest 状态。
+        若没有任何前驱（极罕见的旧数据），返回空计划不做任何操作。
+        """
+        index = self._load_index()
+        checkpoints = index.get("checkpoints", [])
+        by_id = {int(cp.get("id", 0)): cp for cp in checkpoints}
+
+        if checkpoint_id not in by_id:
+            raise ValueError(f"Checkpoint not found: {checkpoint_id}")
+
+        sorted_ids = sorted(by_id.keys())
+        target_idx = sorted_ids.index(checkpoint_id)
+
+        if target_idx > 0:
+            pred_id = sorted_ids[target_idx - 1]
+            return self.restore_code_to_checkpoint(checkpoint_id=pred_id)
+
+        # 无前驱（连 baseline 都没有），返回空计划
+        target_raw = by_id[checkpoint_id]
+        return RewindRestorePlan(
+            checkpoint=self._checkpoint_from_dict(target_raw),
+            files=(),
+            total_added_lines=0,
+            total_removed_lines=0,
+            writable_files_count=0,
+            skipped_binary_count=0,
+            skipped_unknown_count=0,
+        )
 
     def capture_checkpoint_for_latest_turn(self, *, user_preview: str) -> RewindCheckpoint | None:
         current_turn = self._current_turn()
