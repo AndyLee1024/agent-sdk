@@ -71,13 +71,10 @@ class AnthropicMessageSerializer:
         part: ContentPartTextParam, use_cache: bool
     ) -> TextBlockParam:
         """Convert a text content part to Anthropic's TextBlockParam."""
-        return TextBlockParam(
-            text=part.text,
-            type="text",
-            cache_control=AnthropicMessageSerializer._serialize_cache_control(
-                use_cache
-            ),
-        )
+        block = TextBlockParam(text=part.text, type="text")
+        if use_cache:
+            block["cache_control"] = CacheControlEphemeralParam(type="ephemeral")
+        return block
 
     @staticmethod
     def _serialize_content_part_image(part: ContentPartImageParam) -> ImageBlockParam:
@@ -201,17 +198,15 @@ class AnthropicMessageSerializer:
                 input_obj = {"arguments": tool_call.function.arguments}
 
             is_last = i == len(tool_calls) - 1
-            blocks.append(
-                ToolUseBlockParam(
-                    id=tool_call.id,
-                    input=input_obj,
-                    name=tool_call.function.name,
-                    type="tool_use",
-                    cache_control=AnthropicMessageSerializer._serialize_cache_control(
-                        use_cache and is_last
-                    ),
-                )
+            block = ToolUseBlockParam(
+                id=tool_call.id,
+                input=input_obj,
+                name=tool_call.function.name,
+                type="tool_use",
             )
+            if use_cache and is_last:
+                block["cache_control"] = CacheControlEphemeralParam(type="ephemeral")
+            blocks.append(block)
         return blocks
 
     @staticmethod
@@ -253,15 +248,15 @@ class AnthropicMessageSerializer:
                 message.content
             )
 
-        return ToolResultBlockParam(
+        block = ToolResultBlockParam(
             tool_use_id=message.tool_call_id,
             type="tool_result",
             content=content,
             is_error=message.is_error,
-            cache_control=AnthropicMessageSerializer._serialize_cache_control(
-                use_cache
-            ),
         )
+        if use_cache:
+            block["cache_control"] = CacheControlEphemeralParam(type="ephemeral")
+        return block
 
     # region - Serialize overloads
     @overload
@@ -329,15 +324,12 @@ class AnthropicMessageSerializer:
             if message.content is not None:
                 if isinstance(message.content, str):
                     # String content: only cache if it's the only/last block (no tool calls)
-                    blocks.append(
-                        TextBlockParam(
-                            text=message.content,
-                            type="text",
-                            cache_control=AnthropicMessageSerializer._serialize_cache_control(
-                                message.cache and not message.tool_calls
-                            ),
+                    _block = TextBlockParam(text=message.content, type="text")
+                    if message.cache and not message.tool_calls:
+                        _block["cache_control"] = CacheControlEphemeralParam(
+                            type="ephemeral"
                         )
-                    )
+                    blocks.append(_block)
                 else:
                     # Process content parts (text, refusal, thinking, redacted_thinking)
                     for i, part in enumerate(message.content):
@@ -385,15 +377,12 @@ class AnthropicMessageSerializer:
             # If no content or tool calls, add empty text block
             # (Anthropic requires at least one content block)
             if not blocks:
-                blocks.append(
-                    TextBlockParam(
-                        text="",
-                        type="text",
-                        cache_control=AnthropicMessageSerializer._serialize_cache_control(
-                            message.cache
-                        ),
+                _fallback = TextBlockParam(text="", type="text")
+                if message.cache:
+                    _fallback["cache_control"] = CacheControlEphemeralParam(
+                        type="ephemeral"
                     )
-                )
+                blocks.append(_fallback)
 
             # If caching is enabled or we have multiple blocks, return blocks as-is
             # Otherwise, simplify single text blocks to plain string
@@ -421,10 +410,10 @@ class AnthropicMessageSerializer:
     def _clean_cache_messages(
         messages: list[NonSystemMessage],
     ) -> list[NonSystemMessage]:
-        """Clean cache settings so only the last cache=True message remains cached.
+        """保留最后 2 个 cache=True 的消息，其余全部置 False。
 
-        Because of how Claude caching works, only the last cache message matters.
-        This method automatically removes cache=True from all messages except the last one.
+        Anthropic 允许最多 4 个 cache breakpoint（tools=1, system=1, messages=2），
+        messages 层保留 2 个以充分利用预算。
 
         Note: This method mutates messages in place. Caller must pass pre-copied data
         (serialize_messages handles this via model_copy).
@@ -438,19 +427,16 @@ class AnthropicMessageSerializer:
         if not messages:
             return messages
 
-        # Find the last message with cache=True
-        last_cache_index = -1
+        keep_indices: set[int] = set()
         for i in range(len(messages) - 1, -1, -1):
             if messages[i].cache:
-                last_cache_index = i
-                break
+                keep_indices.add(i)
+                if len(keep_indices) == 2:
+                    break
 
-        # If we found a cached message, disable cache for all others
-        if last_cache_index != -1:
-            for i, msg in enumerate(messages):
-                if i != last_cache_index and msg.cache:
-                    # Set cache to False for all messages except the last cached one
-                    msg.cache = False
+        for i, msg in enumerate(messages):
+            if msg.cache and i not in keep_indices:
+                msg.cache = False
 
         return messages
 
@@ -478,7 +464,11 @@ class AnthropicMessageSerializer:
             else:
                 normal_messages.append(message)
 
-        # Clean cache messages so only the last cache=True message remains cached
+        # 自动在对话末尾注入 cache breakpoint（文档关键建议）
+        if normal_messages:
+            normal_messages[-1].cache = True
+
+        # Clean cache messages so only the last 2 cache=True messages remain cached
         normal_messages = AnthropicMessageSerializer._clean_cache_messages(
             normal_messages
         )

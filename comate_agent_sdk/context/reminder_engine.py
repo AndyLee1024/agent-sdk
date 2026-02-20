@@ -17,11 +17,11 @@ logger = logging.getLogger("comate_agent_sdk.context.reminder_engine")
 
 # Task reminder
 TASK_NUDGE_GAP = 6
-TASK_NUDGE_COOLDOWN = 3
+TASK_NUDGE_COOLDOWN = 8
 
 # TodoWrite reminder
 TODO_ACTIVE_NUDGE_GAP = 3
-TODO_ACTIVE_NUDGE_COOLDOWN = 3
+TODO_ACTIVE_NUDGE_COOLDOWN = 5
 TODO_EMPTY_NUDGE_GAP = 8
 
 
@@ -142,6 +142,7 @@ class ReminderEngine:
                     ),
                 )
             )
+            return reminders
 
         gap_task = s.turn - s.last_task_turn
         cooldown_task = s.turn - s.last_task_nudge_turn
