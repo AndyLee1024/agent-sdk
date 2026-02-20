@@ -268,6 +268,16 @@ def summarize_tool_args(
         path_display = _normalize_path_for_display(path, project_root)
         return f"path={path_display} pattern={pattern}" if (path_display or pattern) else _compact_json(args)
     if lowered == "bash":
+        command_args = _lookup_arg(args, "args")
+        if isinstance(command_args, list):
+            cmd = " ".join(str(part) for part in command_args)
+            cmd_display = _truncate(cmd, 180)
+            cwd = _lookup_arg(args, "cwd")
+            cwd_display = _normalize_cwd_for_display(cwd, project_root)
+            if cwd_display:
+                return f"cwd={cwd_display} {cmd_display}"
+            return cmd_display
+        # 回退：兼容非标准格式（如 command 字段）
         command = _lookup_arg(args, "command")
         cwd = _lookup_arg(args, "cwd")
         cwd_display = _normalize_cwd_for_display(cwd, project_root)

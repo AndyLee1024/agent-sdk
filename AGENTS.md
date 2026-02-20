@@ -1,7 +1,11 @@
 ## 项目概述
 
+### comate_agent_sdk
 这是一个 agent sdk 项目， 用于以后各种agent开发的基础设施。
 这是一个非常重要的项目，必须有非常优秀的的 上下文工程 实践的沉淀。 请仔细思考每一个细节。
+
+### examples/terminal_agent
+这是基于comate agent sdk 的 harness 项目, 你在开发的时候要分清 代码是属于sdk的还是属于harness的。
 
 ## global rule
 0. 设计应该尽可能简单，而不是更简单。 Keep It Simple, Stupid。
@@ -12,6 +16,7 @@
 5. 不要为我生成任何总结文档, 除非我主动告诉你.
 6. 当用户让你排查或者修复问题时，我希望你站在全局角度工程化考虑问题,结合当前架构,分析问题原因,给出解决方案。而不是简单止血。需要确认修改这个会不会造成其他依赖这个的功能的连锁反应和冲突. this is MUST
 7. 涉及到 Prompt_toolkit 这个TUI框架, 你必须使用 context7 mcp里面的  query-docs和resolve-library-id 功能来查询相关文档, 以确保你对这个框架的理解是正确的. this is MUST
+
 
 ## python coding rule
 1. 代码必须使用 f-string 进行字符串格式化
