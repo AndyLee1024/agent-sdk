@@ -132,7 +132,7 @@ class RenderPanelsMixin:
         elapsed_suffix = ""
         if run_start is not None:
             elapsed = time.monotonic() - run_start
-            elapsed_suffix = f"  ·  {self._format_run_elapsed(elapsed)}"
+            elapsed_suffix = f"  ({self._format_run_elapsed(elapsed)} • ctrl+c to interrupt)"
 
         # glyph(1) + space(1) = 2，再减去时间后缀宽度
         phrase_budget = width - 4 - get_cwidth(elapsed_suffix)
@@ -170,7 +170,7 @@ class RenderPanelsMixin:
         trimmed = list(frags)
         while trimmed and trimmed[-1][1] == "\n":
             tail.insert(0, trimmed.pop())
-        return trimmed + [("fg:#6B7280", f"  ·  {duration_str}")] + tail
+        return trimmed + [("fg:#6B7280", f"  ({duration_str} • ctrl+c to interrupt)")] + tail
 
     def _loading_height(self) -> int:
         # 工具面板优先：即使 animator 仍活跃，也需要为多行工具面板分配正确高度，
@@ -331,6 +331,8 @@ class RenderPanelsMixin:
                     fragments.append((pt_style, text))
                 else:
                     fragments.append(("", text))
+        while fragments and fragments[-1][1] == "\n":
+           fragments.pop()
         return fragments if fragments else [("", " ")]
 
     def _rich_style_to_pt(self, rich_style: Any) -> str:
