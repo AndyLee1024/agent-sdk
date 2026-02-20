@@ -166,15 +166,18 @@ def create_task_tool(
         )
 
         # Subagent Skills 筛选（如果 AgentDefinition.skills 不为空）
-        if agent_def.skills is not None and subagent_runtime.skills:
+        if agent_def.skills is not None and subagent_runtime.options.skills:
             allowed_skill_names = set(agent_def.skills)
-            subagent_runtime.skills = [
-                s for s in subagent_runtime.skills if s.name in allowed_skill_names
+            subagent_runtime.options.skills = [
+                s
+                for s in subagent_runtime.options.skills
+                if s.name in allowed_skill_names
             ]
             # 重新创建 Skill 工具（更新工具描述）
             subagent_runtime._rebuild_skill_tool()
             logger.info(
-                f"Filtered subagent '{subagent_type}' skills to: {[s.name for s in subagent_runtime.skills]}"
+                f"Filtered subagent '{subagent_type}' skills to: "
+                f"{[s.name for s in subagent_runtime.options.skills]}"
             )
 
         # 执行（带超时）
@@ -280,14 +283,17 @@ def create_task_tool(
             )
 
             # Subagent Skills 筛选
-            if agent_def.skills is not None and subagent_runtime.skills:
+            if agent_def.skills is not None and subagent_runtime.options.skills:
                 allowed_skill_names = set(agent_def.skills)
-                subagent_runtime.skills = [
-                    s for s in subagent_runtime.skills if s.name in allowed_skill_names
+                subagent_runtime.options.skills = [
+                    s
+                    for s in subagent_runtime.options.skills
+                    if s.name in allowed_skill_names
                 ]
                 subagent_runtime._rebuild_skill_tool()
                 logger.info(
-                    f"Filtered subagent '{subagent_type}' skills to: {[s.name for s in subagent_runtime.skills]}"
+                    f"Filtered subagent '{subagent_type}' skills to: "
+                    f"{[s.name for s in subagent_runtime.options.skills]}"
                 )
 
             return subagent_runtime, agent_def

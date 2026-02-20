@@ -17,7 +17,7 @@ def setup_tool_strategy(agent: "AgentRuntime") -> None:
     from comate_agent_sdk.agent.tool_strategy import generate_tool_strategy
 
     tool_strategy = generate_tool_strategy(
-        agent.tools,
+        agent.options.tools,
         is_subagent=bool(getattr(agent, "_is_subagent", False)),
     )
     if tool_strategy:
@@ -40,10 +40,10 @@ def setup_subagents(agent: "AgentRuntime") -> None:
     from comate_agent_sdk.subagent.prompts import generate_subagent_prompt
     from comate_agent_sdk.subagent.task_tool import create_task_tool
 
-    if not agent.agents or agent.tool_registry is None:
+    if not agent.options.agents or agent.options.tool_registry is None:
         return
 
-    task_tools = [t for t in agent.tools if t.name == "Task"]
+    task_tools = [t for t in agent.options.tools if t.name == "Task"]
     user_task_tools = [
         t
         for t in task_tools
@@ -59,64 +59,64 @@ def setup_subagents(agent: "AgentRuntime") -> None:
         )
 
     # 生成 Subagent 策略提示并写入 ContextIR header
-    subagent_prompt = generate_subagent_prompt(agent.agents)
+    subagent_prompt = generate_subagent_prompt(agent.options.agents)
     lock_header = bool(getattr(agent, "_lock_header_from_snapshot", False))
     if not lock_header:
         agent._context.set_subagent_strategy(subagent_prompt)
 
     # 避免重复添加 Task 工具
-    agent.tools[:] = [
+    agent.options.tools[:] = [
         t
-        for t in agent.tools
+        for t in agent.options.tools
         if t.name != "Task" or getattr(t, "_comate_agent_sdk_internal", False) is not True
     ]
     agent._tool_map.pop("Task", None)
 
     # 创建 Task 工具（根据配置决定是否流式）
     task_tool = create_task_tool(
-        agents=agent.agents,
-        parent_tools=agent.tools,
-        tool_registry=agent.tool_registry,  # type: ignore[arg-type]
+        agents=agent.options.agents,
+        parent_tools=agent.options.tools,
+        tool_registry=agent.options.tool_registry,  # type: ignore[arg-type]
         parent_llm=agent.llm,
-        parent_dependency_overrides=agent.dependency_overrides,  # type: ignore
-        parent_llm_levels=agent.llm_levels,
+        parent_dependency_overrides=agent.options.dependency_overrides,  # type: ignore
+        parent_llm_levels=agent.options.llm_levels,
         parent_token_cost=agent._token_cost,
         use_streaming_task=agent.options.use_streaming_task,
     )
 
     # 添加到工具列表
-    agent.tools.append(task_tool)
+    agent.options.tools.append(task_tool)
     agent._tool_map[task_tool.name] = task_tool
 
     logger.info(
-        f"Initialized {len(agent.agents)} subagents: {[a.name for a in agent.agents]}"
+        f"Initialized {len(agent.options.agents)} subagents: {[a.name for a in agent.options.agents]}"
     )
 
 def setup_memory(agent: "AgentRuntime") -> None:
     """设置 Memory 静态背景知识。"""
     from comate_agent_sdk.context.memory import MemoryConfig, load_memory_content
 
-    if not isinstance(agent.memory, MemoryConfig):
+    if not isinstance(agent.options.memory, MemoryConfig):
         logger.warning("memory 参数不是 MemoryConfig 实例，跳过初始化")
         return
 
     # 加载文件内容
-    content = load_memory_content(agent.memory)
+    content = load_memory_content(agent.options.memory)
     if not content:
         logger.warning("未能加载任何 memory 内容")
         return
 
     # Token 检查
     token_count = agent._context.token_counter.count(content)
-    if token_count > agent.memory.max_tokens:
+    if token_count > agent.options.memory.max_tokens:
         logger.warning(
-            f"Memory 内容超出 token 上限: {token_count} > {agent.memory.max_tokens} "
+            f"Memory 内容超出 token 上限: {token_count} > {agent.options.memory.max_tokens} "
             f"(不会截断，但可能影响上下文预算)"
         )
 
     # 写入 ContextIR
-    agent._context.set_memory(content, cache=agent.memory.cache)
-    logger.info(f"Memory 已加载: {token_count} tokens 来自 {len(agent.memory.files)} 个文件")
+    agent._context.set_memory(content, cache=agent.options.memory.cache)
+    logger.info(f"Memory 已加载: {token_count} tokens 来自 {len(agent.options.memory.files)} 个文件")
 
 
 def setup_skills(agent: "AgentRuntime") -> None:
@@ -124,25 +124,27 @@ def setup_skills(agent: "AgentRuntime") -> None:
     from comate_agent_sdk.skill import create_skill_tool
     from comate_agent_sdk.skill.prompts import generate_skill_prompt
 
-    if not agent.skills:
+    if not agent.options.skills:
         return
 
     # 生成 Skill 策略提示并写入 ContextIR header
-    skill_prompt = generate_skill_prompt(agent.skills)
+    skill_prompt = generate_skill_prompt(agent.options.skills)
     lock_header = bool(getattr(agent, "_lock_header_from_snapshot", False))
     if not lock_header and skill_prompt:  # 只有当有 active skills 时才注入
         agent._context.set_skill_strategy(skill_prompt)
 
     # 避免重复添加 Skill 工具（例如用户手动传入 tools 里已包含 Skill）
-    agent.tools[:] = [t for t in agent.tools if t.name != "Skill"]
+    agent.options.tools[:] = [t for t in agent.options.tools if t.name != "Skill"]
     agent._tool_map.pop("Skill", None)
 
     # 创建 Skill 工具（现在只包含简洁描述）
-    skill_tool = create_skill_tool(agent.skills)
-    agent.tools.append(skill_tool)
+    skill_tool = create_skill_tool(agent.options.skills)
+    agent.options.tools.append(skill_tool)
     agent._tool_map[skill_tool.name] = skill_tool
 
-    logger.info(f"Initialized {len(agent.skills)} skill(s): {[s.name for s in agent.skills]}")
+    logger.info(
+        f"Initialized {len(agent.options.skills)} skill(s): {[s.name for s in agent.options.skills]}"
+    )
 
 
 async def execute_skill_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolMessage:
@@ -151,7 +153,11 @@ async def execute_skill_call(agent: "AgentRuntime", tool_call: ToolCall) -> Tool
     skill_name = args.get("skill_name")
 
     # 查找 Skill
-    skill_def = next((s for s in agent.skills if s.name == skill_name), None) if agent.skills else None
+    skill_def = (
+        next((s for s in agent.options.skills if s.name == skill_name), None)
+        if agent.options.skills
+        else None
+    )
     if not skill_def:
         return ToolMessage(
             tool_call_id=tool_call.id,
@@ -188,25 +194,25 @@ def rebuild_skill_tool(agent: "AgentRuntime") -> None:
     from comate_agent_sdk.skill import create_skill_tool, generate_skill_prompt
 
     # 1. 移除旧的 Skill 工具
-    agent.tools[:] = [t for t in agent.tools if t.name != "Skill"]
+    agent.options.tools[:] = [t for t in agent.options.tools if t.name != "Skill"]
     agent._tool_map.pop("Skill", None)
 
     # 2. 移除 IR 中的旧 Skill 策略
     agent._context.remove_skill_strategy()
 
     # 3. 如果还有 skills，重新生成
-    if agent.skills:
-        skill_prompt = generate_skill_prompt(agent.skills)
+    if agent.options.skills:
+        skill_prompt = generate_skill_prompt(agent.options.skills)
         if skill_prompt:
             # 写入 IR header
             agent._context.set_skill_strategy(skill_prompt)
 
         # 创建新的 Skill 工具
-        skill_tool = create_skill_tool(agent.skills)
-        agent.tools.append(skill_tool)
+        skill_tool = create_skill_tool(agent.options.skills)
+        agent.options.tools.append(skill_tool)
         agent._tool_map["Skill"] = skill_tool
 
-        logger.debug(f"Rebuilt Skill tool with {len(agent.skills)} skill(s)")
+        logger.debug(f"Rebuilt Skill tool with {len(agent.options.skills)} skill(s)")
     else:
         logger.debug("Removed Skill tool (no skills remaining)")
 

@@ -21,10 +21,10 @@ _SUMMARY_FAILURE_STREAK_FOR_COOLDOWN = 2
 
 def _build_compaction_policy(agent: "AgentRuntime", threshold: int) -> SelectiveCompactionPolicy:
     offload_policy = None
-    if agent.offload_enabled and agent._context_fs:
-        offload_policy = agent.offload_policy or OffloadPolicy(
+    if agent.options.offload_enabled and agent._context_fs:
+        offload_policy = agent.options.offload_policy or OffloadPolicy(
             enabled=True,
-            token_threshold=agent.offload_token_threshold,
+            token_threshold=agent.options.offload_token_threshold,
         )
 
     compaction_llm = agent._compaction_service.llm or agent.llm
@@ -47,7 +47,7 @@ def _build_compaction_meta_events(
     agent: "AgentRuntime",
     policy: SelectiveCompactionPolicy,
 ) -> list["CompactionMetaEvent"]:
-    if not getattr(agent, "emit_compaction_meta_events", False):
+    if not bool(getattr(agent.options, "emit_compaction_meta_events", False)):
         return []
     if not policy.meta_records:
         return []
@@ -141,7 +141,7 @@ Keep the summary brief but informative."""
     except Exception as exc:
         logger.warning(f"Failed to generate max iterations summary: {exc}")
         summary = (
-            f"Task stopped after {agent.max_iterations} iterations. "
+            f"Task stopped after {agent.options.max_iterations} iterations. "
             "Unable to generate summary due to error."
         )
     finally:

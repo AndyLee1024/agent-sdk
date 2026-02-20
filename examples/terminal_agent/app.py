@@ -96,7 +96,8 @@ async def _preload_mcp(session: ChatSession, con: Console) -> None:
     """Pre-load MCP tools and print connection status under the logo."""
     from terminal_agent.startup import mcp_connecting_animation, print_error, print_success, print_warning
 
-    server_names = list(session._agent.mcp_servers.keys()) if session._agent.mcp_servers else []
+    mcp_servers = session._agent.options.mcp_servers
+    server_names = list(mcp_servers.keys()) if mcp_servers else []
 
     async with mcp_connecting_animation(con, server_names):
         try:

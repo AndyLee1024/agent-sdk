@@ -174,7 +174,7 @@ class CommandsMixin:
             agent_level = self._session._agent.level
             if agent_level:
                 current_level = agent_level
-            llm_levels = self._session._agent.llm_levels
+            llm_levels = self._session._agent.options.llm_levels
         except Exception:
             pass
 

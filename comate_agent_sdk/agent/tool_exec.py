@@ -255,7 +255,7 @@ async def _evaluate_tool_approval(
     tool_call_id: str,
     reason: str | None,
 ) -> tuple[bool, str | None]:
-    callback = agent.tool_approval_callback
+    callback = agent.options.tool_approval_callback
     if callback is None:
         return False, reason or "Tool approval is required, but no approval callback is configured."
 
@@ -264,8 +264,8 @@ async def _evaluate_tool_approval(
         "tool_name": tool_name,
         "tool_input": tool_input,
         "tool_call_id": tool_call_id,
-        "cwd": str((agent.project_root or Path.cwd()).resolve()),
-        "permission_mode": str(agent.permission_mode or "default"),
+        "cwd": str((agent.options.project_root or Path.cwd()).resolve()),
+        "permission_mode": str(agent.options.permission_mode or "default"),
         "reason": reason,
     }
 
@@ -359,9 +359,9 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
 
     from comate_agent_sdk.tools.system_context import bind_system_tool_context
 
-    project_root = (agent.project_root or Path.cwd()).resolve()
-    if agent.offload_root_path:
-        session_root = Path(agent.offload_root_path).expanduser().resolve().parent
+    project_root = (agent.options.project_root or Path.cwd()).resolve()
+    if agent.options.offload_root_path:
+        session_root = Path(agent.options.offload_root_path).expanduser().resolve().parent
     else:
         session_root = (Path.home() / ".agent" / "sessions" / agent._session_id).resolve()
 
@@ -374,7 +374,7 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
         tool_call_id=tool_call.id,
         subagent_source_prefix=agent._subagent_source_prefix,
         token_cost=agent._token_cost,
-        llm_levels=agent.llm_levels,  # type: ignore[arg-type]
+        llm_levels=agent.options.llm_levels,  # type: ignore[arg-type]
         agent_context=agent._context,
     ):
         args: dict[str, Any] = _safe_parse_tool_args(tool_call.function.arguments)
@@ -461,7 +461,7 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
                     args = _coerce_tool_arguments(pre_outcome.updated_input, tool.definition.parameters)
 
             # Execute the tool (with dependency overrides if configured)
-            result = await tool.execute(_overrides=agent.dependency_overrides, **args)
+            result = await tool.execute(_overrides=agent.options.dependency_overrides, **args)
 
             raw_envelope = _extract_tool_envelope(result)
             execution_meta = None

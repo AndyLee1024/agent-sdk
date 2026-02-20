@@ -39,28 +39,32 @@ class TestCompactionModelResolution(unittest.TestCase):
     def test_default_uses_mid_level_model(self) -> None:
         runtime = SimpleNamespace(
             llm=_DataclassLLM(model="main-model"),
-            llm_levels={
-                "LOW": _DataclassLLM(model="low-model"),
-                "MID": _DataclassLLM(model="mid-model"),
-                "HIGH": _DataclassLLM(model="high-model"),
-            },
+            options=SimpleNamespace(
+                llm_levels={
+                    "LOW": _DataclassLLM(model="low-model"),
+                    "MID": _DataclassLLM(model="mid-model"),
+                    "HIGH": _DataclassLLM(model="high-model"),
+                }
+            ),
         )
 
         resolved = _resolve_compaction_llm(runtime, CompactionConfig())
-        self.assertIs(resolved, runtime.llm_levels["MID"])
+        self.assertIs(resolved, runtime.options.llm_levels["MID"])
 
     def test_model_config_overrides_mid_level(self) -> None:
         runtime = SimpleNamespace(
             llm=_DataclassLLM(model="main-model"),
-            llm_levels={
-                "MID": _DataclassLLM(
-                    model="mid-model",
-                    provider="openai",
-                    api_key="key-1",
-                    base_url="https://api.example.com",
-                    _client=object(),
-                )
-            },
+            options=SimpleNamespace(
+                llm_levels={
+                    "MID": _DataclassLLM(
+                        model="mid-model",
+                        provider="openai",
+                        api_key="key-1",
+                        base_url="https://api.example.com",
+                        _client=object(),
+                    )
+                }
+            ),
         )
 
         resolved = _resolve_compaction_llm(
@@ -68,7 +72,7 @@ class TestCompactionModelResolution(unittest.TestCase):
             CompactionConfig(model="claude-haiku-4-5"),
         )
 
-        self.assertIsNot(resolved, runtime.llm_levels["MID"])
+        self.assertIsNot(resolved, runtime.options.llm_levels["MID"])
         self.assertEqual(resolved.model, "claude-haiku-4-5")
         self.assertEqual(resolved.provider, "openai")
         self.assertEqual(resolved.api_key, "key-1")
@@ -78,7 +82,7 @@ class TestCompactionModelResolution(unittest.TestCase):
     def test_model_override_fallbacks_to_main_llm_on_clone_error(self) -> None:
         runtime = SimpleNamespace(
             llm=_DataclassLLM(model="main-model"),
-            llm_levels={"MID": _NonDataclassLLM(model="mid-model")},
+            options=SimpleNamespace(llm_levels={"MID": _NonDataclassLLM(model="mid-model")}),
         )
 
         resolved = _resolve_compaction_llm(

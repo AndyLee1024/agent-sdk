@@ -26,7 +26,7 @@ def clear_history(agent: "AgentRuntime") -> None:
     # 重建 tool_strategy
     from comate_agent_sdk.agent.tool_strategy import generate_tool_strategy
 
-    tool_strategy = generate_tool_strategy(agent.tools)
+    tool_strategy = generate_tool_strategy(agent.options.tools)
     if tool_strategy:
         agent._context.set_tool_strategy(tool_strategy)
 
@@ -36,21 +36,21 @@ def clear_history(agent: "AgentRuntime") -> None:
     agent._context.set_agent_loop(AGENT_LOOP_PROMPT, cache=False)
 
     # 重建 subagent_strategy（如果有 agents）
-    if agent.agents:
+    if agent.options.agents:
         from comate_agent_sdk.subagent.prompts import generate_subagent_prompt
 
-        agent._context.set_subagent_strategy(generate_subagent_prompt(agent.agents))
+        agent._context.set_subagent_strategy(generate_subagent_prompt(agent.options.agents))
 
     # 重建 skill_strategy（如果有 skills）
-    if agent.skills:
+    if agent.options.skills:
         from comate_agent_sdk.skill.prompts import generate_skill_prompt
 
-        skill_prompt = generate_skill_prompt(agent.skills)
+        skill_prompt = generate_skill_prompt(agent.options.skills)
         if skill_prompt:
             agent._context.set_skill_strategy(skill_prompt)
 
     # 如果有 memory，重新加载
-    if agent.memory:
+    if agent.options.memory:
         agent._setup_memory()
 
 
@@ -68,11 +68,11 @@ def load_history(agent: "AgentRuntime", messages: list[BaseMessage]) -> None:
 def destroy_ephemeral_messages(agent: "AgentRuntime") -> None:
     """销毁旧的 ephemeral tool 输出（保留每个 tool 最近 N 条）。"""
     # 落盘阈值/开关（按类型）
-    policy = getattr(agent, "offload_policy", None)
+    policy = getattr(agent.options, "offload_policy", None)
     tool_call_enabled = True
     tool_result_enabled = True
     tool_call_offload_threshold = 400
-    tool_result_offload_threshold = agent.offload_token_threshold
+    tool_result_offload_threshold = agent.options.offload_token_threshold
 
     if policy is not None:
         if not bool(getattr(policy, "enabled", True)):
@@ -89,11 +89,11 @@ def destroy_ephemeral_messages(agent: "AgentRuntime") -> None:
 
     # 构建每个工具的 keep_count 映射
     tool_keep_counts: dict[str, int] = {}
-    for tool in (agent.tools or []):
+    for tool in (agent.options.tools or []):
         if tool.ephemeral:
             # 如果设置了 ephemeral_keep_recent，覆盖工具的默认值
-            if agent.ephemeral_keep_recent is not None:
-                keep_count = agent.ephemeral_keep_recent
+            if agent.options.ephemeral_keep_recent is not None:
+                keep_count = agent.options.ephemeral_keep_recent
             else:
                 keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
             tool_keep_counts[tool.name] = keep_count

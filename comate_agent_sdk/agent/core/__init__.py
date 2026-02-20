@@ -1,8 +1,3 @@
-"""Compatibility re-export module.
-
-Implementation has moved to `comate_agent_sdk.agent.core/` package modules.
-"""
-
 from comate_agent_sdk.agent.core.runtime import AgentRuntime
 from comate_agent_sdk.agent.core.template import AgentTemplate
 

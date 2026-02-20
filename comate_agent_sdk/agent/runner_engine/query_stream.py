@@ -435,7 +435,7 @@ async def run_query_stream(
         iterations = 0
         askuser_repair_attempted = False
         while True:
-            if iterations >= agent.max_iterations:
+            if iterations >= agent.options.max_iterations:
                 summary = await generate_max_iterations_summary(agent)
                 async for usage_event in _drain_usage_events():
                     yield usage_event
@@ -443,7 +443,7 @@ async def run_query_stream(
                 if await _run_stop_hook(agent, "max_iterations"):
                     async for hidden_event in _drain_hidden_events(agent):
                         yield hidden_event
-                    iterations = max(0, agent.max_iterations - 1)
+                    iterations = max(0, agent.options.max_iterations - 1)
                     continue
                 async for hidden_event in _drain_hidden_events(agent):
                     yield hidden_event
@@ -722,7 +722,7 @@ async def run_query_stream(
                     tool_name = tool_call.function.name
 
                     # Parallel Task group (contiguous only)
-                    if agent.task_parallel_enabled and tool_name == "Task":
+                    if agent.options.task_parallel_enabled and tool_name == "Task":
                         group: list[ToolCall] = []
                         while idx < len(tool_calls) and tool_calls[idx].function.name == "Task":
                             group.append(tool_calls[idx])
@@ -795,7 +795,9 @@ async def run_query_stream(
                             async for hidden_event in _drain_hidden_events(agent):
                                 yield hidden_event
 
-                        semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
+                        semaphore = asyncio.Semaphore(
+                            max(1, int(agent.options.task_parallel_max_concurrency))
+                        )
 
                         # 检查是否启用流式 Task
                         task_tool = agent._tool_map.get("Task")

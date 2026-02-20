@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def _setup_env_info(runtime: "AgentRuntime") -> None:
-    opts = runtime.env_options
+    opts = runtime.options.env_options
     if opts is None:
         return
     if not opts.system_env and not opts.git_env:
@@ -31,7 +31,7 @@ def _setup_env_info(runtime: "AgentRuntime") -> None:
 
     from comate_agent_sdk.context.env import EnvProvider
 
-    working_dir = opts.working_dir or runtime.project_root or Path.cwd()
+    working_dir = opts.working_dir or runtime.options.project_root or Path.cwd()
     provider = EnvProvider(
         git_status_limit=opts.git_status_limit,
         git_log_limit=opts.git_log_limit,
@@ -211,8 +211,8 @@ def _resolve_compaction_llm(
 
     compaction_llm = runtime.llm
 
-    if runtime.llm_levels is not None and "MID" in runtime.llm_levels:
-        compaction_llm = runtime.llm_levels["MID"]
+    if runtime.options.llm_levels is not None and "MID" in runtime.options.llm_levels:
+        compaction_llm = runtime.options.llm_levels["MID"]
         logger.info(f"压缩默认使用 MID 模型: {compaction_llm.model}")
     else:
         logger.warning("未找到 MID 档位模型，压缩回退到主 LLM")
@@ -236,18 +236,18 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     # ====== 自动推断 tools 和 tool_registry ======
     builtin = get_default_registry()
 
-    if runtime.tool_registry is None:
+    if runtime.options.tool_registry is None:
         local_registry = ToolRegistry()
         for t in builtin.all():
             if t.name not in local_registry:
                 local_registry.register(t)
-        runtime.tool_registry = local_registry
+        runtime.options.tool_registry = local_registry
         logger.debug(f"Initialized runtime-local registry with {len(local_registry)} built-in tool(s)")
 
-    if runtime.tools is None:
+    if runtime.options.tools is None:
         runtime._tools_allowlist_mode = False
-        runtime.tools = runtime.tool_registry.all()
-        logger.debug(f"Using all {len(runtime.tools)} tool(s) from registry")
+        runtime.options.tools = runtime.options.tool_registry.all()
+        logger.debug(f"Using all {len(runtime.options.tools)} tool(s) from registry")
     else:
         runtime._tools_allowlist_mode = True
 
@@ -255,15 +255,15 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         pending_mcp: list[str] = []
         requested_names: list[str] = []
 
-        for item in runtime.tools:
+        for item in runtime.options.tools:
             if isinstance(item, Tool):
-                if item.name not in runtime.tool_registry:  # type: ignore[operator]
+                if item.name not in runtime.options.tool_registry:  # type: ignore[operator]
                     try:
-                        runtime.tool_registry.register(item)  # type: ignore[union-attr]
+                        runtime.options.tool_registry.register(item)  # type: ignore[union-attr]
                     except Exception:
                         logger.debug(f"注册工具失败（忽略覆盖/重复）：{item.name}", exc_info=True)
 
-        for item in runtime.tools:
+        for item in runtime.options.tools:
             if isinstance(item, Tool):
                 resolved.append(item)
                 continue
@@ -272,8 +272,8 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
                 name = item
                 requested_names.append(name)
 
-                if name in runtime.tool_registry:  # type: ignore[operator]
-                    resolved.append(runtime.tool_registry.get(name))  # type: ignore[union-attr]
+                if name in runtime.options.tool_registry:  # type: ignore[operator]
+                    resolved.append(runtime.options.tool_registry.get(name))  # type: ignore[union-attr]
                     continue
 
                 if name.startswith("mcp__"):
@@ -286,13 +286,13 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
 
         runtime._mcp_pending_tool_names = pending_mcp
         runtime._requested_tool_names = requested_names
-        runtime.tools = resolved
+        runtime.options.tools = resolved
 
     # ====== Tool 名冲突检查 ======
-    if runtime.agents != []:
+    if runtime.options.agents != []:
         user_task_tools = [
             t
-            for t in runtime.tools
+            for t in runtime.options.tools
             if isinstance(t, Tool)
             and t.name == "Task"
             and getattr(t, "_comate_agent_sdk_internal", False) is not True
@@ -305,31 +305,31 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
                 "2) 显式禁用 subagent（例如 agents=[]/()）。"
             )
 
-    if runtime._is_subagent and runtime.agents:
+    if runtime._is_subagent and runtime.options.agents:
         raise ValueError("Subagent 不能再定义 agents（不支持嵌套）")
 
     if runtime._is_subagent:
-        blocked_names = hidden_tool_names(runtime.tools, is_subagent=True)
-        runtime.tools = visible_tools(runtime.tools, is_subagent=True)
+        blocked_names = hidden_tool_names(runtime.options.tools, is_subagent=True)
+        runtime.options.tools = visible_tools(runtime.options.tools, is_subagent=True)
         if blocked_names:
             logger.info(
                 f"Subagent 隐藏受限工具: {blocked_names}"
             )
 
-    for t in runtime.tools:
+    for t in runtime.options.tools:
         assert isinstance(t, Tool), (
             f"Expected Tool instance, got {type(t).__name__}. Did you forget to use the @tool decorator?"
         )
 
-    runtime._tool_map = {t.name: t for t in runtime.tools}
+    runtime._tool_map = {t.name: t for t in runtime.options.tools}
 
-    runtime._session_id = runtime.session_id or str(uuid.uuid4())
+    runtime._session_id = runtime.options.session_id or str(uuid.uuid4())
 
     if runtime.llm is None:
         effective_level: LLMLevel = runtime.level or "MID"
-        if runtime.llm_levels is None or effective_level not in runtime.llm_levels:
+        if runtime.options.llm_levels is None or effective_level not in runtime.options.llm_levels:
             raise ValueError(f"level='{effective_level}' 不在 llm_levels 中")
-        runtime.llm = runtime.llm_levels[effective_level]
+        runtime.llm = runtime.options.llm_levels[effective_level]
 
     runtime._subagent_source_prefix = None
     if runtime._is_subagent:
@@ -343,11 +343,11 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     if runtime._parent_token_cost is not None:
         runtime._token_cost = runtime._parent_token_cost
     else:
-        runtime._token_cost = TokenCost(include_cost=runtime.include_cost)
+        runtime._token_cost = TokenCost(include_cost=runtime.options.include_cost)
 
-    if runtime.offload_enabled:
-        if runtime.offload_root_path:
-            root_path = Path(runtime.offload_root_path).expanduser()
+    if runtime.options.offload_enabled:
+        if runtime.options.offload_root_path:
+            root_path = Path(runtime.options.offload_root_path).expanduser()
         else:
             root_path = Path.home() / ".agent" / "sessions" / runtime._session_id / "offload"
         runtime._context_fs = ContextFileSystem(
@@ -356,10 +356,10 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         )
         logger.info(f"Context FileSystem enabled at {root_path}")
 
-        if runtime.offload_policy is None:
-            runtime.offload_policy = OffloadPolicy(
+        if runtime.options.offload_policy is None:
+            runtime.options.offload_policy = OffloadPolicy(
                 enabled=True,
-                token_threshold=runtime.offload_token_threshold,
+                token_threshold=runtime.options.offload_token_threshold,
             )
 
     runtime._context = ContextIR()
@@ -367,7 +367,9 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         runtime._context.import_header_snapshot(runtime.header_snapshot)
         runtime._lock_header_from_snapshot = True
 
-    compaction_config = runtime.compaction if runtime.compaction is not None else CompactionConfig()
+    compaction_config = (
+        runtime.options.compaction if runtime.options.compaction is not None else CompactionConfig()
+    )
     compaction_llm = _resolve_compaction_llm(runtime, compaction_config)
     compaction_usage_source = "compaction"
     if runtime._subagent_source_prefix:
@@ -388,7 +390,7 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     if runtime.header_snapshot is None:
         runtime._setup_agent_loop()
 
-    if runtime.agents:
+    if runtime.options.agents:
         runtime._setup_subagents()
 
     runtime._setup_skills()
@@ -400,7 +402,7 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
         if resolved_prompt:
             runtime._context.set_system_prompt(resolved_prompt, cache=True)
 
-    if runtime.header_snapshot is None and runtime.memory:
+    if runtime.header_snapshot is None and runtime.options.memory:
         runtime._setup_memory()
 
     if runtime.header_snapshot is None:
@@ -410,14 +412,14 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     from comate_agent_sdk.agent.hooks.loader import load_hook_config_from_sources
 
     hook_config = load_hook_config_from_sources(
-        project_root=runtime.project_root,
-        sources=runtime.setting_sources,
+        project_root=runtime.options.project_root,
+        sources=runtime.options.setting_sources,
     )
     runtime._hook_engine = HookEngine(
         config=hook_config,
-        project_root=runtime.project_root,
+        project_root=runtime.options.project_root,
         session_id=runtime._session_id,
-        permission_mode=runtime.permission_mode,
+        permission_mode=runtime.options.permission_mode,
     )
 
 

@@ -67,7 +67,7 @@ class TestToolVisibilityRuntime(unittest.TestCase):
             )
             runtime = template.create_runtime(is_subagent=True, name="worker")
 
-        runtime_tool_names = {t.name for t in runtime.tools}
+        runtime_tool_names = {t.name for t in runtime.options.tools}
         self.assertNotIn("Task", runtime_tool_names)
         self.assertNotIn("AskUserQuestion", runtime_tool_names)
 
@@ -76,7 +76,10 @@ class TestToolVisibilityRuntime(unittest.TestCase):
         self.assertNotIn("AskUserQuestion", schema_tool_names)
 
         strategy_item = runtime._context.header.find_one_by_type(ItemType.TOOL_STRATEGY)
-        self.assertIsNone(strategy_item)
+        self.assertIsNotNone(strategy_item)
+        content = strategy_item.content_text if strategy_item is not None else ""
+        self.assertNotIn("- **Task**:", content)
+        self.assertNotIn("- **AskUserQuestion**:", content)
 
 
 if __name__ == "__main__":

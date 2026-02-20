@@ -104,8 +104,11 @@ class TestChatSessionPersistence(unittest.TestCase):
             )
 
             self.assertEqual(session.session_id, "s1")
-            self.assertEqual(session._agent.session_id, "s1")
-            self.assertEqual(session._agent.offload_root_path, str(root / "session" / "offload"))
+            self.assertEqual(session._agent.options.session_id, "s1")
+            self.assertEqual(
+                session._agent.options.offload_root_path,
+                str(root / "session" / "offload"),
+            )
 
             # 模板 agent 不应被 ChatSession 构造污染
             self.assertIsNone(agent.config.session_id)

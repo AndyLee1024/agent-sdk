@@ -87,7 +87,9 @@ class TestHooksToolExecIntegrationBlocks(unittest.IsolatedAsyncioTestCase):
             matcher="^Write$",
             callback=lambda _: {"permissionDecision": "ask", "reason": "need-approval"},
         )
-        runtime.tool_approval_callback = lambda payload: {"decision": "deny", "reason": "user-rejected"}
+        runtime.options.tool_approval_callback = (
+            lambda payload: {"decision": "deny", "reason": "user-rejected"}
+        )
 
         tool_call = ToolCall(
             id="tc_write",

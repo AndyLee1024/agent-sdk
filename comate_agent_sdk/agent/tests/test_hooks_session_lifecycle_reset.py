@@ -62,7 +62,7 @@ class TestHooksSessionLifecycleReset(unittest.IsolatedAsyncioTestCase):
             session1 = ChatSession(
                 template,
                 runtime=runtime,
-                session_id=runtime.session_id,
+                session_id=runtime.options.session_id,
                 storage_root=s1_root,
             )
             async for _ in session1.query_stream("first"):
@@ -72,7 +72,7 @@ class TestHooksSessionLifecycleReset(unittest.IsolatedAsyncioTestCase):
             session2 = ChatSession(
                 template,
                 runtime=runtime,
-                session_id=runtime.session_id,
+                session_id=runtime.options.session_id,
                 storage_root=s2_root,
             )
             async for _ in session2.query_stream("second"):

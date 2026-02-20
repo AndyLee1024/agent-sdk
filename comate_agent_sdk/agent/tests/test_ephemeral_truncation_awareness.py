@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 from comate_agent_sdk.agent.history import destroy_ephemeral_messages
 from comate_agent_sdk.context.ir import ContextIR
@@ -14,10 +15,12 @@ class _FakeTool:
 
 class _FakeAgent:
     def __init__(self, *, keep_recent: int) -> None:
-        self.offload_policy = None
-        self.offload_token_threshold = 1000
-        self.tools = [_FakeTool("Read", keep_recent)]
-        self.ephemeral_keep_recent = None
+        self.options = SimpleNamespace(
+            offload_policy=None,
+            offload_token_threshold=1000,
+            tools=[_FakeTool("Read", keep_recent)],
+            ephemeral_keep_recent=None,
+        )
         self._context = ContextIR()
         self._context_fs = None
 

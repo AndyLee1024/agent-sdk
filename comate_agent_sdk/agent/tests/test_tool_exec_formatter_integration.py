@@ -1,6 +1,7 @@
 import json
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from comate_agent_sdk.agent.tool_exec import execute_tool_call
 from comate_agent_sdk.llm.messages import Function, ToolCall
@@ -11,18 +12,20 @@ from comate_agent_sdk.tools import tool
 class _FakeAgent:
     def __init__(self, tool_obj) -> None:
         self._tool_map = {tool_obj.name: tool_obj}
-        self.dependency_overrides = {}
-        self.project_root = Path.cwd()
-        self.offload_root_path = None
+        self.options = SimpleNamespace(
+            dependency_overrides={},
+            project_root=Path.cwd(),
+            offload_root_path=None,
+            llm_levels=None,
+            permission_mode="default",
+            tool_approval_callback=None,
+        )
         self._session_id = "s_test"
         self.name = None
         self._is_subagent = False
         self._subagent_source_prefix = None
         self._token_cost = None
-        self.llm_levels = None
         self._context = None
-        self.permission_mode = "default"
-        self.tool_approval_callback = None
 
     async def run_hook_event(self, event_name: str, **kwargs):  # type: ignore[no-untyped-def]
         return None

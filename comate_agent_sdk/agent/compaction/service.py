@@ -232,9 +232,14 @@ class CompactionService:
         )
 
         serialized = self._serialize_messages_to_text(messages)
+        user_payload = (
+            f"{self.config.summary_prompt}\n\n{serialized}"
+            if self.config.summary_prompt
+            else serialized
+        )
         summary_messages: list[BaseMessage] = [
             SystemMessage(content=self.config.summary_system_prompt),
-            UserMessage(content=serialized),
+            UserMessage(content=user_payload),
         ]
 
         # Generate the summary

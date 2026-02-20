@@ -61,7 +61,9 @@ class ChatSession:
         storage_root: Path | None = None,
         message_source: MessageSource | None = None,
     ):
-        resolved_session_id = session_id or (runtime.session_id if runtime is not None else None)
+        resolved_session_id = (
+            session_id or (runtime.options.session_id if runtime is not None else None)
+        )
         self.session_id = resolved_session_id or str(uuid.uuid4())
         self._storage_root = storage_root or default_session_root(self.session_id)
         self._offload_root = self._storage_root / "offload"
@@ -76,9 +78,9 @@ class ChatSession:
                 offload_root_path=str(self._offload_root),
             )
         else:
-            if runtime.session_id != self.session_id:
+            if runtime.options.session_id != self.session_id:
                 raise ChatSessionError(
-                    f"runtime.session_id={runtime.session_id} does not match session_id={self.session_id}"
+                    f"runtime.session_id={runtime.options.session_id} does not match session_id={self.session_id}"
                 )
             self._runtime = runtime
         # Backward-compatible alias for existing call sites/tests.
@@ -351,12 +353,12 @@ class ChatSession:
 
         self._agent.level = level
 
-        if self._agent.llm_levels and level in self._agent.llm_levels:
-            self._agent.llm = self._agent.llm_levels[level]
+        if self._agent.options.llm_levels and level in self._agent.options.llm_levels:
+            self._agent.llm = self._agent.options.llm_levels[level]
 
         new_model = None
-        if self._agent.llm_levels and level in self._agent.llm_levels:
-            new_model = self._agent.llm_levels[level].model
+        if self._agent.options.llm_levels and level in self._agent.options.llm_levels:
+            new_model = self._agent.options.llm_levels[level].model
 
         event = LLMSwitchedEvent(
             previous_level=previous_level,

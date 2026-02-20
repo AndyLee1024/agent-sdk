@@ -67,13 +67,15 @@ class TestCompactionMetaEvents(unittest.TestCase):
             _context=_FakeContext(),
             _context_usage_tracker=tracker,
             llm=SimpleNamespace(model="gpt-4o", provider="openai"),
-            offload_enabled=False,
             _context_fs=None,
-            offload_policy=None,
-            offload_token_threshold=2000,
             _token_cost=None,
             _effective_level=None,
-            emit_compaction_meta_events=emit_compaction_meta_events,
+            options=SimpleNamespace(
+                offload_enabled=False,
+                offload_policy=None,
+                offload_token_threshold=2000,
+                emit_compaction_meta_events=emit_compaction_meta_events,
+            ),
         )
 
     def test_compaction_meta_events_disabled_by_default(self) -> None:

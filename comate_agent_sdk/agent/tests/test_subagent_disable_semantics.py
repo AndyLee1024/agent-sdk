@@ -59,7 +59,7 @@ class TestSubagentDisableSemantics(unittest.TestCase):
             runtime = template.create_runtime()
 
         self.assertEqual(template.resolved_agents, ())
-        self.assertEqual(runtime.agents, [])
+        self.assertEqual(runtime.options.agents, [])
 
 
 class TestTaskToolNoNestedSubagentError(unittest.IsolatedAsyncioTestCase):
@@ -86,4 +86,3 @@ class TestTaskToolNoNestedSubagentError(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "subagent ok")
         self.assertNotIn("不能再定义 agents", result)
-

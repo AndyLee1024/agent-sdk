@@ -6,10 +6,10 @@ from comate_agent_sdk.agent.system_prompt import SystemPromptConfig, resolve_sys
 
 
 GENERAL_OPENING_LINE = (
-    "You are Comate, an interactive CLI tool that helps users as a general AI agent."
+    "You are Comate CLI, an interactive general AI agent running on a user's computer that helps users as a general AI agent."
 )
 SOFTWARE_ENGINEERING_OPENING_LINE = (
-    "You are Comate, an interactive CLI tool that helps users with software engineering tasks."
+    "You are Comate CLI, an interactive general AI agent running on a user's computer that helps users with software engineering tasks."
 )
 
 
@@ -88,5 +88,5 @@ def test_runtime_role_propagation_and_header_opening_line() -> None:
     )
     runtime = template.create_runtime()
     assert template.role == "general"
-    assert runtime.role == "general"
+    assert runtime.options.role == "general"
     assert _first_non_empty_line(runtime.messages[0].text) == GENERAL_OPENING_LINE

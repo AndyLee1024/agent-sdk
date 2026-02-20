@@ -36,14 +36,14 @@ async def run_query(agent: "AgentRuntime", message: str) -> str:
     askuser_repair_attempted = False
 
     while True:
-        if iterations >= agent.max_iterations:
+        if iterations >= agent.options.max_iterations:
             summary = await generate_max_iterations_summary(agent)
             if await should_continue_after_stop_block(
                 agent,
                 "max_iterations",
                 drain_hidden_immediately=True,
             ):
-                iterations = max(0, agent.max_iterations - 1)
+                iterations = max(0, agent.options.max_iterations - 1)
                 continue
             return summary
 
@@ -97,13 +97,13 @@ async def run_query(agent: "AgentRuntime", message: str) -> str:
             tool_call = tool_calls[idx]
             tool_name = tool_call.function.name
 
-            if agent.task_parallel_enabled and tool_name == "Task":
+            if agent.options.task_parallel_enabled and tool_name == "Task":
                 group: list[ToolCall] = []
                 while idx < len(tool_calls) and tool_calls[idx].function.name == "Task":
                     group.append(tool_calls[idx])
                     idx += 1
 
-                semaphore = asyncio.Semaphore(max(1, int(agent.task_parallel_max_concurrency)))
+                semaphore = asyncio.Semaphore(max(1, int(agent.options.task_parallel_max_concurrency)))
                 for task_call in group:
                     await fire_subagent_hook(agent, event_name="SubagentStart", tool_call=task_call)
 
