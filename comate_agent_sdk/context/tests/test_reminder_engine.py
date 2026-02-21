@@ -31,7 +31,7 @@ def test_task_gap_reminder_with_cooldown() -> None:
 def test_todo_active_and_empty_reminder() -> None:
     engine = ReminderEngine()
     engine.update_todo_state(active_count=2, turn=1, update_last_write_turn=True)
-    reminders = engine.collect_due_reminders(turn=4)
+    reminders = engine.collect_due_reminders(turn=5)
     assert any(r.rule_id == "todo_active_reminder" for r in reminders)
 
     engine.update_todo_state(active_count=0, turn=9, update_last_write_turn=True)

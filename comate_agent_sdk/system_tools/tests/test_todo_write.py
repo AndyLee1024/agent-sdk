@@ -44,7 +44,7 @@ async def test_todo_write_updates_context():
         assert result["ok"] is True
         assert "Remember to keep using the TODO list" in (result.get("message") or "")
 
-        todo_state = ctx_ir.get_todo_state()
+        todo_state = ctx_ir.reminder_engine.get_todo_state()
         assert "todos" in todo_state
         assert len(todo_state["todos"]) == 2
         assert todo_state["todos"][0]["id"] == "1"
@@ -79,7 +79,7 @@ async def test_todo_write_empty_list():
         result = _parse(raw)
         assert result["ok"] is True
         assert ctx_ir._reminder_engine.state.todo_active_count == 0
-        assert not ctx_ir.has_todos()
+        assert not ctx_ir.reminder_engine.has_active_todos()
         assert not (session_root / "todos.json").exists()
 
 
@@ -137,7 +137,7 @@ async def test_todo_write_with_priority_field():
         result = _parse(raw)
         assert result["ok"] is True
 
-        todo_state = ctx_ir.get_todo_state()
+        todo_state = ctx_ir.reminder_engine.get_todo_state()
         assert todo_state["todos"][0]["priority"] == "high"
         assert todo_state["todos"][1]["priority"] == "medium"
         assert todo_state["todos"][2]["priority"] == "low"

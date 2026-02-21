@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from comate_agent_sdk.context.items import ItemType
+from comate_agent_sdk.context.header.order import HEADER_ITEM_TYPES_IN_ORDER
 from comate_agent_sdk.llm.messages import (
     SystemMessage,
 )
@@ -72,24 +72,12 @@ class LoweringPipeline:
     def _build_header_text(context: ContextIR) -> str:
         """拼接 header 段的各部分文本
 
-        顺序：system_prompt → agent_loop → tool_strategy → subagent_strategy → skill_strategy → system_env → git_env
+        顺序：system_prompt → agent_loop → tool_strategy → mcp_tool → subagent_strategy → skill_strategy → system_env → git_env
         注意：memory 不再在 header 中，而是作为独立 UserMessage 注入
         """
         parts: list[str] = []
 
-        # Header 段中的各类型按固定顺序拼接
-        type_order = [
-            ItemType.SYSTEM_PROMPT,
-            ItemType.AGENT_LOOP,
-            ItemType.TOOL_STRATEGY,
-            ItemType.MCP_TOOL,
-            ItemType.SUBAGENT_STRATEGY,
-            ItemType.SKILL_STRATEGY,
-            ItemType.SYSTEM_ENV,
-            ItemType.GIT_ENV,
-        ]
-
-        for item_type in type_order:
+        for item_type in HEADER_ITEM_TYPES_IN_ORDER:
             item = context.header.find_one_by_type(item_type)
             if item and item.content_text:
                 parts.append(item.content_text)

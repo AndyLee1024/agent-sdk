@@ -1930,10 +1930,10 @@ async def TodoWrite(
         has_active = active_count > 0
 
         if ctx.agent_context is not None:
-            if has_active:
-                ctx.agent_context.set_todo_state(todos_data)
-            else:
-                ctx.agent_context.set_todo_state([])
+            ctx.agent_context.reminder_engine.set_todos(
+                todos=todos_data if has_active else [],
+                current_turn=ctx.agent_context.turn_number,
+            )
 
         persisted = False
         todo_path_rel: str | None = None
@@ -1957,7 +1957,7 @@ async def TodoWrite(
                     "schema_version": 2,
                     "todos": todos_data,
                     "turn_number_at_update": (
-                        ctx.agent_context.get_todo_persist_turn_number_at_update()
+                        ctx.agent_context.reminder_engine.get_todo_persist_turn_number_at_update()
                         if ctx.agent_context is not None
                         else 0
                     ),

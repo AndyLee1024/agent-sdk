@@ -9,9 +9,16 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
+
+from comate_agent_sdk.context.items import ItemType
+
+if TYPE_CHECKING:
+    from comate_agent_sdk.context.items import ContextItem
+    from comate_agent_sdk.llm.messages import ToolMessage
 
 logger = logging.getLogger("comate_agent_sdk.context.reminder_engine")
 
@@ -55,19 +62,88 @@ class ReminderState:
 
 
 @dataclass(slots=True)
+class TodoState:
+    """TodoWrite 持久化状态。"""
+
+    todos: list[dict[str, Any]] = field(default_factory=list)
+    updated_at: float = 0.0
+    turn_number_at_update: int = 0
+
+
+@dataclass(slots=True)
 class ReminderEngine:
     """统一 reminder 引擎（首批覆盖 Task/TodoWrite）。"""
 
     state: ReminderState = field(default_factory=ReminderState)
+    todo_state: TodoState = field(default_factory=TodoState)
 
     def clear(self) -> None:
         self.state = ReminderState()
+        self.todo_state = TodoState()
 
     def set_turn(self, turn: int) -> None:
         self.state.turn = max(0, int(turn))
 
     def set_plan_mode(self, enabled: bool) -> None:
         self.state.mode_plan = bool(enabled)
+
+    @staticmethod
+    def _normalize_active_todos(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            todo
+            for todo in todos
+            if isinstance(todo, dict) and todo.get("status") in ("pending", "in_progress")
+        ]
+
+    def set_todos(self, *, todos: list[dict[str, Any]], current_turn: int) -> None:
+        active_todos = self._normalize_active_todos(todos)
+        normalized_turn = max(0, int(current_turn))
+
+        self.todo_state = TodoState(
+            todos=active_todos,
+            updated_at=time.time(),
+            turn_number_at_update=normalized_turn,
+        )
+        self.update_todo_state(
+            active_count=len(active_todos),
+            turn=normalized_turn,
+            update_last_write_turn=True,
+        )
+
+    def restore_todos(
+        self,
+        *,
+        todos: list[dict[str, Any]],
+        turn_number_at_update: int,
+        current_turn: int,
+    ) -> None:
+        active_todos = self._normalize_active_todos(todos)
+        normalized_turn_at_update = max(0, int(turn_number_at_update))
+
+        self.todo_state = TodoState(
+            todos=active_todos,
+            updated_at=time.time(),
+            turn_number_at_update=normalized_turn_at_update,
+        )
+        self.update_todo_state(
+            active_count=len(active_todos),
+            turn=current_turn,
+            update_last_write_turn=False,
+        )
+        self.restore_todo_write_turn(normalized_turn_at_update)
+
+    def get_todo_state(self) -> dict[str, Any]:
+        return {
+            "todos": list(self.todo_state.todos),
+            "updated_at": self.todo_state.updated_at,
+            "turn_number_at_update": self.todo_state.turn_number_at_update,
+        }
+
+    def has_active_todos(self) -> bool:
+        return bool(self.todo_state.todos)
+
+    def get_todo_persist_turn_number_at_update(self) -> int:
+        return int(self.todo_state.turn_number_at_update)
 
     def update_todo_state(
         self,
@@ -119,9 +195,84 @@ class ReminderEngine:
             turn=normalized_turn,
             update_last_write_turn=True,
         )
+        self.todo_state.turn_number_at_update = normalized_turn
         logger.debug(
             f"Recorded TodoWrite event at turn={normalized_turn}, active_count={self.state.todo_active_count}"
         )
+
+    def rehydrate_from_conversation(
+        self,
+        *,
+        turn: int,
+        conversation_items: list[ContextItem],
+        is_system_reminder_item: Callable[[ContextItem], bool],
+        suppress_task_nudge_on_next_turn: bool = False,
+    ) -> None:
+        """根据 conversation 重建 reminder 运行态。"""
+        from comate_agent_sdk.llm.messages import ToolMessage
+
+        current = self.state
+        rebuilt = ReminderState(
+            turn=max(0, int(turn)),
+            mode_plan=bool(current.mode_plan),
+            last_task_turn=0,
+            last_task_nudge_turn=0,
+            last_todowrite_turn=max(0, int(current.last_todowrite_turn)),
+            todo_active_count=max(0, int(current.todo_active_count)),
+            todo_last_changed_turn=max(0, int(current.todo_last_changed_turn)),
+            last_todo_nudge_turn=max(0, int(current.last_todo_nudge_turn)),
+        )
+
+        for item in conversation_items:
+            if item.destroyed:
+                continue
+
+            item_turn = max(0, int(getattr(item, "created_turn", 0) or 0))
+            if item.item_type == ItemType.TOOL_RESULT and not bool(item.is_tool_error):
+                tool_name = str(item.tool_name or "").strip()
+                if not tool_name and isinstance(item.message, ToolMessage):
+                    tool_name = str(item.message.tool_name or "").strip()
+
+                if tool_name == "Task":
+                    rebuilt.last_task_turn = max(rebuilt.last_task_turn, item_turn)
+                elif tool_name == "TodoWrite":
+                    rebuilt.last_todowrite_turn = max(rebuilt.last_todowrite_turn, item_turn)
+                    envelope = (item.metadata or {}).get("tool_raw_envelope")
+                    if isinstance(envelope, dict):
+                        data = envelope.get("data", {})
+                        if isinstance(data, dict):
+                            active_count = data.get("active_count")
+                            if isinstance(active_count, int):
+                                normalized_active = max(0, int(active_count))
+                                if (rebuilt.todo_active_count == 0) != (normalized_active == 0):
+                                    rebuilt.todo_last_changed_turn = max(
+                                        rebuilt.todo_last_changed_turn,
+                                        item_turn,
+                                    )
+                                rebuilt.todo_active_count = normalized_active
+
+            if not is_system_reminder_item(item):
+                continue
+            metadata = item.metadata or {}
+            raw_rule_ids = metadata.get("reminder_rule_ids", [])
+            if isinstance(raw_rule_ids, list):
+                rule_ids = {str(rule_id) for rule_id in raw_rule_ids}
+            else:
+                rule_ids = set()
+
+            reminder_turn = max(
+                0,
+                int(metadata.get("reminder_turn", item_turn) or item_turn),
+            )
+            if "task_gap_reminder" in rule_ids:
+                rebuilt.last_task_nudge_turn = max(rebuilt.last_task_nudge_turn, reminder_turn)
+            if "todo_active_reminder" in rule_ids or "todo_empty_reminder" in rule_ids:
+                rebuilt.last_todo_nudge_turn = max(rebuilt.last_todo_nudge_turn, reminder_turn)
+
+        if suppress_task_nudge_on_next_turn:
+            rebuilt.last_task_nudge_turn = max(rebuilt.last_task_nudge_turn, rebuilt.turn)
+
+        self.state = rebuilt
 
     def collect_due_reminders(self, *, turn: int) -> list[ReminderMessageEnvelope]:
         self.set_turn(turn)

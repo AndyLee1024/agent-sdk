@@ -168,9 +168,10 @@ class ChatSession:
                 data = json.loads(todo_path.read_text(encoding="utf-8"))
                 todos = data.get("todos", []) or []
                 turn_number_at_update = int(data.get("turn_number_at_update", 0) or 0)
-                session._agent._context.restore_todo_state(
+                session._agent._context.reminder_engine.restore_todos(
                     todos=todos,
                     turn_number_at_update=turn_number_at_update,
+                    current_turn=session._agent._context.turn_number,
                 )
                 logger.info(f"Restored {len(todos)} TODO items from todos.json")
             except Exception as e:

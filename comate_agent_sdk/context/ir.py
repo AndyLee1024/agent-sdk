@@ -16,9 +16,14 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
 
 from comate_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
+from comate_agent_sdk.context.header.order import HEADER_ITEM_ORDER
+from comate_agent_sdk.context.header.snapshot import (
+    export_header_snapshot as export_header_snapshot_data,
+    import_header_snapshot as import_header_snapshot_data,
+)
 from comate_agent_sdk.context.items import (
     DEFAULT_PRIORITIES,
     ContextItem,
@@ -35,7 +40,6 @@ from comate_agent_sdk.context.observer import (
 from comate_agent_sdk.context.reminder_engine import (
     ReminderEngine,
     ReminderOrigin,
-    ReminderState,
 )
 from comate_agent_sdk.llm.messages import (
     AssistantMessage,
@@ -50,18 +54,6 @@ if TYPE_CHECKING:
     from comate_agent_sdk.context.compaction import SelectiveCompactionPolicy
 
 logger = logging.getLogger("comate_agent_sdk.context.ir")
-
-_HEADER_ITEM_ORDER: dict[ItemType, int] = {
-    ItemType.SYSTEM_PROMPT: 0,
-    ItemType.AGENT_LOOP: 1,
-    ItemType.TOOL_STRATEGY: 2,
-    ItemType.MCP_TOOL: 3,
-    ItemType.SUBAGENT_STRATEGY: 4,
-    ItemType.SKILL_STRATEGY: 5,
-    ItemType.SYSTEM_ENV: 6,
-    ItemType.GIT_ENV: 7,
-}
-
 
 # 消息类型 → ItemType 映射
 _MESSAGE_TYPE_MAP: dict[type, ItemType] = {
@@ -82,6 +74,38 @@ class PendingHookInjection:
     created_turn: int = 0
 
 
+T = TypeVar("T")
+
+
+@dataclass
+class DeferredBuffer(Generic[T]):
+    """统一的延迟缓冲器。"""
+
+    _items: list[T] = field(default_factory=list)
+
+    def enqueue(self, item: T) -> None:
+        self._items.append(item)
+
+    def extend(self, items: list[T]) -> None:
+        self._items.extend(items)
+
+    def clear(self) -> None:
+        self._items.clear()
+
+    def flush_if_unblocked(
+        self,
+        *,
+        blocked: bool,
+        flush_fn: Callable[[T], None],
+    ) -> None:
+        if blocked or not self._items:
+            return
+        pending = list(self._items)
+        self._items.clear()
+        for item in pending:
+            flush_fn(item)
+
+
 @dataclass
 class ContextIR:
     """Context 中间表示
@@ -98,7 +122,6 @@ class ContextIR:
         token_counter: token 计数器
         event_bus: 事件总线
         _reminder_engine: 统一 system-reminder 调度引擎
-        _todo_state: TODO 状态存储 {todos: [...], updated_at: timestamp}
         _memory_item: Memory 独立存储（不在 header 或 conversation 中）
     """
 
@@ -112,14 +135,16 @@ class ContextIR:
     token_counter: TokenCounter = field(default_factory=TokenCounter)
     event_bus: ContextEventBus = field(default_factory=ContextEventBus)
     _reminder_engine: ReminderEngine = field(default_factory=ReminderEngine)
-    _pending_skill_items: list[ContextItem] = field(default_factory=list)
-    _todo_state: dict[str, Any] = field(default_factory=dict)
+    _pending_skill_items: DeferredBuffer[ContextItem] = field(default_factory=DeferredBuffer)
     _turn_number: int = 0
     _memory_item: ContextItem | None = field(default=None, repr=False)
     _inflight_tool_call_ids: set[str] = field(default_factory=set, repr=False)
     _thinking_protected_assistant_ids: set[str] = field(default_factory=set, repr=False)
     """Tool loop 中含 thinking blocks 的 assistant item IDs，compaction 时需要保护。"""
-    _pending_hook_injections: list[PendingHookInjection] = field(default_factory=list, repr=False)
+    _pending_hook_injections: DeferredBuffer[PendingHookInjection] = field(
+        default_factory=DeferredBuffer,
+        repr=False,
+    )
     _flushed_hook_injection_texts: list[str] = field(default_factory=list, repr=False)
 
     # ===== Header 操作（幂等，重复调用会覆盖） =====
@@ -131,7 +156,7 @@ class ContextIR:
         except ValueError:
             return
 
-        order = _HEADER_ITEM_ORDER.get(item.item_type)
+        order = HEADER_ITEM_ORDER.get(item.item_type)
         if order is None:
             return
 
@@ -139,7 +164,7 @@ class ContextIR:
 
         insert_idx = len(self.header.items)
         for i, existing_item in enumerate(self.header.items):
-            existing_order = _HEADER_ITEM_ORDER.get(existing_item.item_type)
+            existing_order = HEADER_ITEM_ORDER.get(existing_item.item_type)
             if existing_order is None:
                 continue
             if existing_order > order:
@@ -155,7 +180,6 @@ class ContextIR:
         *,
         cache: bool = False,
         metadata: dict[str, Any] | None = None,
-        insert_idx: int | None = None,
     ) -> None:
         """统一的 header item 设置方法（幂等覆盖）。
 
@@ -164,7 +188,6 @@ class ContextIR:
             content: 内容文本
             cache: 是否建议缓存
             metadata: 附加元数据
-            insert_idx: 指定插入位置；None 表示 append + _ensure_header_item_position
         """
         existing = self.header.find_one_by_type(item_type)
         token_count = self.token_counter.count(content)
@@ -186,11 +209,8 @@ class ContextIR:
             cache_hint=cache,
             metadata=metadata or {},
         )
-        if insert_idx is not None:
-            self.header.items.insert(insert_idx, item)
-        else:
-            self.header.items.append(item)
-            self._ensure_header_item_position(item)
+        self.header.items.append(item)
+        self._ensure_header_item_position(item)
         self.event_bus.emit(ContextEvent(
             event_type=EventType.ITEM_ADDED,
             item_type=item_type,
@@ -205,7 +225,7 @@ class ContextIR:
             prompt: 系统提示文本
             cache: 是否建议缓存（如 Anthropic prompt cache）
         """
-        self._set_header_item(ItemType.SYSTEM_PROMPT, prompt, cache=cache, insert_idx=0)
+        self._set_header_item(ItemType.SYSTEM_PROMPT, prompt, cache=cache)
 
     def set_agent_loop(self, prompt: str, cache: bool = False) -> None:
         """设置 Agent 循环控制指令（幂等覆盖）
@@ -216,18 +236,7 @@ class ContextIR:
             prompt: Agent 循环控制指令文本
             cache: 是否建议缓存（如 Anthropic prompt cache）
         """
-        insert_idx = 0
-        for i, existing_item in enumerate(self.header.items):
-            if existing_item.item_type == ItemType.SYSTEM_PROMPT:
-                insert_idx = i + 1
-            elif existing_item.item_type in (
-                ItemType.TOOL_STRATEGY,
-                ItemType.SUBAGENT_STRATEGY,
-                ItemType.SKILL_STRATEGY,
-            ):
-                insert_idx = i
-                break
-        self._set_header_item(ItemType.AGENT_LOOP, prompt, cache=cache, insert_idx=insert_idx)
+        self._set_header_item(ItemType.AGENT_LOOP, prompt, cache=cache)
 
     def set_memory(self, content: str, cache: bool = True) -> None:
         """设置 MEMORY 静态背景知识（幂等覆盖）
@@ -279,33 +288,14 @@ class ContextIR:
 
         插入位置：TOOL_STRATEGY 之后、SKILL_STRATEGY 之前
         """
-        insert_idx = 0
-        for i, existing_item in enumerate(self.header.items):
-            if existing_item.item_type in (
-                ItemType.SYSTEM_PROMPT,
-                ItemType.AGENT_LOOP,
-                ItemType.TOOL_STRATEGY,
-            ):
-                insert_idx = i + 1
-            elif existing_item.item_type == ItemType.SKILL_STRATEGY:
-                break
-        self._set_header_item(ItemType.SUBAGENT_STRATEGY, prompt, insert_idx=insert_idx)
+        self._set_header_item(ItemType.SUBAGENT_STRATEGY, prompt)
 
     def set_tool_strategy(self, prompt: str) -> None:
         """设置 Tool 策略提示（幂等覆盖）
 
         插入位置：AGENT_LOOP 之后、SUBAGENT_STRATEGY 之前
         """
-        insert_idx = 0
-        for i, existing_item in enumerate(self.header.items):
-            if existing_item.item_type in (ItemType.SYSTEM_PROMPT, ItemType.AGENT_LOOP):
-                insert_idx = i + 1
-            elif existing_item.item_type in (
-                ItemType.SUBAGENT_STRATEGY,
-                ItemType.SKILL_STRATEGY,
-            ):
-                break
-        self._set_header_item(ItemType.TOOL_STRATEGY, prompt, insert_idx=insert_idx)
+        self._set_header_item(ItemType.TOOL_STRATEGY, prompt)
 
     def set_mcp_tools(self, overview_text: str, *, metadata: dict[str, Any] | None = None) -> None:
         """设置 MCP tools 概览（幂等覆盖）
@@ -554,6 +544,7 @@ class ContextIR:
         self._thinking_protected_assistant_ids.clear()
         if not flush:
             self._pending_hook_injections.clear()
+            self._pending_skill_items.clear()
             return
         self._flush_pending_hook_injections_if_unblocked()
         self._flush_pending_skill_items_if_unblocked()
@@ -586,7 +577,7 @@ class ContextIR:
             return
 
         if self._inflight_tool_call_ids:
-            self._pending_hook_injections.append(
+            self._pending_hook_injections.enqueue(
                 PendingHookInjection(
                     content=text,
                     hook_name=hook_name,
@@ -626,20 +617,18 @@ class ContextIR:
 
     def _flush_pending_hook_injections_if_unblocked(self) -> None:
         """tool barrier 解除时，批量刷入延迟的 hook 注入。"""
-        if self._inflight_tool_call_ids:
-            return
-        if not self._pending_hook_injections:
-            return
+        self._pending_hook_injections.flush_if_unblocked(
+            blocked=bool(self._inflight_tool_call_ids),
+            flush_fn=self._append_pending_hook_injection,
+        )
 
-        pending = list(self._pending_hook_injections)
-        self._pending_hook_injections.clear()
-        for injection in pending:
-            self._append_hook_injection_message(
-                text=injection.content,
-                hook_name=injection.hook_name,
-                related_tool_call_id=injection.related_tool_call_id,
-                created_turn=injection.created_turn,
-            )
+    def _append_pending_hook_injection(self, injection: PendingHookInjection) -> None:
+        self._append_hook_injection_message(
+            text=injection.content,
+            hook_name=injection.hook_name,
+            related_tool_call_id=injection.related_tool_call_id,
+            created_turn=injection.created_turn,
+        )
 
     def pop_flushed_hook_injection_texts(self) -> list[str]:
         """弹出已刷入 context 的 hook 注入文本（供 UI hidden event 使用）。"""
@@ -661,76 +650,6 @@ class ContextIR:
         if value > self._turn_number:
             self._turn_number = value
             self._reminder_engine.set_turn(self._turn_number)
-
-    def cleanup_stale_error_items(self, max_turns: int = 10) -> list[str]:
-        """清理超过指定轮次的失败工具调用项
-
-        同时删除失败的 tool_result 及其关联的 AssistantMessage(保持消息配对完整性)
-
-        Args:
-            max_turns: 最大保留轮次(默认10轮后删除)
-
-        Returns:
-            被删除的 item ID 列表
-        """
-        current_turn = self._turn_number
-        removed_ids: list[str] = []
-
-        # 1. 收集需要删除的失败 tool_result
-        error_tool_results: list[ContextItem] = []
-        for item in self.conversation.items:
-            if (item.item_type == ItemType.TOOL_RESULT
-                and item.is_tool_error
-                and (current_turn - item.created_turn) >= max_turns):
-                error_tool_results.append(item)
-
-        if not error_tool_results:
-            return removed_ids
-
-        # 2. 收集需要删除的关联 AssistantMessage
-        error_tool_call_ids = set()
-        for item in error_tool_results:
-            if isinstance(item.message, ToolMessage):
-                error_tool_call_ids.add(item.message.tool_call_id)
-
-        assistant_items_to_remove: list[str] = []
-        for item in self.conversation.items:
-            if item.item_type != ItemType.ASSISTANT_MESSAGE:
-                continue
-            if not isinstance(item.message, AssistantMessage):
-                continue
-            if not item.message.tool_calls:
-                continue
-            # 检查是否所有 tool_calls 都是失败的
-            all_failed = all(
-                tc.id in error_tool_call_ids
-                for tc in item.message.tool_calls
-            )
-            if all_failed:
-                assistant_items_to_remove.append(item.id)
-
-        # 3. 执行删除(先删除 tool_result,再删除 assistant)
-        for item in error_tool_results:
-            if self.conversation.remove_by_id(item.id):
-                removed_ids.append(item.id)
-                self.event_bus.emit(ContextEvent(
-                    event_type=EventType.ITEM_REMOVED,
-                    item_type=ItemType.TOOL_RESULT,
-                    item_id=item.id,
-                    detail=f"stale error tool_result removed (turn gap={current_turn - item.created_turn})",
-                ))
-
-        for item_id in assistant_items_to_remove:
-            if self.conversation.remove_by_id(item_id):
-                removed_ids.append(item_id)
-                self.event_bus.emit(ContextEvent(
-                    event_type=EventType.ITEM_REMOVED,
-                    item_type=ItemType.ASSISTANT_MESSAGE,
-                    item_id=item_id,
-                    detail="associated assistant message removed (all tool_calls failed)",
-                ))
-
-        return removed_ids
 
     def add_skill_injection(
         self,
@@ -774,21 +693,19 @@ class ContextIR:
 
     def _flush_pending_skill_items_if_unblocked(self) -> None:
         """tool barrier 解除时，批量刷入 Skill pending items。"""
-        if self._inflight_tool_call_ids:
-            return
-        if not self._pending_skill_items:
-            return
+        self._pending_skill_items.flush_if_unblocked(
+            blocked=bool(self._inflight_tool_call_ids),
+            flush_fn=self._append_skill_item,
+        )
 
-        pending = list(self._pending_skill_items)
-        self._pending_skill_items = []
-        for item in pending:
-            self.conversation.items.append(item)
-            self.event_bus.emit(ContextEvent(
-                event_type=EventType.ITEM_ADDED,
-                item_type=item.item_type,
-                item_id=item.id,
-                detail=f"skill item flushed: {item.item_type.value}",
-            ))
+    def _append_skill_item(self, item: ContextItem) -> None:
+        self.conversation.items.append(item)
+        self.event_bus.emit(ContextEvent(
+            event_type=EventType.ITEM_ADDED,
+            item_type=item.item_type,
+            item_id=item.id,
+            detail=f"skill item flushed: {item.item_type.value}",
+        ))
 
     # ===== Reminder Engine =====
 
@@ -856,68 +773,12 @@ class ContextIR:
 
         主要用于 session resume / rewind 后，避免因为状态丢失导致首轮误触发 reminder。
         """
-        current = self._reminder_engine.state
-        rebuilt = ReminderState(
+        self._reminder_engine.rehydrate_from_conversation(
             turn=self._turn_number,
-            mode_plan=bool(current.mode_plan),
-            last_task_turn=0,
-            last_task_nudge_turn=0,
-            last_todowrite_turn=max(0, int(current.last_todowrite_turn)),
-            todo_active_count=max(0, int(current.todo_active_count)),
-            todo_last_changed_turn=max(0, int(current.todo_last_changed_turn)),
-            last_todo_nudge_turn=max(0, int(current.last_todo_nudge_turn)),
+            conversation_items=self.conversation.items,
+            is_system_reminder_item=self._is_system_reminder_item,
+            suppress_task_nudge_on_next_turn=suppress_task_nudge_on_next_turn,
         )
-
-        for item in self.conversation.items:
-            if item.destroyed:
-                continue
-
-            item_turn = max(0, int(getattr(item, "created_turn", 0) or 0))
-            if item.item_type == ItemType.TOOL_RESULT and not bool(item.is_tool_error):
-                tool_name = str(item.tool_name or "").strip()
-                if not tool_name and isinstance(item.message, ToolMessage):
-                    tool_name = str(item.message.tool_name or "").strip()
-
-                if tool_name == "Task":
-                    rebuilt.last_task_turn = max(rebuilt.last_task_turn, item_turn)
-                elif tool_name == "TodoWrite":
-                    rebuilt.last_todowrite_turn = max(rebuilt.last_todowrite_turn, item_turn)
-                    envelope = (item.metadata or {}).get("tool_raw_envelope")
-                    if isinstance(envelope, dict):
-                        data = envelope.get("data", {})
-                        if isinstance(data, dict):
-                            active_count = data.get("active_count")
-                            if isinstance(active_count, int):
-                                normalized_active = max(0, int(active_count))
-                                if (rebuilt.todo_active_count == 0) != (normalized_active == 0):
-                                    rebuilt.todo_last_changed_turn = max(
-                                        rebuilt.todo_last_changed_turn,
-                                        item_turn,
-                                    )
-                                rebuilt.todo_active_count = normalized_active
-
-            if not self._is_system_reminder_item(item):
-                continue
-            metadata = item.metadata or {}
-            raw_rule_ids = metadata.get("reminder_rule_ids", [])
-            if isinstance(raw_rule_ids, list):
-                rule_ids = {str(rule_id) for rule_id in raw_rule_ids}
-            else:
-                rule_ids = set()
-
-            reminder_turn = max(
-                0,
-                int(metadata.get("reminder_turn", item_turn) or item_turn),
-            )
-            if "task_gap_reminder" in rule_ids:
-                rebuilt.last_task_nudge_turn = max(rebuilt.last_task_nudge_turn, reminder_turn)
-            if "todo_active_reminder" in rule_ids or "todo_empty_reminder" in rule_ids:
-                rebuilt.last_todo_nudge_turn = max(rebuilt.last_todo_nudge_turn, reminder_turn)
-
-        if suppress_task_nudge_on_next_turn:
-            rebuilt.last_task_nudge_turn = max(rebuilt.last_task_nudge_turn, self._turn_number)
-
-        self._reminder_engine.state = rebuilt
 
     def _is_system_reminder_item(self, item: ContextItem) -> bool:
         if item.item_type == ItemType.SYSTEM_REMINDER:
@@ -1046,132 +907,23 @@ class ContextIR:
 
     # ===== 序列化 =====
 
-    @staticmethod
-    def _snapshot_item_to_dict(item: ContextItem) -> dict[str, Any]:
-        message_data = item.message.model_dump(mode="json") if item.message is not None else None
-        return {
-            "id": item.id,
-            "item_type": item.item_type.value,
-            "message": message_data,
-            "content_text": item.content_text,
-            "token_count": item.token_count,
-            "priority": item.priority,
-            "ephemeral": item.ephemeral,
-            "destroyed": item.destroyed,
-            "tool_name": item.tool_name,
-            "created_at": item.created_at,
-            "metadata": item.metadata,
-            "cache_hint": item.cache_hint,
-            "offload_path": item.offload_path,
-            "offloaded": item.offloaded,
-            "is_tool_error": item.is_tool_error,
-            "created_turn": item.created_turn,
-        }
-
-    @staticmethod
-    def _snapshot_message_from_dict(data: dict[str, Any] | None) -> BaseMessage | None:
-        if data is None:
-            return None
-        role = data.get("role")
-        if role == "user":
-            return UserMessage.model_validate(data)
-        if role == "assistant":
-            return AssistantMessage.model_validate(data)
-        if role == "tool":
-            return ToolMessage.model_validate(data)
-        if role == "system":
-            return SystemMessage.model_validate(data)
-        if role == "developer":
-            return DeveloperMessage.model_validate(data)
-        raise ValueError(f"Unsupported message role in header snapshot: {role}")
-
-    @classmethod
-    def _snapshot_item_from_dict(cls, data: dict[str, Any]) -> ContextItem:
-        message_data = data.get("message")
-        message = cls._snapshot_message_from_dict(message_data if isinstance(message_data, dict) else None)
-        kwargs: dict[str, Any] = {}
-        item_id = data.get("id")
-        if isinstance(item_id, str) and item_id.strip():
-            kwargs["id"] = item_id
-        return ContextItem(
-            item_type=ItemType(data["item_type"]),
-            message=message,
-            content_text=data.get("content_text", ""),
-            token_count=int(data.get("token_count", 0)),
-            priority=int(data.get("priority", 50)),
-            ephemeral=bool(data.get("ephemeral", False)),
-            destroyed=bool(data.get("destroyed", False)),
-            tool_name=data.get("tool_name"),
-            created_at=float(data.get("created_at", 0.0)),
-            metadata=data.get("metadata", {}) or {},
-            cache_hint=bool(data.get("cache_hint", False)),
-            offload_path=data.get("offload_path"),
-            offloaded=bool(data.get("offloaded", False)),
-            is_tool_error=bool(data.get("is_tool_error", False)),
-            created_turn=int(data.get("created_turn", 0)),
-            **kwargs,
-        )
-
     def export_header_snapshot(self) -> dict[str, Any]:
         """导出 header + memory 快照（用于会话级持久化）。"""
-        header_items = [
-            self._snapshot_item_to_dict(item)
-            for item in self.header.items
-            if item.item_type in _HEADER_ITEM_ORDER
-        ]
-        memory_item = self._snapshot_item_to_dict(self._memory_item) if self._memory_item else None
-        return {
-            "schema_version": 1,
-            "header_items": header_items,
-            "memory_item": memory_item,
-        }
+        return export_header_snapshot_data(
+            header_items=self.header.items,
+            memory_item=self._memory_item,
+            header_item_order=HEADER_ITEM_ORDER,
+        )
 
     def import_header_snapshot(self, snapshot: dict[str, Any]) -> None:
         """导入 header + memory 快照。"""
-        if not isinstance(snapshot, dict):
-            raise ValueError("header snapshot must be a dict")
-        raw_items = snapshot.get("header_items")
-        if not isinstance(raw_items, list):
-            raise ValueError("header snapshot missing header_items list")
-
-        allowed_header_types = set(_HEADER_ITEM_ORDER.keys())
-        restored_header: list[ContextItem] = []
-        for raw_item in raw_items:
-            if not isinstance(raw_item, dict):
-                raise ValueError("header snapshot contains invalid header item")
-            item = self._snapshot_item_from_dict(raw_item)
-            if item.item_type not in allowed_header_types:
-                raise ValueError(f"unsupported header item_type in snapshot: {item.item_type.value}")
-            item.message = None
-            item.ephemeral = False
-            item.tool_name = None
-            item.token_count = self.token_counter.count(item.content_text or "")
-            restored_header.append(item)
-
-        restored_header.sort(key=lambda it: _HEADER_ITEM_ORDER.get(it.item_type, 999))
+        restored_header, restored_memory_item = import_header_snapshot_data(
+            snapshot=snapshot,
+            token_counter=self.token_counter,
+            header_item_order=HEADER_ITEM_ORDER,
+        )
         self.header.items = restored_header
-
-        raw_memory = snapshot.get("memory_item")
-        if raw_memory is None:
-            self._memory_item = None
-            return
-        if not isinstance(raw_memory, dict):
-            raise ValueError("header snapshot memory_item must be a dict or null")
-
-        memory_item = self._snapshot_item_from_dict(raw_memory)
-        if memory_item.item_type != ItemType.MEMORY:
-            raise ValueError("header snapshot memory_item type must be memory")
-        if memory_item.message is None:
-            raise ValueError("header snapshot memory_item.message is required")
-        if not isinstance(memory_item.message, UserMessage):
-            raise ValueError("header snapshot memory_item.message must be UserMessage")
-        if not bool(getattr(memory_item.message, "is_meta", False)):
-            raise ValueError("header snapshot memory_item.message must be meta user message")
-
-        if not memory_item.content_text:
-            memory_item.content_text = memory_item.message.text
-        memory_item.token_count = self.token_counter.count(memory_item.content_text)
-        self._memory_item = memory_item
+        self._memory_item = restored_memory_item
 
     def clear(self) -> None:
         """清空所有上下文"""
@@ -1183,7 +935,6 @@ class ContextIR:
         self._thinking_protected_assistant_ids.clear()
         self._flushed_hook_injection_texts.clear()
         self._reminder_engine.clear()
-        self._todo_state.clear()
         self._memory_item = None
 
         self.event_bus.emit(ContextEvent(
@@ -1217,79 +968,11 @@ class ContextIR:
         """获取 Memory item（只读）"""
         return self._memory_item
 
-    # ===== TODO 状态管理 =====
+    @property
+    def reminder_engine(self) -> ReminderEngine:
+        """访问 ReminderEngine（只读引用）。"""
+        return self._reminder_engine
 
-    @staticmethod
-    def _normalize_active_todos(todos: list[dict]) -> list[dict]:
-        return [
-            todo
-            for todo in todos
-            if isinstance(todo, dict) and todo.get("status") in ("pending", "in_progress")
-        ]
-
-    def set_todo_state(self, todos: list[dict]) -> None:
-        """设置 TODO 状态并更新 ReminderEngine
-
-        Args:
-            todos: TODO 列表（字典格式，来自 TodoWrite 工具）
-        """
-        import time
-
-        active_todos = self._normalize_active_todos(todos)
-
-        self._todo_state = {
-            "todos": active_todos,
-            "updated_at": time.time(),
-        }
-
-        self._reminder_engine.update_todo_state(
-            active_count=len(active_todos),
-            turn=self._turn_number,
-            update_last_write_turn=True,
-        )
-
-        # 触发事件
-        self.event_bus.emit(ContextEvent(
-            event_type=EventType.TODO_STATE_UPDATED,
-            detail=f"todo_state updated: {len(active_todos)} active items",
-        ))
-
-    def restore_todo_state(
-        self,
-        *,
-        todos: list[dict],
-        turn_number_at_update: int,
-    ) -> None:
-        """从持久化数据恢复 TODO 状态（用于 session resume）。
-
-        与 set_todo_state() 的区别：
-        - 不用当前 turn_number 覆盖 turn_number_at_update，而是沿用持久化值
-        """
-        import time
-
-        active_todos = self._normalize_active_todos(todos)
-
-        self._todo_state = {
-            "todos": active_todos,
-            "updated_at": time.time(),
-        }
-
-        self._reminder_engine.update_todo_state(
-            active_count=len(active_todos),
-            turn=self._turn_number,
-            update_last_write_turn=False,
-        )
-        self._reminder_engine.restore_todo_write_turn(turn_number_at_update)
-
-
-    def get_todo_state(self) -> dict[str, Any]:
-        """获取当前 TODO 状态"""
-        return self._todo_state.copy()
-
-    def has_todos(self) -> bool:
-        """检查是否有 TODO 条目"""
-        return bool(self._todo_state.get("todos"))
-
-    def get_todo_persist_turn_number_at_update(self) -> int:
-        """用于持久化的 todo 更新轮次。"""
-        return int(self._reminder_engine.state.last_todowrite_turn)
+    @property
+    def turn_number(self) -> int:
+        return int(self._turn_number)

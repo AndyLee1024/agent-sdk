@@ -14,6 +14,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Literal
 
 from comate_agent_sdk.context.items import DEFAULT_PRIORITIES, ItemType
+from comate_agent_sdk.context.observer import ContextEvent, EventType
 from comate_agent_sdk.context.truncation import TruncationRecord
 
 if TYPE_CHECKING:
@@ -34,6 +35,64 @@ try:
 except ImportError:
     _tiktoken = None  # type: ignore[assignment]
     _TIKTOKEN_AVAILABLE = False
+
+
+def _cleanup_stale_error_items(context: "ContextIR", max_turns: int = 10) -> list[str]:
+    """清理超过指定轮次的失败工具调用项。"""
+    from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage
+
+    current_turn = context.turn_number
+    removed_ids: list[str] = []
+
+    error_tool_results: list["ContextItem"] = []
+    for item in context.conversation.items:
+        if (
+            item.item_type == ItemType.TOOL_RESULT
+            and item.is_tool_error
+            and (current_turn - item.created_turn) >= max_turns
+        ):
+            error_tool_results.append(item)
+
+    if not error_tool_results:
+        return removed_ids
+
+    error_tool_call_ids = set()
+    for item in error_tool_results:
+        if isinstance(item.message, ToolMessage):
+            error_tool_call_ids.add(item.message.tool_call_id)
+
+    assistant_items_to_remove: list[str] = []
+    for item in context.conversation.items:
+        if item.item_type != ItemType.ASSISTANT_MESSAGE:
+            continue
+        if not isinstance(item.message, AssistantMessage):
+            continue
+        if not item.message.tool_calls:
+            continue
+        if all(tc.id in error_tool_call_ids for tc in item.message.tool_calls):
+            assistant_items_to_remove.append(item.id)
+
+    for item in error_tool_results:
+        if context.conversation.remove_by_id(item.id):
+            removed_ids.append(item.id)
+            context.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_REMOVED,
+                item_type=ItemType.TOOL_RESULT,
+                item_id=item.id,
+                detail=f"stale error tool_result removed (turn gap={current_turn - item.created_turn})",
+            ))
+
+    for item_id in assistant_items_to_remove:
+        if context.conversation.remove_by_id(item_id):
+            removed_ids.append(item_id)
+            context.event_bus.emit(ContextEvent(
+                event_type=EventType.ITEM_REMOVED,
+                item_type=ItemType.ASSISTANT_MESSAGE,
+                item_id=item_id,
+                detail="associated assistant message removed (all tool_calls failed)",
+            ))
+
+    return removed_ids
 
 
 @dataclass(frozen=True)
@@ -176,7 +235,8 @@ class SelectiveCompactionPolicy:
 
         # 在选择性压缩前先清理过期的失败工具调用
         if self.error_item_max_turns > 0:
-            removed_error_ids = context.cleanup_stale_error_items(
+            removed_error_ids = _cleanup_stale_error_items(
+                context,
                 max_turns=self.error_item_max_turns
             )
             if removed_error_ids:
