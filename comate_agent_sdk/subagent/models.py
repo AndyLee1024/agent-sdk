@@ -24,8 +24,8 @@ class AgentDefinition:
     skills: list[str] | None = None  # 可用的 Skills 名称列表（限制 Subagent 可用的 Skills）
     model: str | None = None
     level: LLMLevel | None = None
-    max_iterations: int = 50  # 最大迭代次数
-    timeout: float | None = None  # 超时时间（秒）
+    max_iterations: int = 100  # 最大迭代次数
+    timeout: float | None = 600.0  # 超时时间（秒）
     compaction: CompactionConfig | None = None  # 上下文压缩配置
     source: str = "user"  # 来源标记: "builtin" | "discovered" | "user"
 
@@ -105,7 +105,7 @@ class AgentDefinition:
             tools=tools,
             skills=skills,
             **init_kwargs,
-            timeout=frontmatter.get("timeout"),
+            timeout=frontmatter.get("timeout", 600.0),
             max_iterations=frontmatter.get("max_iterations", 50),
         )
 
