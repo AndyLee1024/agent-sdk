@@ -295,10 +295,12 @@ async def event_loop():
 
 asyncio.create_task(event_loop())
 
-# 主线程手动发送消息
-await session.send("第一条消息")
+# 主线程手动发送流式请求
+async for event in session.query_stream("第一条消息"):
+    pass
 await asyncio.sleep(2)
-await session.send("第二条消息")
+async for event in session.query_stream("第二条消息"):
+    pass
 
 # 关闭会话
 await session.close()  # 触发 events() 结束

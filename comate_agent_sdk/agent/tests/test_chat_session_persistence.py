@@ -20,6 +20,7 @@ from comate_agent_sdk.agent.session_store import (
 )
 from comate_agent_sdk.context.ir import ContextIR
 from comate_agent_sdk.context.items import ContextItem, ItemType
+from comate_agent_sdk.context.observer import EventType
 from comate_agent_sdk.llm.messages import AssistantMessage, ToolMessage, UserMessage
 from comate_agent_sdk.llm.views import ChatInvokeUsage
 from comate_agent_sdk.tokens.views import TokenUsageEntry
@@ -709,7 +710,17 @@ class TestChatSessionPersistence(unittest.TestCase):
                 ),
             )
             session = ChatSession.resume(agent, session_id="s1", storage_root=session_root)
+            replaced_before_restore = sum(
+                1
+                for event in session._agent._context.event_bus.event_log
+                if event.event_type == EventType.CONVERSATION_REPLACED
+            )
             session.restore_conversation_to_turn(target_turn=1)
+            replaced_after_restore = sum(
+                1
+                for event in session._agent._context.event_bus.event_log
+                if event.event_type == EventType.CONVERSATION_REPLACED
+            )
 
             replay_turn, replay_items, replay_usage = _replay_session_events(
                 path=context_path,
@@ -723,6 +734,8 @@ class TestChatSessionPersistence(unittest.TestCase):
             self.assertEqual(usage_summary.entry_count, 2)
             self.assertEqual(usage_summary.total_prompt_tokens, 18)
             self.assertEqual(usage_summary.total_completion_tokens, 3)
+            self.assertGreaterEqual(replaced_before_restore, 1)
+            self.assertEqual(replaced_after_restore, replaced_before_restore + 1)
 
     def test_resume_rehydrate_reminder_avoids_immediate_task_nudge(self) -> None:
         with tempfile.TemporaryDirectory() as td:

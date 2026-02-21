@@ -57,7 +57,7 @@ def clear_history(agent: "AgentRuntime") -> None:
 def load_history(agent: "AgentRuntime", messages: list[BaseMessage]) -> None:
     """加载 message history（保留 header），用于恢复对话。"""
     # 清空现有 conversation（保留 header）
-    agent._context.conversation.items.clear()
+    agent._context.clear_conversation()
     agent._token_cost.clear_history()
 
     # 逐条加载消息到 IR
@@ -98,7 +98,7 @@ def destroy_ephemeral_messages(agent: "AgentRuntime") -> None:
                 keep_count = tool.ephemeral if isinstance(tool.ephemeral, int) else 1
             tool_keep_counts[tool.name] = keep_count
 
-    conversation = agent._context.conversation.items
+    conversation = agent._context.get_conversation_items_snapshot()
     idx_by_id = {it.id: i for i, it in enumerate(conversation)}
 
     # 遍历所有 ephemeral items，卸载需要被销毁的
@@ -106,7 +106,7 @@ def destroy_ephemeral_messages(agent: "AgentRuntime") -> None:
         # 获取该工具的所有 ephemeral items
         same_tool_items = [
             item
-            for item in agent._context.conversation.items
+            for item in agent._context.iter_conversation_items()
             if item.item_type.value == "tool_result"
             and item.ephemeral
             and not item.destroyed

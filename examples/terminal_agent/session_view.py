@@ -67,7 +67,7 @@ def render_user_message(console: Console, content: str) -> None:
 
 
 def render_resume_timeline(console: Console, session: ChatSession) -> None:
-    items = session._agent._context.conversation.items
+    items = session._agent._context.get_conversation_items_snapshot()
     history = [
         item
         for item in items

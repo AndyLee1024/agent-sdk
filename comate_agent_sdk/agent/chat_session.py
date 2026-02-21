@@ -155,7 +155,7 @@ class ChatSession:
         )
         session._turn_number = int(turn_number)
         if items:
-            session._agent._context.conversation.items = items
+            session._agent._context.replace_conversation(items)
         else:
             logger.info(f"No persisted conversation found for session_id={session_id}, starting empty")
         session._agent._token_cost.usage_history = usage_entries
@@ -327,15 +327,15 @@ class ChatSession:
             max_turn=normalized_turn,
         )
 
-        before = ConversationState.capture(self._agent._context.conversation.items)
-        self._agent._context.conversation.items = list(items)
+        before = ConversationState.capture(self._agent._context.get_conversation_items_snapshot())
+        self._agent._context.replace_conversation(list(items))
 
         self._turn_number += 1
         evt = build_conversation_event(
             session_id=self.session_id,
             turn_number=self._turn_number,
             before=before,
-            after_items=self._agent._context.conversation.items,
+            after_items=self._agent._context.get_conversation_items_snapshot(),
             offload_root=self._offload_root,
         )
         events_jsonl_append(self._context_jsonl, evt)
@@ -405,7 +405,7 @@ class ChatSession:
             yield SessionInitEvent(session_id=self.session_id)
 
         self._turn_number += 1
-        before = ConversationState.capture(self._agent._context.conversation.items)
+        before = ConversationState.capture(self._agent._context.get_conversation_items_snapshot())
         before_usage_count = len(self._agent._token_cost.usage_history)
         previous_controller = self._agent._run_controller
         self.run_controller.clear()
@@ -420,7 +420,7 @@ class ChatSession:
                 session_id=self.session_id,
                 turn_number=self._turn_number,
                 before=before,
-                after_items=self._agent._context.conversation.items,
+                after_items=self._agent._context.get_conversation_items_snapshot(),
                 offload_root=self._offload_root,
             )
             events_jsonl_append(self._context_jsonl, evt)
@@ -451,7 +451,7 @@ class ChatSession:
 
         async for message in self._message_iter():
             self._turn_number += 1
-            before = ConversationState.capture(self._agent._context.conversation.items)
+            before = ConversationState.capture(self._agent._context.get_conversation_items_snapshot())
             before_usage_count = len(self._agent._token_cost.usage_history)
             previous_controller = self._agent._run_controller
             self.run_controller.clear()
@@ -468,7 +468,7 @@ class ChatSession:
                     session_id=self.session_id,
                     turn_number=self._turn_number,
                     before=before,
-                    after_items=self._agent._context.conversation.items,
+                    after_items=self._agent._context.get_conversation_items_snapshot(),
                     offload_root=self._offload_root,
                 )
                 events_jsonl_append(self._context_jsonl, evt)

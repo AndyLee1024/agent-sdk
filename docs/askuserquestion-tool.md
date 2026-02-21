@@ -55,7 +55,7 @@
    ↓
 6. Agent 执行暂停 - UI 展示问题给用户
    ↓
-7. 用户回答 → 通过 session.send(UserMessage(...)) 发送
+7. 用户回答 → 通过 session.send(UserMessage(...)) 发送（如果在后台长链接模式）或普通 session.query_stream 恢复
    ↓
 8. 新一轮 Agent 执行 → 从 UserMessage 中读取答案
 ```

@@ -438,7 +438,7 @@ agent = Agent(config=AgentConfig())
 session = agent.chat()
 
 # 发送消息
-async for event in session.send("Hello"):
+async for event in session.query_stream("Hello"):
     if isinstance(event, TextEvent):
         print(event.content)
 
@@ -479,7 +479,7 @@ from comate_agent_sdk.agent.events import (
     UsageDeltaEvent,
 )
 
-async for event in session.send("Query"):
+async for event in session.query_stream("Query"):
     match event:
         case SessionInitEvent(session_id=sid):
             print(f"Session started: {sid}")
@@ -697,7 +697,7 @@ agent = Agent(
     ),
 )
 
-async for event in session.send("Query"):
+async for event in session.query_stream("Query"):
     match event:
         case PreCompactEvent(current_tokens, threshold):
             print(f"即将压缩: {current_tokens} tokens >= {threshold}")
@@ -803,7 +803,7 @@ from comate_agent_sdk.agent.events import (
     SubagentProgressEvent,
 )
 
-async for event in session.send("Review this code"):
+async for event in session.query_stream("Review this code"):
     match event:
         case SubagentStartEvent(agent_name=name, task=task):
             print(f"[Subagent {name} started: {task}]")
@@ -1397,7 +1397,7 @@ async def main():
             print(f"Total cost: ${usage.total_cost:.4f}")
         else:
             # 发送消息
-            async for event in session.send(line):
+            async for event in session.query_stream(line):
                 match event:
                     case SessionInitEvent(session_id=sid):
                         print(f"[Session: {sid}]")
@@ -1423,7 +1423,7 @@ if __name__ == "__main__":
 from comate_agent_sdk.agent.chat_session import ChatSessionClosedError
 
 try:
-    async for event in session.send("query"):
+    async for event in session.query_stream("query"):
         # 处理事件
         pass
 except ChatSessionClosedError:
@@ -1438,7 +1438,7 @@ await session.close()
 
 # 或使用上下文管理器
 async with agent.chat() as session:
-    async for event in session.send("query"):
+    async for event in session.query_stream("query"):
         pass
 ```
 
@@ -1486,7 +1486,7 @@ if controller.is_interrupted:
     print(f"Session interrupted: {controller.reason}")
 
 # 流式响应中处理中断
-async for event in session.send("Long running task"):
+async for event in session.query_stream("Long running task"):
     if isinstance(event, StopEvent) and event.reason == "interrupted":
         print("Task was interrupted")
 ```

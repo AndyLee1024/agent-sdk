@@ -106,8 +106,9 @@ def test_memory_token_accounting():
     agent = template.create_runtime()
 
     # 注意：Agent 可能在初始化时已经加载了 AGENTS.md 作为 memory
-    # 所以我们清除它，然后重新设置
-    agent._context._memory_item = None
+    # 所以这里通过公共 API 清空上下文后再重新设置
+    agent._context.clear()
+    agent._context.set_system_prompt("Test")
 
     # 记录清除后的 token 数
     tokens_without_memory = agent._context.total_tokens

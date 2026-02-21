@@ -53,7 +53,7 @@ class HistorySyncMixin:
         if mode != "resume":
             return
 
-        items = self._session._agent._context.conversation.items
+        items = self._session._agent._context.get_conversation_items_snapshot()
         history = [
             item
             for item in items

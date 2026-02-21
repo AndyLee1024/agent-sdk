@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Callable, Generic, Iterator, TypeVar
 
 from comate_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
 from comate_agent_sdk.context.header.order import HEADER_ITEM_ORDER
@@ -947,9 +947,21 @@ class ContextIR:
         """获取 conversation 段的所有底层消息"""
         return [
             item.message
-            for item in self.conversation.items
+            for item in self.iter_conversation_items()
             if item.message is not None
         ]
+
+    def clear_conversation(self) -> None:
+        """清空 conversation 段并发送替换事件。"""
+        self.replace_conversation([])
+
+    def get_conversation_items_snapshot(self) -> list[ContextItem]:
+        """返回 conversation 条目的浅拷贝快照。"""
+        return list(self.conversation.items)
+
+    def iter_conversation_items(self) -> Iterator[ContextItem]:
+        """返回 conversation 条目的只读迭代快照。"""
+        return iter(tuple(self.conversation.items))
 
     def replace_conversation(self, items: list[ContextItem]) -> None:
         """替换整个 conversation 段
