@@ -52,31 +52,38 @@ def test_env_provider_system_env_and_git_env_limits(tmp_path: Path) -> None:
     git_env = provider.get_git_env(repo)
     assert git_env is not None
     assert "<git_env>" in git_env
-    assert "当前分支:" in git_env
+    assert "Current Branch:" in git_env
 
     lines = git_env.splitlines()
 
-    status_start = lines.index("状态:") + 1
-    commits_start = lines.index("最近提交:")
+    status_start = lines.index("Status:") + 1
+    commits_start = lines.index("Recent Commits:")
     status_lines = [ln for ln in lines[status_start:commits_start] if ln.strip()]
     assert len(status_lines) == 11
     assert status_lines[-1].startswith("...（已截断，省略 ")
 
-    commit_lines = [ln for ln in lines[commits_start + 1 :] if ln.strip() and ln != "</git_env>"]
+    commit_lines = [
+        ln
+        for ln in lines[commits_start + 1 :]
+        if ln.strip() and not ln.strip().startswith("</git_env>")
+    ]
     assert len(commit_lines) == 6
 
 
-def test_context_ir_header_env_order_is_stable() -> None:
+def test_context_ir_session_state_env_order_is_stable() -> None:
     ctx = ContextIR()
     ctx.set_system_env("<system_env>\nX\n</system_env>")
     ctx.set_skill_strategy("SKILL")
 
-    types = [item.item_type for item in ctx.header.items]
-    assert types == [ItemType.SKILL_STRATEGY, ItemType.SYSTEM_ENV]
+    header_types = [item.item_type for item in ctx.header.items]
+    assert header_types == [ItemType.SKILL_STRATEGY]
+
+    state_types = [item.item_type for item in ctx.session_state.items]
+    assert state_types == [ItemType.SYSTEM_ENV]
 
     ctx.set_git_env("<git_env>\nY\n</git_env>")
-    types = [item.item_type for item in ctx.header.items]
-    assert types == [ItemType.SKILL_STRATEGY, ItemType.SYSTEM_ENV, ItemType.GIT_ENV]
+    state_types = [item.item_type for item in ctx.session_state.items]
+    assert state_types == [ItemType.SYSTEM_ENV, ItemType.GIT_ENV]
 
 
 def test_context_info_categories_include_env() -> None:
@@ -89,4 +96,3 @@ def test_context_info_categories_include_env() -> None:
     labels = {c.label for c in categories}
     assert "System Env" in labels
     assert "Git Env" in labels
-

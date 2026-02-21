@@ -25,7 +25,7 @@ from comate_agent_sdk.tokens.views import TokenUsageEntry
 
 logger = logging.getLogger("comate_agent_sdk.agent.session_store")
 
-PERSISTENCE_SCHEMA_VERSION = "2.0"
+PERSISTENCE_SCHEMA_VERSION = "3.0"
 
 
 class SessionStoreError(Exception):

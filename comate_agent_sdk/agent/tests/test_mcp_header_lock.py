@@ -50,7 +50,7 @@ class _FakeMcpManager:
 
 
 class TestMcpHeaderLock(unittest.IsolatedAsyncioTestCase):
-    async def test_snapshot_lock_blocks_mcp_header_updates(self) -> None:
+    async def test_snapshot_lock_does_not_block_mcp_session_state_updates(self) -> None:
         template = Agent(
             llm=_FakeChatModel(),  # type: ignore[arg-type]
             config=AgentConfig(
@@ -73,4 +73,4 @@ class TestMcpHeaderLock(unittest.IsolatedAsyncioTestCase):
         ):
             await runtime.ensure_mcp_tools_loaded(force=True)
 
-        self.assertEqual(header_calls, [])
+        self.assertEqual(header_calls, ["set"])

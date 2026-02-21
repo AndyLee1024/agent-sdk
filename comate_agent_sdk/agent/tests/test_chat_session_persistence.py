@@ -11,6 +11,7 @@ from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.agent.chat_session import ChatSession, ChatSessionError
 from comate_agent_sdk.agent.session_store import (
     ConversationState as _ConversationState,
+    PERSISTENCE_SCHEMA_VERSION,
     build_conversation_event as _build_conversation_event,
     build_header_snapshot_event as _build_header_snapshot_event,
     events_jsonl_append as _events_jsonl_append,
@@ -346,7 +347,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 1,
                     "op": "usage_delta",
@@ -391,7 +392,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 1,
                     "op": "usage_delta",
@@ -406,7 +407,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 2,
                     "op": "usage_reset",
@@ -416,7 +417,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 3,
                     "op": "usage_delta",
@@ -561,7 +562,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 1,
                     "op": "usage_delta",
@@ -682,7 +683,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 context_path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 1,
                     "op": "usage_delta",
@@ -692,7 +693,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 context_path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 2,
                     "op": "usage_delta",
@@ -786,7 +787,7 @@ class TestChatSessionPersistence(unittest.TestCase):
             _events_jsonl_append(
                 path,
                 {
-                    "schema_version": "2.0",
+                    "schema_version": PERSISTENCE_SCHEMA_VERSION,
                     "session_id": "s1",
                     "turn_number": 1,
                     "op": "usage_delta",
@@ -816,7 +817,6 @@ class TestChatSessionPersistence(unittest.TestCase):
             path = session_root / "context.jsonl"
             snapshot_ctx = ContextIR()
             snapshot_ctx.set_system_prompt("SNAPSHOT_SYSTEM_PROMPT", cache=False)
-            snapshot_ctx.set_system_env("<system_env>SNAPSHOT_ENV</system_env>")
             snapshot_ctx.set_memory("SNAPSHOT_MEMORY", cache=False)
             self._append_header_snapshot(
                 path,
@@ -839,15 +839,14 @@ class TestChatSessionPersistence(unittest.TestCase):
                 storage_root=session_root,
             )
             prompt_item = session._agent._context.header.find_one_by_type(ItemType.SYSTEM_PROMPT)
-            env_item = session._agent._context.header.find_one_by_type(ItemType.SYSTEM_ENV)
+            env_item = session._agent._context.session_state.find_one_by_type(ItemType.SYSTEM_ENV)
             self.assertIsNotNone(prompt_item)
-            self.assertIsNotNone(env_item)
+            self.assertIsNone(env_item)
             self.assertEqual(prompt_item.content_text, "SNAPSHOT_SYSTEM_PROMPT")
-            self.assertEqual(env_item.content_text, "<system_env>SNAPSHOT_ENV</system_env>")
             self.assertIsNotNone(session._agent._context.memory_item)
             self.assertIn("SNAPSHOT_MEMORY", session._agent._context.memory_item.content_text)
 
-    def test_resume_skips_default_memory_and_env_injection_when_snapshot_present(self) -> None:
+    def test_resume_skips_default_memory_but_rebuilds_env_state_when_snapshot_present(self) -> None:
         from comate_agent_sdk.context.env import EnvOptions
 
         with tempfile.TemporaryDirectory() as td:
@@ -873,10 +872,6 @@ class TestChatSessionPersistence(unittest.TestCase):
                     "comate_agent_sdk.agent.setup.setup_memory",
                     side_effect=AssertionError("setup_memory should be skipped in snapshot resume"),
                 ),
-                patch(
-                    "comate_agent_sdk.agent.init._setup_env_info",
-                    side_effect=AssertionError("_setup_env_info should be skipped in snapshot resume"),
-                ),
             ):
                 session = ChatSession.resume(
                     agent,
@@ -885,6 +880,9 @@ class TestChatSessionPersistence(unittest.TestCase):
                 )
 
             self.assertEqual(session.session_id, "s1")
+            self.assertIsNotNone(
+                session._agent._context.session_state.find_one_by_type(ItemType.SYSTEM_ENV)
+            )
 
 if __name__ == "__main__":
     unittest.main()

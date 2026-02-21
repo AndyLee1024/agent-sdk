@@ -39,8 +39,8 @@ class ContextInfo:
         context_limit: 模型的上下文窗口大小（tokens）
         compact_threshold: 压缩触发阈值（tokens）
         compact_threshold_ratio: 压缩阈值比例（0.0-1.0）
-        total_tokens: 总 token 数（header + conversation）
-        header_tokens: Header 段 token 数
+        total_tokens: 总 token 数（static header + session_state + conversation + memory）
+        header_tokens: Header 合计 token 数（static header + session_state）
         conversation_tokens: Conversation 段 token 数
         tool_definitions_tokens: Tool JSON schema 估算 token 数
         used_tokens_message_only: 仅消息上下文占用（IR 估算）
@@ -119,6 +119,8 @@ def _build_categories(
         "Skill Strategy": [ItemType.SKILL_STRATEGY],
         "System Env": [ItemType.SYSTEM_ENV],
         "Git Env": [ItemType.GIT_ENV],
+        "MCP Tools": [ItemType.MCP_TOOL],
+        "Output Style": [ItemType.OUTPUT_STYLE],
         "Messages": [ItemType.USER_MESSAGE, ItemType.ASSISTANT_MESSAGE],
         "Tool Results": [ItemType.TOOL_RESULT],
         "Skills": [ItemType.SKILL_METADATA, ItemType.SKILL_PROMPT],
@@ -138,7 +140,7 @@ def _build_categories(
 
         # 计算条目数（遍历 header 和 conversation segment 的所有 item）
         item_count = 0
-        for segment in [context.header, context.conversation]:
+        for segment in [context.header, context.session_state, context.conversation]:
             for item in segment.items:
                 if item.item_type in item_types:
                     item_count += 1

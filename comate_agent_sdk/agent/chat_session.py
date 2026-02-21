@@ -187,14 +187,8 @@ class ChatSession:
                 exc_info=True,
             )
 
-        # Header 从持久化快照恢复后，禁止自动改写（尤其是 MCP header）。
+        # Header 从持久化快照恢复后，禁止自动改写 static header。
         session._agent._lock_header_from_snapshot = True
-
-        # MCP tools：resume 后标记 dirty，下一次 invoke_llm 前刷新
-        try:
-            session._agent.invalidate_mcp_tools(reason="session_resume")
-        except Exception:
-            pass
 
         return session
 

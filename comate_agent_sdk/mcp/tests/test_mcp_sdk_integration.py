@@ -2,7 +2,7 @@ import json
 
 from comate_agent_sdk import Agent, create_sdk_mcp_server, mcp_tool
 from comate_agent_sdk.agent import AgentConfig
-from comate_agent_sdk.llm.messages import Function, ToolCall, ToolMessage
+from comate_agent_sdk.llm.messages import Function, ToolCall, ToolMessage, UserMessage
 from comate_agent_sdk.llm.views import ChatInvokeCompletion
 
 
@@ -39,7 +39,7 @@ class _FakeChatModel:
         return ChatInvokeCompletion(content="done", tool_calls=[])
 
 
-def test_sdk_mcp_tools_loaded_and_injected_into_system_prompt() -> None:
+def test_sdk_mcp_tools_loaded_and_injected_into_session_state() -> None:
     @mcp_tool(name="add", description="Add two numbers")
     async def add(a: float, b: float) -> str:
         return f"Sum: {a + b}"
@@ -65,11 +65,15 @@ def test_sdk_mcp_tools_loaded_and_injected_into_system_prompt() -> None:
     # LLM 在第一次调用时应已看见 MCP tool definition
     assert "mcp__calc__add" in llm.seen_tool_names
 
-    # MCP tools 概览被注入到 system prompt（SystemMessage）
-    system_msg = agent.messages[0]
-    header = system_msg.text
-    assert "<mcp_tools>" in header
-    assert "mcp__calc__add" in header
+    # MCP tools 概览被注入到 session_state（UserMessage is_meta=True）
+    state_texts = [
+        m.text
+        for m in agent.messages
+        if isinstance(m, UserMessage) and bool(getattr(m, "is_meta", False))
+    ]
+    merged = "\n".join(state_texts)
+    assert "<mcp_tools>" in merged
+    assert "mcp__calc__add" in merged
 
 
 def test_sdk_mcp_tool_call_executes_and_writes_tool_message() -> None:

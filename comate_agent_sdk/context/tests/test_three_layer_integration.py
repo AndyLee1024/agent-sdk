@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from types import SimpleNamespace
 
 from comate_agent_sdk.agent.history import destroy_ephemeral_messages
 from comate_agent_sdk.context.compaction import SelectiveCompactionPolicy
@@ -17,10 +18,12 @@ class _FakeTool:
 
 class _FakeAgent:
     def __init__(self, context: ContextIR) -> None:
-        self.offload_policy = None
-        self.offload_token_threshold = 1000
-        self.tools = [_FakeTool("Read", 1)]
-        self.ephemeral_keep_recent = None
+        self.options = SimpleNamespace(
+            offload_policy=None,
+            offload_token_threshold=1000,
+            tools=[_FakeTool("Read", 1)],
+            ephemeral_keep_recent=None,
+        )
         self._context = context
         self._context_fs = None
 

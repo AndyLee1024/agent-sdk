@@ -3,7 +3,7 @@
 结构化管理 Agent 上下文，替代扁平的 _messages: list[BaseMessage]。
 
 核心职责：
-1. 结构化管理 — 消息按语义类型分段（header / conversation）
+1. 结构化管理 — 消息按语义类型分段（static header / session state / conversation）
 2. 选择性压缩 — 按类型优先级逐步压缩
 3. system-reminder — 动态注入，不污染核心上下文
 4. 上下文预算 — 每类型可设 token 限额
@@ -19,7 +19,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Generic, Iterator, TypeVar
 
 from comate_agent_sdk.context.budget import BudgetConfig, BudgetStatus, TokenCounter
-from comate_agent_sdk.context.header.order import HEADER_ITEM_ORDER
+from comate_agent_sdk.context.header.order import (
+    SESSION_STATE_ITEM_ORDER,
+    STATIC_HEADER_ITEM_ORDER,
+)
 from comate_agent_sdk.context.header.snapshot import (
     export_header_snapshot as export_header_snapshot_data,
     import_header_snapshot as import_header_snapshot_data,
@@ -113,7 +116,8 @@ class ContextIR:
     将 Agent 的上下文从扁平 list[BaseMessage] 提升为结构化 IR。
 
     Segments:
-        header: system_prompt + agent_loop + tool_strategy + subagent_strategy + skill_strategy
+        header: 可持久化静态策略（system_prompt + agent_loop + tool_strategy + subagent_strategy + skill_strategy）
+        session_state: 会话态信息（system_env + git_env + mcp_tool + output_style）
         conversation: 所有对话消息
         memory: 独立字段，lowering 时作为 UserMessage(is_meta=True) 注入
 
@@ -127,6 +131,9 @@ class ContextIR:
 
     header: Segment = field(
         default_factory=lambda: Segment(name=SegmentName.HEADER)
+    )
+    session_state: Segment = field(
+        default_factory=lambda: Segment(name=SegmentName.SESSION_STATE)
     )
     conversation: Segment = field(
         default_factory=lambda: Segment(name=SegmentName.CONVERSATION)
@@ -147,41 +154,49 @@ class ContextIR:
     )
     _flushed_hook_injection_texts: list[str] = field(default_factory=list, repr=False)
 
-    # ===== Header 操作（幂等，重复调用会覆盖） =====
+    # ===== Header / SessionState 操作（幂等，重复调用会覆盖） =====
 
-    def _ensure_header_item_position(self, item: ContextItem) -> None:
-        """确保 header item 在预期顺序中的位置（用于幂等 setter 的插入顺序稳定）"""
+    def _ensure_segment_item_position(
+        self,
+        *,
+        segment: Segment,
+        item: ContextItem,
+        order_map: dict[ItemType, int],
+    ) -> None:
+        """确保指定 segment item 在预期顺序中的位置（用于幂等 setter 的插入顺序稳定）。"""
         try:
-            current_idx = self.header.items.index(item)
+            current_idx = segment.items.index(item)
         except ValueError:
             return
 
-        order = HEADER_ITEM_ORDER.get(item.item_type)
+        order = order_map.get(item.item_type)
         if order is None:
             return
 
-        item_ref = self.header.items.pop(current_idx)
+        item_ref = segment.items.pop(current_idx)
 
-        insert_idx = len(self.header.items)
-        for i, existing_item in enumerate(self.header.items):
-            existing_order = HEADER_ITEM_ORDER.get(existing_item.item_type)
+        insert_idx = len(segment.items)
+        for i, existing_item in enumerate(segment.items):
+            existing_order = order_map.get(existing_item.item_type)
             if existing_order is None:
                 continue
             if existing_order > order:
                 insert_idx = i
                 break
 
-        self.header.items.insert(insert_idx, item_ref)
+        segment.items.insert(insert_idx, item_ref)
 
-    def _set_header_item(
+    def _set_segment_item(
         self,
         item_type: ItemType,
         content: str,
         *,
+        segment: Segment,
+        order_map: dict[ItemType, int],
         cache: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """统一的 header item 设置方法（幂等覆盖）。
+        """统一的 segment item 设置方法（幂等覆盖）。
 
         Args:
             item_type: 要设置的 item 类型
@@ -189,7 +204,7 @@ class ContextIR:
             cache: 是否建议缓存
             metadata: 附加元数据
         """
-        existing = self.header.find_one_by_type(item_type)
+        existing = segment.find_one_by_type(item_type)
         token_count = self.token_counter.count(content)
 
         if existing:
@@ -198,7 +213,11 @@ class ContextIR:
             existing.cache_hint = cache
             if metadata is not None:
                 existing.metadata = metadata
-            self._ensure_header_item_position(existing)
+            self._ensure_segment_item_position(
+                segment=segment,
+                item=existing,
+                order_map=order_map,
+            )
             return
 
         item = ContextItem(
@@ -209,14 +228,52 @@ class ContextIR:
             cache_hint=cache,
             metadata=metadata or {},
         )
-        self.header.items.append(item)
-        self._ensure_header_item_position(item)
+        segment.items.append(item)
+        self._ensure_segment_item_position(
+            segment=segment,
+            item=item,
+            order_map=order_map,
+        )
         self.event_bus.emit(ContextEvent(
             event_type=EventType.ITEM_ADDED,
             item_type=item_type,
             item_id=item.id,
             detail=f"{item_type.value} set",
         ))
+
+    def _set_header_item(
+        self,
+        item_type: ItemType,
+        content: str,
+        *,
+        cache: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._set_segment_item(
+            segment=self.header,
+            order_map=STATIC_HEADER_ITEM_ORDER,
+            item_type=item_type,
+            content=content,
+            cache=cache,
+            metadata=metadata,
+        )
+
+    def _set_session_state_item(
+        self,
+        item_type: ItemType,
+        content: str,
+        *,
+        cache: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        self._set_segment_item(
+            segment=self.session_state,
+            order_map=SESSION_STATE_ITEM_ORDER,
+            item_type=item_type,
+            content=content,
+            cache=cache,
+            metadata=metadata,
+        )
 
     def set_system_prompt(self, prompt: str, cache: bool = True) -> None:
         """设置系统提示（幂等覆盖）
@@ -243,7 +300,7 @@ class ContextIR:
 
         Memory 不进入 header，而是作为独立字段存储。
         lowering 时会被注入为 UserMessage(is_meta=True, content="<instructions>...")，
-        位于 SystemMessage 之后、conversation items 之前。
+        位于 static SystemMessage 之后、session_state 之前。
 
         Args:
             content: MEMORY 内容（通常来自 CLAUDE.md / AGENTS.md 等仓库文件）
@@ -301,14 +358,14 @@ class ContextIR:
         """设置 MCP tools 概览（幂等覆盖）
 
         设计目标：
-        - 将 MCP tool 的概览注入到 header（lowered 后进入 SystemMessage）
+        - 将 MCP tool 的概览注入到 session_state（lowered 后进入 UserMessage(is_meta=True)）
         - 结构化信息保存在 ContextItem.metadata（不直接进入 prompt，避免 token 爆炸）
         """
-        self._set_header_item(ItemType.MCP_TOOL, overview_text, metadata=metadata)
+        self._set_session_state_item(ItemType.MCP_TOOL, overview_text, metadata=metadata)
 
     def remove_mcp_tools(self) -> None:
         """移除 MCP tools 概览。"""
-        removed = self.header.remove_by_type(ItemType.MCP_TOOL)
+        removed = self.session_state.remove_by_type(ItemType.MCP_TOOL)
         for item in removed:
             self.event_bus.emit(ContextEvent(
                 event_type=EventType.ITEM_REMOVED,
@@ -324,16 +381,20 @@ class ContextIR:
     def set_system_env(self, content: str) -> None:
         """设置系统环境信息（幂等覆盖）
 
-        插入位置：Header 段末尾（SKILL_STRATEGY 之后）
+        插入位置：SessionState 段。
         """
-        self._set_header_item(ItemType.SYSTEM_ENV, content)
+        self._set_session_state_item(ItemType.SYSTEM_ENV, content)
 
     def set_git_env(self, content: str) -> None:
         """设置 Git 状态信息（幂等覆盖）
 
-        插入位置：SYSTEM_ENV 之后（Header 段最末尾）
+        插入位置：SYSTEM_ENV 之后（SessionState 段）。
         """
-        self._set_header_item(ItemType.GIT_ENV, content)
+        self._set_session_state_item(ItemType.GIT_ENV, content)
+
+    def set_output_style(self, content: str) -> None:
+        """设置输出风格（会话态，幂等覆盖）。"""
+        self._set_session_state_item(ItemType.OUTPUT_STYLE, content)
 
     def remove_skill_strategy(self) -> None:
         """移除 Skill 策略提示"""
@@ -834,13 +895,18 @@ class ContextIR:
     def total_tokens(self) -> int:
         """当前总 token 数（估算值）"""
         memory_tokens = self._memory_item.token_count if self._memory_item else 0
-        return self.header.total_tokens + self.conversation.total_tokens + memory_tokens
+        return (
+            self.header.total_tokens
+            + self.session_state.total_tokens
+            + self.conversation.total_tokens
+            + memory_tokens
+        )
 
     def get_budget_status(self) -> BudgetStatus:
         """获取预算状态快照"""
         tokens_by_type: dict[ItemType, int] = {}
 
-        for segment in (self.header, self.conversation):
+        for segment in (self.header, self.session_state, self.conversation):
             for item in segment.items:
                 if item.destroyed:
                     continue
@@ -856,7 +922,7 @@ class ContextIR:
 
         return BudgetStatus(
             total_tokens=self.total_tokens,
-            header_tokens=self.header.total_tokens,
+            header_tokens=self.header.total_tokens + self.session_state.total_tokens,
             conversation_tokens=self.conversation.total_tokens + memory_tokens,
             tokens_by_type=tokens_by_type,
             total_limit=self.budget.total_limit,
@@ -912,7 +978,7 @@ class ContextIR:
         return export_header_snapshot_data(
             header_items=self.header.items,
             memory_item=self._memory_item,
-            header_item_order=HEADER_ITEM_ORDER,
+            header_item_order=STATIC_HEADER_ITEM_ORDER,
         )
 
     def import_header_snapshot(self, snapshot: dict[str, Any]) -> None:
@@ -920,14 +986,16 @@ class ContextIR:
         restored_header, restored_memory_item = import_header_snapshot_data(
             snapshot=snapshot,
             token_counter=self.token_counter,
-            header_item_order=HEADER_ITEM_ORDER,
+            header_item_order=STATIC_HEADER_ITEM_ORDER,
         )
         self.header.items = restored_header
+        self.session_state.items = []
         self._memory_item = restored_memory_item
 
     def clear(self) -> None:
         """清空所有上下文"""
         self.header.items.clear()
+        self.session_state.items.clear()
         self.conversation.items.clear()
         self._pending_skill_items.clear()
         self._pending_hook_injections.clear()

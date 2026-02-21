@@ -20,16 +20,19 @@ if TYPE_CHECKING:
 class ItemType(Enum):
     """上下文条目的语义类型"""
 
-    # Header 段（lowered 为 SystemMessage 的一部分）
+    # Static Header 段（可持久化，lowered 为 SystemMessage）
     SYSTEM_PROMPT = "system_prompt"
     AGENT_LOOP = "agent_loop"
     MEMORY = "memory"
     TOOL_STRATEGY = "tool_strategy"
-    MCP_TOOL = "mcp_tool"
     SUBAGENT_STRATEGY = "subagent_strategy"
     SKILL_STRATEGY = "skill_strategy"
+
+    # Session State 段（会话易失，不持久化；lowered 为 UserMessage(is_meta=True)）
+    MCP_TOOL = "mcp_tool"
     SYSTEM_ENV = "system_env"
     GIT_ENV = "git_env"
+    OUTPUT_STYLE = "output_style"
 
     # Conversation 段
     USER_MESSAGE = "user_message"
@@ -64,6 +67,7 @@ DEFAULT_PRIORITIES: dict[ItemType, int] = {
     ItemType.SUBAGENT_STRATEGY: 95,
     ItemType.SYSTEM_ENV: 100,            # 永不压缩
     ItemType.GIT_ENV: 100,               # 永不压缩
+    ItemType.OUTPUT_STYLE: 100,          # 永不压缩
     ItemType.MEMORY: 100,                # 永不压缩
     ItemType.AGENT_LOOP: 100,            # 永不压缩
     ItemType.SYSTEM_PROMPT: 100,         # 永不压缩
@@ -122,6 +126,7 @@ class ContextItem:
 class SegmentName(Enum):
     """段落名称"""
     HEADER = "header"
+    SESSION_STATE = "session_state"
     CONVERSATION = "conversation"
 
 

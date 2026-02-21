@@ -4,6 +4,7 @@ from pathlib import Path
 from comate_agent_sdk import Agent
 from comate_agent_sdk.agent import AgentConfig
 from comate_agent_sdk.context import EnvOptions
+from comate_agent_sdk.llm.messages import UserMessage
 
 
 class _FakeChatModel:
@@ -59,10 +60,14 @@ def test_agent_injects_env_snapshot_from_project_root(tmp_path: Path) -> None:
     )
     agent = template.create_runtime()
 
-    system_msg = agent.messages[0]
-    header = system_msg.text
+    session_state_texts = [
+        m.text
+        for m in agent.messages
+        if isinstance(m, UserMessage) and bool(getattr(m, "is_meta", False))
+    ]
+    merged = "\n".join(session_state_texts)
 
-    assert "<system_env>" in header
-    assert "<git_env>" in header
-    assert str(repo.resolve()) in header
-    assert header.index("<system_env>") < header.index("<git_env>")
+    assert "<system_env>" in merged
+    assert "<git_env>" in merged
+    assert str(repo.resolve()) in merged
+    assert merged.index("<system_env>") < merged.index("<git_env>")

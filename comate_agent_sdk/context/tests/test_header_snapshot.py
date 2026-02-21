@@ -11,6 +11,7 @@ def test_header_snapshot_roundtrip_restores_header_and_memory() -> None:
     source.set_system_prompt("SNAPSHOT_PROMPT", cache=False)
     source.set_tool_strategy("SNAPSHOT_TOOL_STRATEGY")
     source.set_system_env("<system_env>SNAPSHOT_ENV</system_env>")
+    source.set_output_style("<output_style>SNAPSHOT_STYLE</output_style>")
     source.set_memory("SNAPSHOT_MEMORY", cache=False)
 
     snapshot = source.export_header_snapshot()
@@ -20,13 +21,14 @@ def test_header_snapshot_roundtrip_restores_header_and_memory() -> None:
 
     prompt_item = restored.header.find_one_by_type(ItemType.SYSTEM_PROMPT)
     tool_item = restored.header.find_one_by_type(ItemType.TOOL_STRATEGY)
-    env_item = restored.header.find_one_by_type(ItemType.SYSTEM_ENV)
+    env_item = restored.session_state.find_one_by_type(ItemType.SYSTEM_ENV)
+    style_item = restored.session_state.find_one_by_type(ItemType.OUTPUT_STYLE)
     assert prompt_item is not None
     assert tool_item is not None
-    assert env_item is not None
+    assert env_item is None
+    assert style_item is None
     assert prompt_item.content_text == "SNAPSHOT_PROMPT"
     assert tool_item.content_text == "SNAPSHOT_TOOL_STRATEGY"
-    assert env_item.content_text == "<system_env>SNAPSHOT_ENV</system_env>"
     assert restored.memory_item is not None
     assert "SNAPSHOT_MEMORY" in restored.memory_item.content_text
 

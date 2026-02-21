@@ -53,6 +53,17 @@ def clear_history(agent: "AgentRuntime") -> None:
     if agent.options.memory:
         agent._setup_memory()
 
+    # 重建 session_state（env/output_style/mcp）
+    from comate_agent_sdk.agent.init import (
+        _setup_env_info,
+        _setup_mcp_session_state,
+        _setup_output_style,
+    )
+
+    _setup_env_info(agent)
+    _setup_output_style(agent)
+    _setup_mcp_session_state(agent)
+
 
 def load_history(agent: "AgentRuntime", messages: list[BaseMessage]) -> None:
     """加载 message history（保留 header），用于恢复对话。"""

@@ -74,10 +74,7 @@ class RuntimeMcpMixin:
 
             self._apply_mcp_tools_to_agent(mcp_tools)
 
-            lock_header = bool(getattr(self, "_lock_header_from_snapshot", False))
-            if lock_header:
-                logger.info("MCP header auto-refresh disabled by snapshot lock")
-            elif mcp_tools:
+            if mcp_tools:
                 overview = manager.build_overview_text()
                 meta = manager.build_metadata()
                 try:

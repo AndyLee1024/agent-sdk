@@ -17,6 +17,12 @@ from comate_agent_sdk.tools.decorator import Tool
 
 logger = logging.getLogger("comate_agent_sdk.agent")
 
+DEFAULT_OUTPUT_STYLE = """<output_style>
+- Respond in clear, practical Markdown.
+- Keep answers concise by default, and expand only when needed.
+- State assumptions explicitly when information is uncertain.
+</output_style>"""
+
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.core import AgentRuntime, AgentTemplate
     from comate_agent_sdk.llm.base import BaseChatModel
@@ -48,6 +54,20 @@ def _setup_env_info(runtime: "AgentRuntime") -> None:
             logger.info(f"已注入 GIT_ENV（working_dir={working_dir}）")
         else:
             logger.info(f"未注入 GIT_ENV：working_dir={working_dir} 不在 git 仓库中或无法读取")
+
+
+def _setup_output_style(runtime: "AgentRuntime") -> None:
+    """注入会话级输出风格（幂等覆盖）。"""
+    runtime._context.set_output_style(DEFAULT_OUTPUT_STYLE)
+
+
+def _setup_mcp_session_state(runtime: "AgentRuntime") -> None:
+    """标记 MCP session_state 需在真实请求循环中构建。"""
+    if not bool(runtime.options.mcp_enabled):
+        runtime._context.remove_mcp_tools()
+        return
+
+    runtime.invalidate_mcp_tools(reason="runtime_init")
 
 
 def build_template(template: "AgentTemplate") -> None:
@@ -405,8 +425,9 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
     if runtime.header_snapshot is None and runtime.options.memory:
         runtime._setup_memory()
 
-    if runtime.header_snapshot is None:
-        _setup_env_info(runtime)
+    _setup_env_info(runtime)
+    _setup_output_style(runtime)
+    _setup_mcp_session_state(runtime)
 
     from comate_agent_sdk.agent.hooks.engine import HookEngine
     from comate_agent_sdk.agent.hooks.loader import load_hook_config_from_sources
