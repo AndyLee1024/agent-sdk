@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -11,20 +12,19 @@ from comate_agent_sdk.context import ContextIR
 from comate_agent_sdk.context.fs import ContextFileSystem
 from comate_agent_sdk.context.usage_tracker import ContextUsageTracker
 from comate_agent_sdk.llm.base import BaseChatModel
+from comate_agent_sdk.llm.messages import ContentPartImageParam, ContentPartTextParam, ToolCall, ToolMessage
 from comate_agent_sdk.tokens import TokenCost
 from comate_agent_sdk.tools.decorator import Tool
 
 from .runtime_context import RuntimeContextMixin
 from .runtime_hooks import RuntimeHooksMixin
 from .runtime_mcp import RuntimeMcpMixin
-from .runtime_setup_bridge import RuntimeSetupBridgeMixin
 
 
 @dataclass
 class AgentRuntime(
     RuntimeContextMixin,
     RuntimeHooksMixin,
-    RuntimeSetupBridgeMixin,
     RuntimeMcpMixin,
 ):
     """运行态 Agent（会话/任务独占，可变）。"""
@@ -74,9 +74,93 @@ class AgentRuntime(
 
         init_runtime_from_template(self)
 
+    # ── 懒加载委托方法（解决循环导入）────────────────────────────
+
+    def _destroy_ephemeral_messages(self) -> None:
+        from comate_agent_sdk.agent.history import destroy_ephemeral_messages
+
+        destroy_ephemeral_messages(self)
+
+    async def _execute_tool_call(self, tool_call: ToolCall) -> ToolMessage:
+        from comate_agent_sdk.agent.tool_exec import execute_tool_call
+
+        return await execute_tool_call(self, tool_call)
+
+    def _extract_screenshot(self, tool_message: ToolMessage) -> str | None:
+        from comate_agent_sdk.agent.tool_exec import extract_screenshot
+
+        return extract_screenshot(tool_message)
+
+    async def _invoke_llm(self) -> "ChatInvokeCompletion":
+        from comate_agent_sdk.agent.llm import invoke_llm
+
+        return await invoke_llm(self)
+
+    async def _generate_max_iterations_summary(self) -> str:
+        from comate_agent_sdk.agent.runner_engine import generate_max_iterations_summary
+
+        return await generate_max_iterations_summary(self)
+
+    async def _check_and_compact(self, response: "ChatInvokeCompletion") -> bool:
+        from comate_agent_sdk.agent.runner_engine import check_and_compact
+
+        compacted, _, _ = await check_and_compact(self, response)
+        return compacted
+
+    async def query(self, message: str) -> str:
+        from comate_agent_sdk.agent.runner_engine import run_query
+
+        return await run_query(self, message)
+
+    async def query_stream(
+        self,
+        message: str | list[ContentPartTextParam | ContentPartImageParam],
+    ) -> AsyncIterator["AgentEvent"]:
+        from comate_agent_sdk.agent.runner_engine import run_query_stream
+
+        async for event in run_query_stream(self, message):
+            yield event
+
+    def _setup_tool_strategy(self) -> None:
+        from comate_agent_sdk.agent.setup import setup_tool_strategy
+
+        setup_tool_strategy(self)
+
+    def _setup_agent_loop(self) -> None:
+        from comate_agent_sdk.agent.setup import setup_agent_loop
+
+        setup_agent_loop(self)
+
+    def _setup_subagents(self) -> None:
+        from comate_agent_sdk.agent.setup import setup_subagents
+
+        setup_subagents(self)
+
+    def _setup_memory(self) -> None:
+        from comate_agent_sdk.agent.setup import setup_memory
+
+        setup_memory(self)
+
+    def _setup_skills(self) -> None:
+        from comate_agent_sdk.agent.setup import setup_skills
+
+        setup_skills(self)
+
+    async def _execute_skill_call(self, tool_call: ToolCall) -> ToolMessage:
+        from comate_agent_sdk.agent.setup import execute_skill_call
+
+        return await execute_skill_call(self, tool_call)
+
+    def _rebuild_skill_tool(self) -> None:
+        from comate_agent_sdk.agent.setup import rebuild_skill_tool
+
+        rebuild_skill_tool(self)
+
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.core.template import AgentTemplate
+    from comate_agent_sdk.agent.events import AgentEvent
     from comate_agent_sdk.agent.interrupt import SessionRunController
+    from comate_agent_sdk.llm.views import ChatInvokeCompletion
