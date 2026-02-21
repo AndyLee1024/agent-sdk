@@ -43,9 +43,9 @@ ExplorerAgent = AgentDefinition(
     prompt=PROMPT,                     # 系统提示
     tools=["Read","Grep","Bash", "Glob", "LS"],                        # None=继承父agent全部工具, ["Read","Grep"]=指定工具
     skills=None,                       # None=继承父agent全部skills, ["skill1"]=指定skills
-    model="haiku",                        # None=继承, "sonnet"/"opus"/"haiku"
-    level="LOW",                        # None=继承, "LOW"/"MID"/"HIGH"
-    max_iterations=80,                 # 最大迭代次数
+    model="sonnet",                        # None=继承, "sonnet"/"opus"/"haiku"
+    level="MID",                        # None=继承, "LOW"/"MID"/"HIGH"
+    max_iterations=100,                 # 最大迭代次数
     timeout=None,                      # 超时（秒），None=不限
     source="builtin",                  # 固定为 "builtin"，不要修改
 )

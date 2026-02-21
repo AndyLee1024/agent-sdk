@@ -113,6 +113,19 @@ class AnthropicMessageSerializer:
         )
 
     @staticmethod
+    def _is_session_state_user_message(message: UserMessage) -> bool:
+        """识别 ContextIR lowering 生成的 session_state 消息。
+
+        约定：session_state 通过 UserMessage(is_meta=True) 注入，内容包含以下标签之一。
+        """
+        if not bool(getattr(message, "is_meta", False)):
+            return False
+
+        text = message.text or ""
+        markers = ("<system_env>", "<git_env>", "<mcp_tools>", "<output_style>")
+        return any(marker in text for marker in markers)
+
+    @staticmethod
     def _serialize_content_to_str(
         content: str | list[ContentPartTextParam], use_cache: bool = False
     ) -> list[TextBlockParam] | str:
@@ -289,8 +302,9 @@ class AnthropicMessageSerializer:
         should be handled separately as the system parameter in the API call.
         """
         if isinstance(message, UserMessage):
+            use_cache = bool(message.cache) or AnthropicMessageSerializer._is_session_state_user_message(message)
             content = AnthropicMessageSerializer._serialize_content(
-                message.content, use_cache=message.cache
+                message.content, use_cache=use_cache
             )
             return MessageParam(role="user", content=content)
 
@@ -412,8 +426,9 @@ class AnthropicMessageSerializer:
     ) -> list[NonSystemMessage]:
         """保留最后 2 个 cache=True 的消息，其余全部置 False。
 
-        Anthropic 允许最多 4 个 cache breakpoint（tools=1, system=1, messages=2），
-        messages 层保留 2 个以充分利用预算。
+        Anthropic 允许最多 4 个 cache breakpoint。
+        当前策略中 system 不再使用 cache_control，因此 messages 层默认保留 2 个
+        显式 cache=True 断点（session_state 断点独立按规则注入）。
 
         Note: This method mutates messages in place. Caller must pass pre-copied data
         (serialize_messages handles this via model_copy).
@@ -481,9 +496,10 @@ class AnthropicMessageSerializer:
         # Serialize system message
         serialized_system_message: list[TextBlockParam] | str | None = None
         if system_message:
+            # system prompt 不使用 cache_control（由 session_state 承担 ephemeral cache 断点）
             serialized_system_message = (
                 AnthropicMessageSerializer._serialize_content_to_str(
-                    system_message.content, use_cache=system_message.cache
+                    system_message.content, use_cache=False
                 )
             )
 

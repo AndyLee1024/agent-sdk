@@ -43,7 +43,7 @@ def _format_hints_footer(hints: list[dict[str, Any]]) -> str:
     if not hints:
         return ""
 
-    lines = ["<system-reminder>", "Recommended next step (token-efficient):"]
+    lines = ["<system-reminder>", "Recommended next step:"]
     for hint in hints[:3]:
         action = str(hint.get("action", "")).strip()
         args = hint.get("args", {})

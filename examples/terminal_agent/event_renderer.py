@@ -446,7 +446,12 @@ class EventRenderer:
                 task_title = subagent_name
             tool_count = len(state.nested_tools)
             tool_count_suffix = f" · +{tool_count} tool uses" if tool_count > 0 else ""
-            base = f"{task_title} · {elapsed}{tool_count_suffix}"
+            tokens_suffix = (
+                f" · {_format_tokens(state.progress_tokens)}"
+                if state.progress_tokens > 0
+                else ""
+            )
+            base = f"{task_title} · {elapsed}{tool_count_suffix}{tokens_suffix}"
         else:
             display_name = "Update" if state.tool_name in ("Edit", "MultiEdit") else state.tool_name
             summary = state.args_summary
