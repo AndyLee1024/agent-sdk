@@ -454,6 +454,14 @@ async def run_query_stream(
     usage_observer_id = agent._token_cost.subscribe_usage(_on_usage_entry)
 
     try:
+        mode_snapshot = agent.get_mode()
+        agent._active_mode_snapshot = mode_snapshot
+        agent._context.set_plan_mode(mode_snapshot == "plan")
+        if mode_snapshot == "plan":
+            plan_prompt = str(agent.options.plan_mode_prompt_template or "").strip()
+            if plan_prompt:
+                agent.add_hidden_user_message(plan_prompt)
+
         await _fire_session_start_if_needed(agent)
         agent.reset_stop_hook_state()
         async for hidden_event in drain_hub.drain_hidden_events():
@@ -634,4 +642,6 @@ async def run_query_stream(
                 yield compaction_meta_event
 
     finally:
+        agent._active_mode_snapshot = None
+        agent._context.set_plan_mode(agent.get_mode() == "plan")
         agent._token_cost.unsubscribe_usage(usage_observer_id)

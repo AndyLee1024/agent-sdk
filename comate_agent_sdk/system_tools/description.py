@@ -152,4 +152,19 @@ Hard rule:
 - AskUserQuestion MUST be called alone. If you call AskUserQuestion in a response, DO NOT call any other tools in that same response.
 - The tool result means "questions have been asked / waiting for user input", NOT the user's answers. The user's answers will arrive as the next normal user message.
 """
+
+
+# -----------------------------
+# Exit Plan Mode
+# -----------------------------
+
+EXIT_PLAN_MODE_USAGE_RULES = """Use this tool when you are in Plan Mode and your plan artifact is ready for user approval.
+
+Requirements:
+- Provide complete markdown plan content in plan_markdown.
+- Provide a concise summary for approval UI.
+- Optionally provide execution_prompt for immediate act-mode execution after approval.
+
+This tool does NOT execute the plan. It only writes plan artifact and requests approval.
+"""
  

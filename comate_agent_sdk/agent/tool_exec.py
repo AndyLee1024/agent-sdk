@@ -364,6 +364,20 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
     from comate_agent_sdk.tools.system_context import bind_system_tool_context
 
     project_root = (agent.options.project_root or Path.cwd()).resolve()
+    raw_mode_snapshot = getattr(agent, "_active_mode_snapshot", None)
+    if raw_mode_snapshot is None:
+        get_mode = getattr(agent, "get_mode", None)
+        if callable(get_mode):
+            try:
+                raw_mode_snapshot = get_mode()
+            except Exception:
+                raw_mode_snapshot = "act"
+        else:
+            raw_mode_snapshot = "act"
+    mode_snapshot = str(raw_mode_snapshot).strip().lower()
+    extra_write_roots: tuple[Path, ...] = ()
+    if mode_snapshot == "plan":
+        extra_write_roots = ((Path.home() / ".agent" / "plans").expanduser().resolve(),)
     if agent.options.offload_root_path:
         session_root = Path(agent.options.offload_root_path).expanduser().resolve().parent
     else:
@@ -380,6 +394,7 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
         token_cost=agent._token_cost,
         llm_levels=agent.options.llm_levels,  # type: ignore[arg-type]
         agent_context=agent._context,
+        extra_write_roots=extra_write_roots,
     ):
         args: dict[str, Any] = _safe_parse_tool_args(tool_call.function.arguments)
 
@@ -407,6 +422,27 @@ async def execute_tool_call(agent: "AgentRuntime", tool_call: ToolCall) -> ToolM
 
             # Schema-aware coerce: 修复非原生 OpenAI 模型返回的字符串化参数
             args = _coerce_tool_arguments(args, tool.definition.parameters)
+
+            # Mode/permissions gate (runtime-level hard constraint)
+            from comate_agent_sdk.agent.mode_policy import evaluate_tool_permission
+
+            allowed, deny_reason = evaluate_tool_permission(
+                agent,
+                tool_name=str(tool_name),
+                args=args,
+            )
+            if not allowed:
+                denied_text = deny_reason or "Tool use denied by runtime mode policy."
+                if Laminar is not None:
+                    Laminar.set_span_output({"error": denied_text})
+                tool_message = ToolMessage(
+                    tool_call_id=tool_call.id,
+                    tool_name=tool_name,
+                    content=denied_text,
+                    is_error=True,
+                )
+                await _fire_post_tool_hooks(tool_message)
+                return tool_message
 
             pre_outcome = await agent.run_hook_event(
                 "PreToolUse",

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from comate_agent_sdk.agent.events import (
+    PlanApprovalRequiredEvent,
     PreCompactEvent,
     SessionInitEvent,
     StopEvent,
@@ -810,10 +811,34 @@ class EventRenderer:
                 self._rebuild_loading_line()
                 if reason == "waiting_for_input":
                     return (True, None)
+                if reason == "waiting_for_plan_approval":
+                    return (False, None)
                 if reason == "interrupted":
                     self._history.append(
                         HistoryEntry(entry_type="system", text="当前任务已中断。")
                     )
+            case PlanApprovalRequiredEvent(plan_path=plan_path, summary=summary, execution_prompt=_):
+                # 在 scrollback 渲染计划内容，让用户审阅后再决策
+                try:
+                    plan_content = Path(plan_path).read_text(encoding="utf-8")
+                    self._history.append(
+                        HistoryEntry(
+                            entry_type="system",
+                            text="─── 计划内容 ─── 请审阅后批准或拒绝 ───",
+                        )
+                    )
+                    self._history.append(
+                        HistoryEntry(entry_type="assistant", text=plan_content)
+                    )
+                except Exception:
+                    logger.warning("ExitPlanMode: 无法读取计划文件 %s", plan_path)
+
+                text = f"计划待审批: {plan_path}"
+                if summary:
+                    text = f"{text} | {summary}"
+                self._history.append(
+                    HistoryEntry(entry_type="system", text=text)
+                )
             case _:
                 logger.debug("Unhandled event type: %s", type(event).__name__)
 

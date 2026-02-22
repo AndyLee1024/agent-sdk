@@ -14,6 +14,7 @@ def test_collect_due_reminders_empty_state() -> None:
 def test_plan_mode_forced_reminder() -> None:
     engine = ReminderEngine()
     engine.set_plan_mode(True)
+    engine.set_plan_mode_reminder_template("plan reminder")
     reminders = engine.collect_due_reminders(turn=1)
     assert any(r.rule_id == "plan_mode_forced" for r in reminders)
 

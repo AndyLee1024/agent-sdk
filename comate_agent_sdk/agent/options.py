@@ -12,6 +12,7 @@ from comate_agent_sdk.context.env import EnvOptions
 from comate_agent_sdk.context.offload import OffloadPolicy
 from comate_agent_sdk.llm.base import BaseChatModel, ToolChoice
 from comate_agent_sdk.tools.decorator import Tool
+from comate_agent_sdk.agent.prompts import PLAN_MODE_PROMPT,PLAN_MODE_REMINDER
 
 
 def _freeze_value(value: Any) -> Any:
@@ -92,6 +93,10 @@ class AgentConfig:
     llm_levels: Mapping[LLMLevel, BaseChatModel] | None = None
     session_id: str | None = None
     role: str | None = None
+    plan_mode_prompt_template: str | None = None
+    plan_mode_reminder_template: str | None = None
+    permission_rules_allow: tuple[str, ...] | None = None
+    permission_rules_deny: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tools", _freeze_value(self.tools))
@@ -101,6 +106,8 @@ class AgentConfig:
         object.__setattr__(self, "skills", _freeze_value(self.skills))
         object.__setattr__(self, "mcp_servers", _freeze_value(self.mcp_servers))
         object.__setattr__(self, "llm_levels", _freeze_value(self.llm_levels))
+        object.__setattr__(self, "permission_rules_allow", _freeze_value(self.permission_rules_allow))
+        object.__setattr__(self, "permission_rules_deny", _freeze_value(self.permission_rules_deny))
 
 
 @dataclass
@@ -168,6 +175,10 @@ class RuntimeAgentOptions:
     llm_levels: dict[LLMLevel, BaseChatModel] | None = None
     session_id: str | None = None
     role: str | None = None
+    plan_mode_prompt_template: str | None = None
+    plan_mode_reminder_template: str | None = None
+    permission_rules_allow: list[str] | None = None
+    permission_rules_deny: list[str] | None = None
 
 
 def _thaw_mapping(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -185,7 +196,17 @@ def build_runtime_options(
     resolved_llm_levels: Mapping[LLMLevel, BaseChatModel] | None,
     session_id: str | None,
     offload_root_path: str | None,
+    resolved_settings: object | None = None,
 ) -> RuntimeAgentOptions:
+    settings_allow: list[str] | None = None
+    settings_deny: list[str] | None = None
+    settings_plan_prompt: str = PLAN_MODE_PROMPT
+    settings_plan_reminder: str = PLAN_MODE_REMINDER
+    if resolved_settings is not None:
+        settings_allow = list(getattr(resolved_settings, "permissions_allow", None) or []) or None
+        settings_deny = list(getattr(resolved_settings, "permissions_deny", None) or []) or None
+        settings_plan_reminder = getattr(resolved_settings, "plan_mode_reminder_template", None)
+
     return RuntimeAgentOptions(
         tools=list(config.tools) if config.tools is not None else None,
         system_prompt=config.system_prompt,
@@ -222,4 +243,24 @@ def build_runtime_options(
         llm_levels=dict(resolved_llm_levels) if resolved_llm_levels is not None else None,
         session_id=session_id,
         role=config.role,
+        plan_mode_prompt_template=(
+            config.plan_mode_prompt_template
+            if config.plan_mode_prompt_template is not None
+            else settings_plan_prompt
+        ),
+        plan_mode_reminder_template=(
+            config.plan_mode_reminder_template
+            if config.plan_mode_reminder_template is not None
+            else settings_plan_reminder
+        ),
+        permission_rules_allow=(
+            list(config.permission_rules_allow)
+            if config.permission_rules_allow is not None
+            else settings_allow
+        ),
+        permission_rules_deny=(
+            list(config.permission_rules_deny)
+            if config.permission_rules_deny is not None
+            else settings_deny
+        ),
     )

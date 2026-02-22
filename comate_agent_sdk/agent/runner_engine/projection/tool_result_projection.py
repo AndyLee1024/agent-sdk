@@ -62,3 +62,30 @@ def extract_questions(tool_result: ToolMessage) -> list[dict]:
         return []
 
     return [question for question in raw_questions if isinstance(question, dict)]
+
+
+def extract_plan_approval(tool_result: ToolMessage) -> dict[str, str] | None:
+    payload = tool_result.raw_envelope
+    if not is_tool_result_envelope(payload):
+        return None
+
+    data = payload.get("data", {})
+    if not isinstance(data, dict):
+        return None
+
+    status = str(data.get("status", "")).strip().lower()
+    if status != "waiting_for_plan_approval":
+        return None
+
+    plan_path = str(data.get("plan_path", "")).strip()
+    summary = str(data.get("summary", "")).strip()
+    execution_prompt = str(data.get("execution_prompt", "")).strip()
+    if not execution_prompt:
+        execution_prompt = "请基于已批准的计划开始执行。"
+    if not plan_path:
+        return None
+    return {
+        "plan_path": plan_path,
+        "summary": summary,
+        "execution_prompt": execution_prompt,
+    }

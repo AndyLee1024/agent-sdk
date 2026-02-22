@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -84,6 +85,32 @@ class TestLoadSettingsFile(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertIsNone(result.llm_levels)
         self.assertEqual(result.llm_levels_base_url, {"LOW": "https://api.example.com"})
+
+    def test_permissions_and_plan_templates_are_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "settings.json"
+            p.write_text(
+                json.dumps(
+                    {
+                        "permissions": {
+                            "allow": ["Edit(~/.agent/plans/**)"],
+                            "deny": ["Read(./.env)"],
+                        },
+                        "plan_mode_prompt_template": "prompt-slot",
+                        "plan_mode_reminder_template": "reminder-slot",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            result = load_settings_file(p)
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.permissions_allow, ["Edit(~/.agent/plans/**)"])
+        self.assertEqual(result.permissions_deny, ["Read(./.env)"])
+        self.assertEqual(result.plan_mode_prompt_template, "prompt-slot")
+        self.assertEqual(result.plan_mode_reminder_template, "reminder-slot")
 
 
 class TestResolveSettings(unittest.TestCase):
@@ -221,6 +248,38 @@ class TestResolveSettings(unittest.TestCase):
         # llm_levels 被 project 覆盖，base_url 回退到 user（project 的 base_url 为 None）
         self.assertEqual(result.llm_levels, {"LOW": "anthropic:claude-haiku-4-5"})
         self.assertEqual(result.llm_levels_base_url, {"LOW": "https://user.example.com"})
+
+    @patch("comate_agent_sdk.agent.settings.load_settings_file")
+    def test_permissions_and_plan_templates_follow_layer_precedence(self, mock_load) -> None:
+        user_cfg = SettingsConfig(
+            permissions_allow=["Edit(~/a/**)"],
+            permissions_deny=["Read(./.env)"],
+            plan_mode_prompt_template="user-plan-prompt",
+        )
+        local_cfg = SettingsConfig(
+            permissions_allow=["Edit(~/b/**)"],
+            plan_mode_reminder_template="local-reminder",
+        )
+
+        def _load(path):
+            path_str = str(path)
+            if path_str.endswith("settings.local.json"):
+                return local_cfg
+            if path == USER_SETTINGS_PATH:
+                return user_cfg
+            return None
+
+        mock_load.side_effect = _load
+
+        result = resolve_settings(
+            sources=("user", "project", "local"),
+            project_root=Path("/tmp/proj"),
+        )
+        assert result is not None
+        self.assertEqual(result.permissions_allow, ["Edit(~/b/**)"])
+        self.assertEqual(result.permissions_deny, ["Read(./.env)"])
+        self.assertEqual(result.plan_mode_prompt_template, "user-plan-prompt")
+        self.assertEqual(result.plan_mode_reminder_template, "local-reminder")
 
 
 class TestDiscoverAgentsMd(unittest.TestCase):

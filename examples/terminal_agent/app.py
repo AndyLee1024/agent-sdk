@@ -135,6 +135,7 @@ async def run(*, rpc_stdio: bool = False, session_id: str | None = None) -> None
     print_logo(console)
     await _preload_mcp(session, console)
     status_bar = StatusBar(session)
+    status_bar.set_mode(session.get_mode())
     if mode == "resume":
         await status_bar.refresh()
 

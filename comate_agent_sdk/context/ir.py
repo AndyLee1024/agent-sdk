@@ -774,6 +774,10 @@ class ContextIR:
         """设置 plan mode 提醒开关。"""
         self._reminder_engine.set_plan_mode(enabled)
 
+    def set_plan_mode_reminder_template(self, template: str) -> None:
+        """设置 plan mode reminder 模板（由上层配置注入）。"""
+        self._reminder_engine.set_plan_mode_reminder_template(template)
+
     def record_tool_event(
         self,
         *,

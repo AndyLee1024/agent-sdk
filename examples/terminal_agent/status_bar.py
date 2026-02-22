@@ -25,6 +25,7 @@ class StatusBar:
     def __init__(self, session: ChatSession):
         self._session = session
         self._model_name: str = self._resolve_model_name(session)
+        self._mode: str = "act"
         self._git_branch: str = self._resolve_git_branch()
         self._context_used_pct: float = 0.0
         self._context_left_pct: float = 100.0
@@ -46,6 +47,14 @@ class StatusBar:
     def set_session(self, session: ChatSession) -> None:
         self._session = session
         self._model_name = self._resolve_model_name(session)
+        try:
+            self._mode = str(session.get_mode()).strip().lower() or "act"
+        except Exception:
+            self._mode = "act"
+
+    def set_mode(self, mode: str) -> None:
+        normalized = str(mode).strip().lower()
+        self._mode = normalized or "act"
 
     @staticmethod
     def _resolve_git_branch() -> str:
@@ -119,6 +128,11 @@ class StatusBar:
         except Exception:
             return
 
+        try:
+            self._mode = str(self._session.get_mode()).strip().lower() or "act"
+        except Exception:
+            pass
+
         normalized = max(0.0, min(utilization, 100.0))
         self._context_used_pct = normalized
         self._context_left_pct = max(0.0, 100.0 - normalized)
@@ -156,14 +170,15 @@ class StatusBar:
         return f"{self._context_left_pct:.0f}% context left"
 
     def _status_text_for_width(self, width: int) -> str:
+        mode_text = f"[{self._mode}]"
         branch_text = f"~{self._git_branch}"
         context_text = self.context_left_text()
-        full_text = f"{self._model_name} | {branch_text} / {context_text}"
+        full_text = f"{mode_text} {self._model_name} | {branch_text} / {context_text}"
         budget = max(len(context_text), width)
         if len(full_text) <= budget:
             return full_text
 
-        prefix = f"{self._model_name} | {branch_text} / "
+        prefix = f"{mode_text} {self._model_name} | {branch_text} / "
         prefix_budget = max(0, budget - len(context_text))
         trimmed_prefix = self._truncate_text(prefix, prefix_budget)
         return f"{trimmed_prefix}{context_text}"

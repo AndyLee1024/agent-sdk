@@ -53,6 +53,7 @@ class ReminderState:
 
     turn: int = 0
     mode_plan: bool = False
+    plan_mode_reminder_template: str = ""
     last_task_turn: int = 0
     last_task_nudge_turn: int = 0
     last_todowrite_turn: int = 0
@@ -86,6 +87,9 @@ class ReminderEngine:
 
     def set_plan_mode(self, enabled: bool) -> None:
         self.state.mode_plan = bool(enabled)
+
+    def set_plan_mode_reminder_template(self, template: str) -> None:
+        self.state.plan_mode_reminder_template = str(template or "")
 
     @staticmethod
     def _normalize_active_todos(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -215,6 +219,7 @@ class ReminderEngine:
         rebuilt = ReminderState(
             turn=max(0, int(turn)),
             mode_plan=bool(current.mode_plan),
+            plan_mode_reminder_template=str(current.plan_mode_reminder_template or ""),
             last_task_turn=0,
             last_task_nudge_turn=0,
             last_todowrite_turn=max(0, int(current.last_todowrite_turn)),
@@ -280,17 +285,14 @@ class ReminderEngine:
         reminders: list[ReminderMessageEnvelope] = []
 
         if s.mode_plan:
+            content = str(s.plan_mode_reminder_template or "").strip()
+            if not content:
+                return reminders
             reminders.append(
                 ReminderMessageEnvelope(
                     rule_id="plan_mode_forced",
                     tool_name="PlanMode",
-                    content=(
-                        "You are in plan mode. Remember:\n"
-                        "- DO NOT write, edit, or execute code\n"
-                        "- DO NOT use Write, Edit, or Bash tools\n"
-                        "- Focus on exploration, design, and creating your plan\n"
-                        "- Use ExitPlanMode tool when your plan is ready for user approval"
-                    ),
+                    content=content,
                 )
             )
             return reminders

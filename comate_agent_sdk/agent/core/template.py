@@ -105,6 +105,7 @@ class AgentTemplate:
             resolved_llm_levels=self._resolved_llm_levels,
             session_id=session_id or self.config.session_id,
             offload_root_path=offload_root_path or self.config.offload_root_path,
+            resolved_settings=self._resolved_settings,
         )
         return AgentRuntime(
             llm=self.resolved_llm,
@@ -139,6 +140,7 @@ class AgentTemplate:
             resolved_llm_levels=self._resolved_llm_levels,
             session_id=session_id or self.config.session_id,
             offload_root_path=offload_root_path or self.config.offload_root_path,
+            resolved_settings=self._resolved_settings,
         )
         return AgentRuntime(
             llm=self.resolved_llm,

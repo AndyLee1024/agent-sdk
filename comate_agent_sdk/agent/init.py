@@ -427,6 +427,10 @@ def init_runtime_from_template(runtime: "AgentRuntime") -> None:
 
     _setup_env_info(runtime)
     _setup_output_style(runtime)
+    runtime._context.set_plan_mode_reminder_template(
+        runtime.options.plan_mode_reminder_template or ""
+    )
+    runtime.set_mode("act")
     _setup_mcp_session_state(runtime)
 
     from comate_agent_sdk.agent.hooks.engine import HookEngine

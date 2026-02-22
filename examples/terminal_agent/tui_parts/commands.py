@@ -20,6 +20,28 @@ logger = logging.getLogger(__name__)
 
 
 class CommandsMixin:
+    def _cycle_agent_mode(self) -> None:
+        if self._busy:
+            self._renderer.append_system_message(
+                "当前任务运行中，请在本轮结束后再切换模式。",
+            )
+            self._refresh_layers()
+            return
+        try:
+            mode = self._session.cycle_mode()
+            self._status_bar.set_mode(mode)
+            self._renderer.append_system_message(
+                f"Mode switched to {mode} (applies to next message)."
+            )
+            self._refresh_layers()
+        except Exception as exc:
+            logger.exception("Failed to cycle mode")
+            self._renderer.append_system_message(
+                f"Failed to switch mode: {exc}",
+                is_error=True,
+            )
+            self._refresh_layers()
+
     async def _execute_command(self, command: str) -> None:
         parsed = parse_slash_command_call(command)
         normalized = command.strip()
@@ -546,7 +568,6 @@ class CommandsMixin:
 
         if not result.confirmed:
             self._exit_selection_mode()
-            self._renderer.append_system_message("Model switch cancelled.")
             return
 
         # The callback handles the actual switch

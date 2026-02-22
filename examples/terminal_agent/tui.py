@@ -32,6 +32,7 @@ from prompt_toolkit.widgets import TextArea
 
 from prompt_toolkit.filters import Condition, has_completions, has_focus
 from comate_agent_sdk.agent import ChatSession
+from comate_agent_sdk.agent.events import PlanApprovalRequiredEvent
 
 from terminal_agent.animations import (
     DEFAULT_STATUS_PHRASES,
@@ -79,6 +80,10 @@ class TerminalAgentTUI(
     ) -> None:
         self._session = session
         self._status_bar = status_bar
+        try:
+            self._status_bar.set_mode(self._session.get_mode())
+        except Exception:
+            pass
         self._renderer = renderer
         self._rewind_store = RewindStore(session=self._session, project_root=Path.cwd())
 
@@ -94,6 +99,7 @@ class TerminalAgentTUI(
         self._busy = False
         self._waiting_for_input = False
         self._pending_questions: list[dict[str, Any]] | None = None
+        self._pending_plan_approval: dict[str, str] | None = None
         self._ui_mode = UIMode.NORMAL
         self._show_thinking = True  # Ctrl+T 开关，默认打开
         self._input_read_only = Condition(lambda: self._busy)
@@ -460,6 +466,7 @@ class TerminalAgentTUI(
 
         waiting_for_input = False
         questions: list[dict[str, Any]] | None = None
+        plan_approval: dict[str, str] | None = None
         stream_completed = False
 
         stream_task = asyncio.create_task(
@@ -468,7 +475,7 @@ class TerminalAgentTUI(
         )
         self._stream_task = stream_task
         try:
-            waiting_for_input, questions = await stream_task
+            waiting_for_input, questions, plan_approval = await stream_task
             stream_completed = True
         except asyncio.CancelledError:
             logger.debug("stream task cancelled")
@@ -499,13 +506,21 @@ class TerminalAgentTUI(
         if waiting_for_input:
             self._waiting_for_input = True
             self._pending_questions = questions
+            self._pending_plan_approval = None
             if questions:
                 self._enter_question_mode(questions)
             else:
                 self._renderer.append_system_message("请输入对上述问题的回答后回车提交。")
+        elif plan_approval is not None:
+            self._waiting_for_input = False
+            self._pending_questions = None
+            self._pending_plan_approval = plan_approval
+            self._exit_question_mode()
+            self._open_plan_approval_menu(plan_approval)
         else:
             self._waiting_for_input = False
             self._pending_questions = None
+            self._pending_plan_approval = None
             self._exit_question_mode()
 
         self._refresh_layers()
@@ -513,14 +528,21 @@ class TerminalAgentTUI(
     async def _consume_stream(
         self,
         text: str,
-    ) -> tuple[bool, list[dict[str, Any]] | None]:
+    ) -> tuple[bool, list[dict[str, Any]] | None, dict[str, str] | None]:
         waiting_for_input = False
         questions: list[dict[str, Any]] | None = None
+        plan_approval: dict[str, str] | None = None
 
         async for event in self._session.query_stream(text):
             self._maybe_cancel_tool_result_flash(event)
             # 将事件传递给动画控制器以控制动画生命周期
             await self._animation_controller.on_event(event)
+            if isinstance(event, PlanApprovalRequiredEvent):
+                plan_approval = {
+                    "plan_path": str(event.plan_path),
+                    "summary": str(event.summary),
+                    "execution_prompt": str(event.execution_prompt),
+                }
             is_waiting, new_questions = self._renderer.handle_event(event)
             self._maybe_flash_tool_result(event)
             if is_waiting:
@@ -531,7 +553,89 @@ class TerminalAgentTUI(
 
         self._renderer.finalize_turn()
         await self._animation_controller.shutdown()
-        return waiting_for_input, questions
+        return waiting_for_input, questions, plan_approval
+
+    def _open_plan_approval_menu(self, approval: dict[str, str]) -> None:
+        plan_path = str(approval.get("plan_path", "")).strip()
+        summary = str(approval.get("summary", "")).strip()
+        execution_prompt = str(approval.get("execution_prompt", "")).strip()
+
+        options = [
+            {
+                "value": "approve_execute",
+                "label": "Approve and execute",
+                "description": "Switch to Act Mode and execute immediately.",
+            },
+            {
+                "value": "reject_continue",
+                "label": "Reject and continue planning",
+                "description": "Stay in Plan Mode and continue refining the plan.",
+            },
+        ]
+
+        title = "Plan approval required"
+        if summary:
+            title = f"Plan approval: {summary}"
+
+        def on_confirm(value: str) -> None:
+            if value == "approve_execute":
+                self._schedule_background(
+                    self._approve_plan_and_execute(
+                        plan_path=plan_path,
+                        execution_prompt=execution_prompt,
+                    )
+                )
+                return
+            if value == "reject_continue":
+                self._reject_plan_and_continue(plan_path=plan_path)
+
+        def on_cancel() -> None:
+            self._reject_plan_and_continue(plan_path=plan_path)
+
+        ok = self._selection_ui.set_options(
+            title=title,
+            options=options,
+            on_confirm=on_confirm,
+            on_cancel=on_cancel,
+        )
+        if not ok:
+            self._renderer.append_system_message(
+                "No plan approval options available.",
+                is_error=True,
+            )
+            return
+        self._selection_ui.refresh()
+        self._ui_mode = UIMode.SELECTION
+        self._sync_focus_for_mode()
+        self._invalidate()
+
+    async def _approve_plan_and_execute(
+        self,
+        *,
+        plan_path: str,
+        execution_prompt: str,
+    ) -> None:
+        prompt = self._session.approve_plan()
+        if execution_prompt.strip():
+            prompt = execution_prompt.strip()
+        self._pending_plan_approval = None
+        try:
+            self._status_bar.set_mode(self._session.get_mode())
+        except Exception:
+            pass
+        self._renderer.append_system_message(f"Plan approved: {plan_path}")
+        self._refresh_layers()
+        await self._submit_user_message(prompt, display_text="Execute approved plan")
+
+    def _reject_plan_and_continue(self, *, plan_path: str) -> None:
+        self._session.reject_plan()
+        self._pending_plan_approval = None
+        try:
+            self._status_bar.set_mode(self._session.get_mode())
+        except Exception:
+            pass
+        self._renderer.append_system_message(f"Plan rejected: {plan_path}")
+        self._refresh_layers()
 
     def _maybe_cancel_tool_result_flash(self, event: object) -> None:
         if not self._tool_result_flash_active:

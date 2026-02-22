@@ -128,11 +128,35 @@ class StopEvent:
 	Final assistant text (if any) is emitted via `TextEvent`.
 	"""
 
-	reason: Literal['completed', 'max_iterations', 'waiting_for_input', 'interrupted']
+	reason: Literal['completed', 'max_iterations', 'waiting_for_input', 'waiting_for_plan_approval', 'interrupted']
 	"""Why the stream stopped."""
 
 	def __str__(self) -> str:
 		return f'🛑 Stop: {self.reason}'
+
+
+@dataclass
+class ModeChangedEvent:
+	"""Emitted when runtime mode changes."""
+
+	mode: Literal['act', 'plan']
+	applies_next_message: bool = True
+
+	def __str__(self) -> str:
+		suffix = " (next message)" if self.applies_next_message else ""
+		return f'🔁 Mode: {self.mode}{suffix}'
+
+
+@dataclass
+class PlanApprovalRequiredEvent:
+	"""Emitted when plan artifact is ready and waiting for user approval."""
+
+	plan_path: str
+	summary: str
+	execution_prompt: str
+
+	def __str__(self) -> str:
+		return f'📋 Plan approval required: {self.plan_path}'
 
 
 # === New events for BU-like UI ===

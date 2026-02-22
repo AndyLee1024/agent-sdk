@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 from comate_agent_sdk.agent.events import (
     AgentEvent,
+    PlanApprovalRequiredEvent,
     StepCompleteEvent,
     StepStartEvent,
     StopEvent,
@@ -24,7 +25,12 @@ from .state import RunningTaskState, TurnEngineState
 from .task_lifecycle import TaskLifecycleEmitter
 from .tool_messages import make_cancelled_tool_message
 from .txn_commit import ToolTxnCommitter
-from ..projection.tool_result_projection import extract_diff_metadata, extract_questions, extract_todos
+from ..projection.tool_result_projection import (
+    extract_diff_metadata,
+    extract_plan_approval,
+    extract_questions,
+    extract_todos,
+)
 
 if TYPE_CHECKING:
     from comate_agent_sdk.agent.core import AgentRuntime
@@ -395,6 +401,35 @@ async def execute_tool_calls(
                     yield hidden_event
                 yield StopEvent(reason="waiting_for_input")
                 engine_state.stop_reason = "waiting_for_input"
+                return
+
+        if str(tool_name) == "ExitPlanMode" and not tool_result.is_error:
+            plan_approval = extract_plan_approval(tool_result)
+            if plan_approval is not None:
+                agent.arm_plan_approval(
+                    plan_path=plan_approval["plan_path"],
+                    summary=plan_approval["summary"],
+                    execution_prompt=plan_approval["execution_prompt"],
+                )
+                if await committer.commit_if_needed(results_by_id):
+                    async for hidden_event in drain_hidden_events():
+                        yield hidden_event
+                async for usage_event in drain_usage_events():
+                    yield usage_event
+                yield PlanApprovalRequiredEvent(
+                    plan_path=plan_approval["plan_path"],
+                    summary=plan_approval["summary"],
+                    execution_prompt=plan_approval["execution_prompt"],
+                )
+                if await run_stop_hook("waiting_for_plan_approval"):
+                    async for hidden_event in drain_hidden_events():
+                        yield hidden_event
+                    idx += 1
+                    continue
+                async for hidden_event in drain_hidden_events():
+                    yield hidden_event
+                yield StopEvent(reason="waiting_for_plan_approval")
+                engine_state.stop_reason = "waiting_for_plan_approval"
                 return
 
         if is_interrupt_requested():

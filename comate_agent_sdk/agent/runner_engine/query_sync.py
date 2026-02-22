@@ -39,6 +39,8 @@ async def run_query(agent: "AgentRuntime", message: str) -> str:
             if isinstance(event, StopEvent):
                 if event.reason == "waiting_for_input":
                     return ask_user_result or ""
+                if event.reason == "waiting_for_plan_approval":
+                    return ""
                 if event.reason in {"completed", "max_iterations"}:
                     return terminal_text or ""
                 if event.reason == "interrupted":

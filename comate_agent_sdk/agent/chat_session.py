@@ -247,6 +247,42 @@ class ChatSession:
         """获取当前会话的上下文使用情况。"""
         return await self._agent.get_context_info()
 
+    def get_mode(self) -> str:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot get mode on a closed session")
+        return self._agent.get_mode()
+
+    def set_mode(self, mode: str) -> str:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot set mode on a closed session")
+        self._agent.set_mode(mode)
+        return self._agent.get_mode()
+
+    def cycle_mode(self) -> str:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot cycle mode on a closed session")
+        return self._agent.cycle_mode()
+
+    def has_pending_plan_approval(self) -> bool:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot read pending plan approval on a closed session")
+        return self._agent.has_pending_plan_approval()
+
+    def get_pending_plan_approval(self) -> dict[str, str] | None:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot read pending plan approval on a closed session")
+        return self._agent.pending_plan_approval()
+
+    def approve_plan(self) -> str:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot approve plan on a closed session")
+        return self._agent.approve_plan()
+
+    def reject_plan(self) -> None:
+        if self._closed:
+            raise ChatSessionClosedError("Cannot reject plan on a closed session")
+        self._agent.reject_plan()
+
     def _update_total_usage(self, new_entries: list) -> None:
         """把本 turn 的 usage entries 追加写入 total_usage.json。"""
         if not new_entries:

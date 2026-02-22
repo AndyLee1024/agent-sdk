@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import difflib
 import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -25,6 +27,7 @@ from comate_agent_sdk.system_tools.description import (
     ASK_USER_QUESTION_USAGE_RULES,
     BASH_USAGE_RULES,
     EDIT_USAGE_RULES,
+    EXIT_PLAN_MODE_USAGE_RULES,
     GLOB_USAGE_RULES,
     GREP_USAGE_RULES,
     LS_USAGE_RULES,
@@ -113,7 +116,12 @@ def _session_root_from_ctx(ctx: SystemToolContext) -> Path | None:
 def _allowed_roots(ctx: SystemToolContext) -> list[Path]:
     roots = [_project_root(ctx)]
     roots.append(_workspace_root(ctx))
+    roots.extend(list(ctx.extra_write_roots or ()))
     return roots
+
+
+def _extra_read_roots(ctx: SystemToolContext) -> tuple[Path, ...]:
+    return ctx.extra_read_roots or ()
 
 
 def _artifact_store(ctx: SystemToolContext) -> ArtifactStore:
@@ -207,6 +215,14 @@ async def _resolve_write_path(
     """
     workspace_root = _workspace_root(ctx)
     project_root = _project_root(ctx)
+    extra_roots = tuple(ctx.extra_write_roots or ())
+
+    for extra_root in extra_roots:
+        try:
+            extra_target = resolve_for_write(user_path=user_path, workspace_root=extra_root)
+            return extra_target
+        except PathGuardError:
+            continue
 
     try:
         workspace_target = resolve_for_write(user_path=user_path, workspace_root=workspace_root)
@@ -500,6 +516,18 @@ class WebFetchInput(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+class ExitPlanModeInput(BaseModel):
+    plan_markdown: str = Field(min_length=1, description="Full plan content in markdown.")
+    summary: str = Field(min_length=1, description="Short summary shown in approval UI.")
+    title: str | None = Field(default=None, description="Optional title used to build artifact filename slug.")
+    execution_prompt: str | None = Field(
+        default=None,
+        description="Optional prompt to auto-run in Act Mode after approval.",
+    )
+
+    model_config = {"extra": "forbid"}
+
+
 class QuestionOption(BaseModel):
     label: str = Field(max_length=50, description="Display text for this option (1-5 words)")
     description: str = Field(description="Explanation of this option")
@@ -752,6 +780,7 @@ async def Bash(
                 user_path=params.cwd,
                 project_root=_project_root(ctx),
                 workspace_root=_workspace_root(ctx),
+                extra_read_roots=_extra_read_roots(ctx),
             )
             if not await _exists(cwd):
                 return err("NOT_FOUND", f"cwd not found: {params.cwd}")
@@ -874,6 +903,7 @@ async def Read(
             user_path=params.file_path,
             project_root=_project_root(ctx),
             workspace_root=_workspace_root(ctx),
+            extra_read_roots=_extra_read_roots(ctx),
         )
     except PathGuardError as exc:
         return _path_error_result(exc)
@@ -1289,6 +1319,7 @@ async def Glob(
             user_path=params.path,
             project_root=_project_root(ctx),
             workspace_root=_workspace_root(ctx),
+            extra_read_roots=_extra_read_roots(ctx),
         )
     except PathGuardError as exc:
         return _path_error_result(exc)
@@ -1532,6 +1563,7 @@ async def Grep(
         search_path = resolve_for_search(
             user_path=params.path,
             project_root=_project_root(ctx),
+            extra_read_roots=_extra_read_roots(ctx),
             workspace_root=_workspace_root(ctx),
         )
     except PathGuardError as exc:
@@ -1825,6 +1857,7 @@ async def LS(
             user_path=params.path,
             project_root=_project_root(ctx),
             workspace_root=_workspace_root(ctx),
+            extra_read_roots=_extra_read_roots(ctx),
         )
     except PathGuardError as exc:
         return _path_error_result(exc)
@@ -2219,6 +2252,52 @@ async def AskUserQuestion(
         return err("INTERNAL", f"AskUserQuestion failed: {exc}")
 
 
+def _build_plan_artifact_path(*, title: str | None) -> Path:
+    plan_root = (Path.home() / ".agent" / "plans").expanduser().resolve()
+    ts = datetime.now().strftime("%Y%m%d-%H%M")
+    raw = str(title or "plan").strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", raw).strip("-")
+    if not slug:
+        slug = "plan"
+    return plan_root / f"{ts}-{slug}.md"
+
+
+@tool(
+    "Finalize plan artifact and request approval to leave Plan Mode.",
+    name="ExitPlanMode",
+    usage_rules=EXIT_PLAN_MODE_USAGE_RULES,
+)
+async def ExitPlanMode(
+    params: ExitPlanModeInput,
+    ctx: Annotated[SystemToolContext, Depends(get_system_tool_context)] = None,  # type: ignore[assignment]
+) -> dict[str, Any]:
+    del ctx
+    try:
+        path = _build_plan_artifact_path(title=params.title)
+        await _atomic_write_text(path, params.plan_markdown, encoding="utf-8")
+        execution_prompt = str(params.execution_prompt or "").strip()
+        if not execution_prompt:
+            execution_prompt = "请基于已批准的计划开始执行。"
+
+        logger.info(f"ExitPlanMode wrote plan artifact: {path}")
+        return ok(
+            data={
+                "status": "waiting_for_plan_approval",
+                "plan_path": str(path),
+                "summary": params.summary,
+                "execution_prompt": execution_prompt,
+            },
+            message=f"Plan is ready for approval: {path}",
+            meta={
+                "status": "waiting_for_plan_approval",
+                "plan_path": str(path),
+            },
+        )
+    except Exception as exc:
+        logger.error(f"ExitPlanMode failed: {exc}", exc_info=True)
+        return err("INTERNAL", f"ExitPlanMode failed: {exc}")
+
+
 # Backward-compatible aliases for tests/importers.
 _TodoItem = TodoItem
 _TodoWriteInput = TodoWriteInput
@@ -2235,5 +2314,6 @@ SYSTEM_TOOLS: list[Tool] = [
     LS,
     TodoWrite,
     WebFetch,
+    ExitPlanMode,
     AskUserQuestion,
 ]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from comate_agent_sdk.agent.compaction import CompactionService
 from comate_agent_sdk.agent.llm_levels import LLMLevel
@@ -63,6 +63,9 @@ class AgentRuntime(
     _lock_header_from_snapshot: bool = field(default=False, repr=False, init=False)
     _tools_allowlist_mode: bool = field(default=False, repr=False, init=False)
     _requested_tool_names: list[str] = field(default_factory=list, repr=False, init=False)
+    _mode: Literal["act", "plan"] = field(default="act", repr=False, init=False)
+    _active_mode_snapshot: Literal["act", "plan"] | None = field(default=None, repr=False, init=False)
+    _pending_plan_approval: dict[str, str] | None = field(default=None, repr=False, init=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.options, RuntimeAgentOptions):
@@ -73,6 +76,57 @@ class AgentRuntime(
         from comate_agent_sdk.agent.init import init_runtime_from_template
 
         init_runtime_from_template(self)
+
+    def get_mode(self) -> Literal["act", "plan"]:
+        return self._mode
+
+    def set_mode(self, mode: Literal["act", "plan"] | str) -> None:
+        normalized = str(mode).strip().lower()
+        if normalized not in {"act", "plan"}:
+            raise ValueError(f"Unsupported mode: {mode}")
+        self._mode = normalized  # type: ignore[assignment]
+        self._context.set_plan_mode(self._mode == "plan")
+
+    def cycle_mode(self) -> Literal["act", "plan"]:
+        next_mode: Literal["act", "plan"] = "plan" if self._mode == "act" else "act"
+        self.set_mode(next_mode)
+        return next_mode
+
+    def arm_plan_approval(
+        self,
+        *,
+        plan_path: str,
+        summary: str,
+        execution_prompt: str,
+    ) -> None:
+        self._pending_plan_approval = {
+            "plan_path": plan_path,
+            "summary": summary,
+            "execution_prompt": execution_prompt,
+        }
+
+    def has_pending_plan_approval(self) -> bool:
+        return self._pending_plan_approval is not None
+
+    def pending_plan_approval(self) -> dict[str, str] | None:
+        if self._pending_plan_approval is None:
+            return None
+        return dict(self._pending_plan_approval)
+
+    def approve_plan(self) -> str:
+        pending = self._pending_plan_approval
+        self._pending_plan_approval = None
+        self.set_mode("act")
+        if pending is None:
+            return "请基于已批准的计划开始执行。"
+        execution_prompt = str(pending.get("execution_prompt", "")).strip()
+        if execution_prompt:
+            return execution_prompt
+        return "请基于已批准的计划开始执行。"
+
+    def reject_plan(self) -> None:
+        self._pending_plan_approval = None
+        self.set_mode("plan")
 
     # ── 懒加载委托方法（解决循环导入）────────────────────────────
 

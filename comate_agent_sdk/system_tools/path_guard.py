@@ -64,7 +64,13 @@ def _ensure_no_symlink_traversal(path: Path, root: Path) -> None:
             )
 
 
-def resolve_for_read(*, user_path: str, project_root: Path, workspace_root: Path | None) -> Path:
+def resolve_for_read(
+    *,
+    user_path: str,
+    project_root: Path,
+    workspace_root: Path | None,
+    extra_read_roots: tuple[Path, ...] = (),
+) -> Path:
     if not user_path or not user_path.strip():
         raise PathGuardError("INVALID_ARGUMENT", "file_path cannot be empty")
 
@@ -92,6 +98,7 @@ def resolve_for_read(*, user_path: str, project_root: Path, workspace_root: Path
     allowed_roots: list[Path] = [project_root_resolved]
     if workspace_root is not None:
         allowed_roots.append(workspace_root.resolve())
+    allowed_roots.extend(extra_read_roots)
 
     _ensure_not_sensitive(resolved)
     _ensure_under_roots(resolved, allowed_roots)
@@ -103,6 +110,7 @@ def resolve_for_search(
     user_path: str | None,
     project_root: Path,
     workspace_root: Path | None,
+    extra_read_roots: tuple[Path, ...] = (),
 ) -> Path:
     if user_path is None:
         return project_root.resolve()
@@ -110,6 +118,7 @@ def resolve_for_search(
         user_path=user_path,
         project_root=project_root,
         workspace_root=workspace_root,
+        extra_read_roots=extra_read_roots,
     )
 
 

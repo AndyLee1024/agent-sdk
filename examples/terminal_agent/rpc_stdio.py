@@ -212,6 +212,8 @@ class StdioRPCBridge:
                 if reason == "waiting_for_input":
                     waiting_for_input = True
                     stop_reason = "waiting_for_input"
+                if reason == "waiting_for_plan_approval":
+                    stop_reason = "waiting_for_plan_approval"
         except asyncio.CancelledError:
             stop_reason = "cancelled"
             raise
@@ -219,7 +221,10 @@ class StdioRPCBridge:
             logger.exception("rpc prompt stream failed")
             raise RuntimeError(f"stream failed: {exc}") from exc
 
-        status = "waiting_for_input" if waiting_for_input else "completed"
+        if stop_reason == "waiting_for_plan_approval":
+            status = "waiting_for_plan_approval"
+        else:
+            status = "waiting_for_input" if waiting_for_input else "completed"
         return {"status": status, "stop_reason": stop_reason}
 
     async def _finalize_prompt_task(

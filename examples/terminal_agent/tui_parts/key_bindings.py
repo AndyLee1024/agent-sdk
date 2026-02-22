@@ -159,6 +159,11 @@ class KeyBindingsMixin:
         def _active_prev(event) -> None:
             event.current_buffer.complete_previous()
 
+        @bindings.add("s-tab", filter=normal_mode & ~has_completions)
+        def _cycle_mode(event) -> None:
+            del event
+            self._cycle_agent_mode()
+
         @bindings.add("up", filter=normal_mode)
         def _active_prev_up(event) -> None:
             buffer = event.current_buffer

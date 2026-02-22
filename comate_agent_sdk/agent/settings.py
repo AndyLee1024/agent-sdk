@@ -46,6 +46,10 @@ class SettingsConfig:
     llm_levels: dict[str, str] | None = None
     llm_levels_base_url: dict[str, str | None] | None = None
     llm_levels_api_key: dict[str, str | None] | None = None
+    permissions_allow: list[str] | None = None
+    permissions_deny: list[str] | None = None
+    plan_mode_prompt_template: str | None = None
+    plan_mode_reminder_template: str | None = None
 
 
 def load_settings_file(path: Path) -> SettingsConfig | None:
@@ -82,6 +86,10 @@ def load_settings_file(path: Path) -> SettingsConfig | None:
     llm_levels: dict[str, str] | None = None
     llm_levels_base_url: dict[str, str | None] | None = None
     llm_levels_api_key: dict[str, str | None] | None = None
+    permissions_allow: list[str] | None = None
+    permissions_deny: list[str] | None = None
+    plan_mode_prompt_template: str | None = None
+    plan_mode_reminder_template: str | None = None
 
     # 解析 llm_levels
     raw_levels = data.get("llm_levels")
@@ -122,10 +130,62 @@ def load_settings_file(path: Path) -> SettingsConfig | None:
                     continue
                 llm_levels_api_key[k] = v
 
-    if llm_levels is None and llm_levels_base_url is None and llm_levels_api_key is None:
+    # 解析 permissions DSL
+    raw_permissions = data.get("permissions")
+    if raw_permissions is not None:
+        if not isinstance(raw_permissions, dict):
+            logger.warning(f"settings.json permissions 不是对象，跳过: {resolved}")
+        else:
+            raw_allow = raw_permissions.get("allow")
+            raw_deny = raw_permissions.get("deny")
+
+            if raw_allow is not None:
+                if not isinstance(raw_allow, list):
+                    logger.warning(f"settings.json permissions.allow 不是数组，跳过: {resolved}")
+                else:
+                    permissions_allow = [str(v) for v in raw_allow if isinstance(v, str) and str(v).strip()]
+
+            if raw_deny is not None:
+                if not isinstance(raw_deny, list):
+                    logger.warning(f"settings.json permissions.deny 不是数组，跳过: {resolved}")
+                else:
+                    permissions_deny = [str(v) for v in raw_deny if isinstance(v, str) and str(v).strip()]
+
+    # 解析 plan mode 提示词占位
+    raw_plan_prompt = data.get("plan_mode_prompt_template")
+    if raw_plan_prompt is not None:
+        if isinstance(raw_plan_prompt, str):
+            plan_mode_prompt_template = raw_plan_prompt
+        else:
+            logger.warning(f"settings.json plan_mode_prompt_template 不是字符串，跳过: {resolved}")
+
+    raw_plan_reminder = data.get("plan_mode_reminder_template")
+    if raw_plan_reminder is not None:
+        if isinstance(raw_plan_reminder, str):
+            plan_mode_reminder_template = raw_plan_reminder
+        else:
+            logger.warning(f"settings.json plan_mode_reminder_template 不是字符串，跳过: {resolved}")
+
+    if (
+        llm_levels is None
+        and llm_levels_base_url is None
+        and llm_levels_api_key is None
+        and permissions_allow is None
+        and permissions_deny is None
+        and plan_mode_prompt_template is None
+        and plan_mode_reminder_template is None
+    ):
         return None
 
-    return SettingsConfig(llm_levels=llm_levels, llm_levels_base_url=llm_levels_base_url, llm_levels_api_key=llm_levels_api_key)
+    return SettingsConfig(
+        llm_levels=llm_levels,
+        llm_levels_base_url=llm_levels_base_url,
+        llm_levels_api_key=llm_levels_api_key,
+        permissions_allow=permissions_allow,
+        permissions_deny=permissions_deny,
+        plan_mode_prompt_template=plan_mode_prompt_template,
+        plan_mode_reminder_template=plan_mode_reminder_template,
+    )
 
 
 def resolve_settings(
@@ -182,6 +242,18 @@ def resolve_settings(
             llm_levels=cfg.llm_levels if cfg.llm_levels is not None else result.llm_levels,
             llm_levels_base_url=cfg.llm_levels_base_url if cfg.llm_levels_base_url is not None else result.llm_levels_base_url,
             llm_levels_api_key=cfg.llm_levels_api_key if cfg.llm_levels_api_key is not None else result.llm_levels_api_key,
+            permissions_allow=cfg.permissions_allow if cfg.permissions_allow is not None else result.permissions_allow,
+            permissions_deny=cfg.permissions_deny if cfg.permissions_deny is not None else result.permissions_deny,
+            plan_mode_prompt_template=(
+                cfg.plan_mode_prompt_template
+                if cfg.plan_mode_prompt_template is not None
+                else result.plan_mode_prompt_template
+            ),
+            plan_mode_reminder_template=(
+                cfg.plan_mode_reminder_template
+                if cfg.plan_mode_reminder_template is not None
+                else result.plan_mode_reminder_template
+            ),
         )
 
     # 输出配置加载日志

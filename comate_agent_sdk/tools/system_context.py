@@ -36,6 +36,8 @@ class SystemToolContext:
     token_cost: TokenCost | None = None
     llm_levels: dict[str, "BaseChatModel"] | None = None
     agent_context: "ContextIR | None" = None
+    extra_write_roots: tuple[Path, ...] = ()
+    extra_read_roots: tuple[Path, ...] = ()
 
 
 _SYSTEM_TOOL_CONTEXT: ContextVar[SystemToolContext | None] = ContextVar(
@@ -72,6 +74,8 @@ def bind_system_tool_context(
     token_cost: TokenCost | None = None,
     llm_levels: dict[str, "BaseChatModel"] | None = None,
     agent_context: "ContextIR | None" = None,
+    extra_write_roots: tuple[Path, ...] = (),
+    extra_read_roots: tuple[Path, ...] = (),
 ) -> Iterator[None]:
     """临时注入 SystemToolContext（并发安全）。"""
     root = project_root.resolve()
@@ -83,6 +87,15 @@ def bind_system_tool_context(
         resolved_workspace_root = (resolved_session_root / "workspace").resolve()
     else:
         resolved_workspace_root = (root / ".agent_workspace").resolve()
+
+    normalized_extra_write_roots = tuple(
+        p.expanduser().resolve()
+        for p in extra_write_roots
+    )
+    normalized_extra_read_roots = tuple(
+        p.expanduser().resolve()
+        for p in extra_read_roots
+    )
 
     token = _SYSTEM_TOOL_CONTEXT.set(
         SystemToolContext(
@@ -96,6 +109,8 @@ def bind_system_tool_context(
             token_cost=token_cost,
             llm_levels=llm_levels,
             agent_context=agent_context,
+            extra_write_roots=normalized_extra_write_roots,
+            extra_read_roots=normalized_extra_read_roots,
         )
     )
     try:
